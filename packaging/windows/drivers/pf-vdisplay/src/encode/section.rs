@@ -113,6 +113,10 @@ impl AuSection {
             .store(slot.qpc_pts, Ordering::Relaxed);
         self.u32_at(base + offset_of!(AuSlot, flags))
             .store(slot.flags, Ordering::Relaxed);
+        self.u64_at(base + offset_of!(AuSlot, qpc_submit))
+            .store(slot.qpc_submit, Ordering::Relaxed);
+        self.u64_at(base + offset_of!(AuSlot, qpc_published))
+            .store(slot.qpc_published, Ordering::Relaxed);
         self.slot_state(i).store(au::PUBLISHED, Ordering::Release);
     }
 

@@ -93,12 +93,10 @@ The document is validated as a whole, and **one bad entry disables every hook** 
   unsigned. It also *warns* (and still signs) when that file isn't owned by you or is readable by
   anyone else — `chmod 600` it.
 
-So check the log after editing the file: `journalctl --user -u punktfunk-host` on Linux, or the web
-console's **Logs** page on either platform. Those lines name a hook by its webhook's
-`scheme://host` or its command's program name, plus a short id — the URL path and the command's
-arguments are left out, because that's where a Slack or ntfy token and an `Authorization:` header
-live, and the **Logs** page is served over the API verbatim. The id is the same on every line about
-one hook, so two hooks sharing a program or a webhook host stay apart.
+Check the log after editing: `journalctl --user -u punktfunk-host` on Linux, or the console's
+**Troubleshooting** page on either platform. Hook lines are identified by the webhook's
+`scheme://host` or the command's program name plus a short id — never the URL path or arguments,
+which is where tokens live.
 
 A `run` command's shell one-liner vocabulary — the event flattened to env, values sanitized:
 
@@ -124,19 +122,14 @@ expected = "sha256=" + hmac.new(secret, body, hashlib.sha256).hexdigest()
 ok = hmac.compare_digest(request.headers["X-Punktfunk-Signature"], expected)
 ```
 
-**Rules of the road:** hooks are fire-and-forget and bounded — at most 8 in flight (extra firings
-are dropped with a log line, never queued), and a command that outlives its timeout is killed.
-Hook commands run without elevation (as the host user on Linux and its WTS session user on
-Windows), so `hooks.json` is operator-privileged config. On Linux, when a command names a script by
-**absolute path**, the host checks that file *and every directory above
-it* is owned by you (or root) and not group/world-writable, and refuses to run it — loudly, in the
-log — if it isn't: whoever can rename an entry in a directory chooses what runs out of it. (A
-world-writable directory with the sticky bit, like `/tmp`, passes — there only an entry's own owner
-can replace it.) Quoting is understood, so a path with a space in it is checked like any other.
-Write the full path (`/home/me/.config/punktfunk/scripts/on-stream.sh`, not `~/…`) if you want that
-check: the shell expands `~` and looks up PATH names like `makoctl` only afterwards, so those are
-never checked. On Windows there is no per-script check — the ACL on the config directory is the
-boundary.
+**Rules of the road:** hooks are fire-and-forget and bounded — at most 8 in flight (extras are
+dropped with a log line, never queued), and a command that outlives its timeout is killed. Commands
+run unprivileged (as the host user on Linux, its WTS session user on Windows). On Linux, a command
+that names a script by **absolute path** is safety-checked: the file *and every directory above it*
+must be owned by you (or root) and not group/world-writable, or the host refuses loudly in the log.
+(`/tmp`-style sticky world-writable dirs pass.) Write the full path — `~/…` and bare PATH names like
+`makoctl` are expanded by the shell afterwards and are never checked. On Windows the ACL on the
+config directory is the boundary.
 
 The two simplest cases also exist as plain [host.env](/docs/configuration) settings, no
 `hooks.json` needed: `PUNKTFUNK_ON_CONNECT_CMD` and `PUNKTFUNK_ON_DISCONNECT_CMD`.

@@ -1,10 +1,7 @@
-// The streaming overlay HUD, tiered by StatsVerbosity (the Android client's 3-tier semantics):
-//  * compact — one glass-pill line: fps · end-to-end p50 · throughput (+ loss when lossy);
-//  * normal — mode + fps/throughput, the unified latency HEADLINE (design/stats-unification.md
-//    — end-to-end under stage-2, capture→received under the stage-1 fallback), the loss
-//    counter, a capture hint (shown until input is captured), and disconnect;
-//  * detailed — everything normal has plus the stage equation line(s) under the headline.
-// `.off` never reaches this view (ContentView gates the overlay on the tier).
+// The streaming overlay HUD: the core formats every stats line (`SessionModel.hudLines`, one
+// vocabulary for every client) and this view paints them by role on one glass card, beside the
+// Apple-only chrome (the tvOS access line, the capture hints, the buttons). `.off` never
+// reaches this view (ContentView gates the overlay on the tier).
 
 import PunktfunkKit
 import SwiftUI
@@ -44,56 +41,33 @@ struct StreamHUDView: View {
 
     // MARK: - Compact tier
 
-    /// One line: `{fps} fps · {e2e p50} ms · {mbps} Mb/s`. The ms segment is the best available
-    /// latency headline (stage-2 end-to-end, else the stage-1 capture→received) and is omitted until
-    /// either is valid. Loss appends in the same quiet styling the full HUD's lost line uses.
+    /// The core's one Compact line, plus any warning a platform raises at that tier.
     private var compactContent: some View {
-        HStack(spacing: 6) {
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
             Circle()
                 .fill(Color.accentColor)
                 .frame(width: 7, height: 7)
-            Text(compactLine)
-                .font(.system(.caption, design: .monospaced))
-            if model.lostFrames > 0 {
-                Text("· lost \(model.lostFrames)")
-                    .font(.system(.caption2, design: .monospaced))
-                    .foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 2) {
+                ForEach(Array(model.hudLines.enumerated()), id: \.offset) { _, line in
+                    Text(line.text)
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundStyle(style(line.role))
+                }
             }
         }
-    }
-
-    private var compactLine: String {
-        var parts = ["\(model.fps) fps"]
-        if model.endToEndValid {
-            // Floor-shaved (design/apple-presentation-rebuild.md): the OS present pipeline's
-            // fixed depth is excluded, so the headline describes Punktfunk's own latency.
-            parts.append(String(format: "%.1f ms", model.endToEndAdjP50Ms))
-        } else if model.hostNetworkValid {
-            parts.append(String(format: "%.1f ms", model.hostNetworkP50Ms))
-        }
-        parts.append(String(format: "%.1f Mb/s", model.mbps))
-        return parts.joined(separator: " · ")
     }
 
     // MARK: - Normal / detailed tiers
 
     private var fullContent: some View {
         VStack(alignment: placement.isTrailing ? .trailing : .leading, spacing: 4) {
-            HStack(spacing: 6) {
-                Circle()
-                    .fill(Color.accentColor)
-                    .frame(width: 7, height: 7)
-                Text("\(connection.width)×\(connection.height)@\(connection.refreshHz)  \(model.fps) fps  \(model.mbps, specifier: "%.1f") Mb/s")
-                    .font(.system(.caption, design: .monospaced))
-                // Which settings profile this session resolved to, if any (design §5.2). Near-zero
-                // cost, and it answers "which profile am I on?" without leaving the stream —
-                // otherwise the only evidence is the settings themselves, which is a guessing game.
-                if let profile = model.settings.profileName {
-                    Text("· \(profile)")
+            if let first = model.hudLines.first {
+                HStack(spacing: 6) {
+                    Circle()
+                        .fill(Color.accentColor)
+                        .frame(width: 7, height: 7)
+                    Text(first.text)
                         .font(.system(.caption, design: .monospaced))
-                        .foregroundStyle(
-                            Color(hex: model.settings.profileAccent ?? "") ?? Color.accentColor)
-                        .lineLimit(1)
                 }
             }
             #if os(tvOS)
@@ -111,127 +85,10 @@ struct StreamHUDView: View {
                     .foregroundStyle(.secondary)
             }
             #endif
-            if model.endToEndValid {
-                // Stage-2: the end-to-end headline (capture→on-glass, measured directly, skew-
-                // corrected) — "(same-host clock)" when the host didn't answer the skew
-                // handshake. FLOOR-SHAVED (design/apple-presentation-rebuild.md): the OS present
-                // pipeline's fixed depth is excluded so the number describes Punktfunk's own
-                // latency; the detailed tier shows the excluded floor as its own line, and the
-                // stats log keeps the raw values.
-                Text("end-to-end \(model.endToEndAdjP50Ms, specifier: "%.1f") ms p50 · \(model.endToEndAdjP95Ms, specifier: "%.1f") p95 · capture→on-glass\(model.endToEndSkewCorrected ? "" : " (same-host clock)")")
+            ForEach(Array(model.hudLines.dropFirst().enumerated()), id: \.offset) { _, line in
+                Text(line.text)
                     .font(.system(.caption2, design: .monospaced))
-                    .foregroundStyle(.secondary)
-                // The equation (detailed tier only): the stages tiling the headline interval
-                // (per-window p50s — they only approximately sum to the directly-measured
-                // total). With a host that reports per-AU timings (0xCF) the first term splits
-                // into host + network (phase 2); an old host keeps the combined term. The
-                // display term is floor-shaved like the headline, so the equation still sums.
-                if verbosity == .detailed && model.hostNetworkValid && model.decodeValid && model.displayValid {
-                    if model.splitValid {
-                        Text("= host \(model.hostP50Ms, specifier: "%.1f") + network \(model.networkP50Ms, specifier: "%.1f") + decode \(model.decodeP50Ms, specifier: "%.1f") + display \(model.displayAdjP50Ms, specifier: "%.1f")")
-                            .font(.system(.caption2, design: .monospaced))
-                            .foregroundStyle(.secondary)
-                    } else {
-                        Text("= host+network \(model.hostNetworkP50Ms, specifier: "%.1f") + decode \(model.decodeP50Ms, specifier: "%.1f") + display \(model.displayAdjP50Ms, specifier: "%.1f")")
-                            .font(.system(.caption2, design: .monospaced))
-                            .foregroundStyle(.secondary)
-                    }
-                    if model.osFloorValid {
-                        // The excluded OS term, kept visible for honesty: display-pipeline
-                        // minimum no client can pace under (~2 refresh intervals composited).
-                        Text("os present +\(model.osFloorP50Ms, specifier: "%.1f") excluded (display pipeline minimum)")
-                            .font(.system(.caption2, design: .monospaced))
-                            .foregroundStyle(.tertiary)
-                    }
-                    // The deadline link's frame-latency ASK beside its property READBACK. ⚠ The
-                    // readback is NOT a grant — the property echoes whatever we stored (field
-                    // 2026-08-13: 1.00 beside a 32.5 ms `os present` floor). The line earns its
-                    // place because a readback that DIFFERS from the ask is the one clamp signal
-                    // the API can give, and on tvOS the screen is the only place to read either
-                    // (no log is reachable on an Apple TV; see PresentLinkInfo).
-                    if model.linkInfoValid {
-                        Text("link latency ask \(model.linkLatencyAskFrames, specifier: "%.2f") readback \(model.linkLatencyFrames, specifier: "%.2f") · range \(model.linkRangeMinHz, specifier: "%.0f")-\(model.linkRangeMaxHz, specifier: "%.0f") Hz · drawables \(model.linkDrawables)")
-                            .font(.system(.caption2, design: .monospaced))
-                            .foregroundStyle(.tertiary)
-                    }
-                    // The clock-offset tripwire: host-anchored meters refused samples as
-                    // impossible (≤ 0 after offset correction) this second. When this shows,
-                    // e2e and host+network above are TRUNCATED distributions — a wrong skew
-                    // offset shifted them and the impossible half was trimmed — so their
-                    // p50/p95 flatter the stream (the field "e2e 0–3 ms" reading). Orange on
-                    // purpose: every other stat here stays legible-quiet, but a number that
-                    // has stopped meaning anything must not.
-                    if model.skewTrimPerS > 0 {
-                        Text("clock offset suspect — \(model.skewTrimPerS)/s impossible samples trimmed; e2e & host+network unreliable")
-                            .font(.system(.caption2, design: .monospaced))
-                            .foregroundStyle(.orange)
-                    }
-                    // Client-queue wait (reassembly receipt → decode pull, ABI v9 split): ~0 on
-                    // a healthy stream and hidden as noise; shown from 2 ms — a persistent value
-                    // is a client-side standing backlog that pre-split builds displayed as
-                    // "network" (the 2026-07 two-pair plateau). The core's standing-latency
-                    // bleed logs alongside when it acts on the same state.
-                    if model.clientQueueValid && model.clientQueueP50Ms >= 2 {
-                        Text("client queue +\(model.clientQueueP50Ms, specifier: "%.1f") (receive backlog — standing if it persists)")
-                            .font(.system(.caption2, design: .monospaced))
-                            .foregroundStyle(.tertiary)
-                    }
-                }
-            } else if model.hostNetworkValid {
-                // Stage-1 fallback presenter: the layer decodes + presents internally with no
-                // per-frame stamp, so the honest headline ends at receipt. The host/network
-                // split still applies there (receipt is presenter-independent) — it becomes the
-                // only equation line (detailed tier); without it, host+network IS the whole
-                // measured interval.
-                Text("capture→received \(model.hostNetworkP50Ms, specifier: "%.1f") ms p50 · \(model.hostNetworkP95Ms, specifier: "%.1f") p95\(model.hostNetworkSkewCorrected ? "" : " (same-host clock)")")
-                    .font(.system(.caption2, design: .monospaced))
-                    .foregroundStyle(.secondary)
-                if verbosity == .detailed && model.splitValid {
-                    Text("= host \(model.hostP50Ms, specifier: "%.1f") + network \(model.networkP50Ms, specifier: "%.1f")")
-                        .font(.system(.caption2, design: .monospaced))
-                        .foregroundStyle(.secondary)
-                }
-            }
-            // The AUDIO plane's own latency (detailed tier). Deliberately OUTSIDE the video branch
-            // above: it is not a term of that equation — audio is steered to MEET the video total,
-            // never summed into it — and the depth is exactly as worth seeing under the stage-1
-            // fallback presenter, which measures no end-to-end at all.
-            //
-            // `buffer` is how much decoded audio is queued ahead of the speaker; `a/v` is where
-            // that puts it relative to the picture (+ = audio behind). Both, not just the depth: a
-            // deep ring on a jittery link is the adaptive floor doing its job, and only the offset
-            // distinguishes that from a ring holding audio late. Neither number was renderable
-            // anywhere before — they lived in a periodic log line — which is how a report of "the
-            // audio delay seems way too high" got triaged to a conclusion with no instrument.
-            if verbosity == .detailed && model.audioValid && model.audioBufferMs > 0 {
-                // String(format:) for the signed offset: `%+d` has no specifier-interpolation
-                // equivalent, and Swift's Int is 64-bit (%lld, never the 32-bit %d).
-                Text(model.audioAvOffsetMs == 0
-                    ? "audio buffer \(model.audioBufferMs) ms"
-                    : String(
-                        format: "audio buffer %lld ms · a/v %+lld ms",
-                        model.audioBufferMs, model.audioAvOffsetMs))
-                    .font(.system(.caption2, design: .monospaced))
-                    .foregroundStyle(.tertiary)
-            }
-            // The RESOLVED audio format, and only when it is worth a line: `audioFormatLabel` is
-            // nil on the Opus plane every ordinary session runs. Unlike the numbers above it is
-            // NOT gated to the detailed tier — it is the one thing a user who turned lossless on
-            // needs to see, because the failure this guards against (design/hi-res-audio.md §4.3)
-            // is a session that costs the bandwidth and delivers nothing, and that is
-            // indistinguishable from success without a surface naming what the HOST resolved.
-            if let format = model.audioFormatLabel {
-                Text("audio \(format)")
-                    .font(.system(.caption2, design: .monospaced))
-                    .foregroundStyle(.tertiary)
-            }
-            if model.lostFrames > 0 {
-                // Unrecoverable network drops this window; hidden while the link is clean.
-                // String(format:) rather than specifier interpolation: the literal % would
-                // otherwise land in the LocalizedStringKey's format string as a bogus conversion.
-                Text(String(format: "lost %d (%.1f%%)", model.lostFrames, model.lostPct))
-                    .font(.system(.caption2, design: .monospaced))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(style(line.role))
             }
             // Capture hint, shown only until input is captured — how to grab it. The RELEASE
             // shortcut is intentionally not surfaced in the overlay (it lives on the Stream menu
@@ -280,6 +137,16 @@ struct StreamHUDView: View {
             Button("Disconnect") { model.disconnect() }
                 .font(.geist(12, relativeTo: .caption))
             #endif
+        }
+    }
+
+    /// The HUD's quiet palette: breakdowns recede, and only a warning is allowed to shout.
+    private func style(_ role: PunktfunkConnection.HudLine.Role) -> AnyShapeStyle {
+        switch role {
+        case .primary: return AnyShapeStyle(.primary)
+        case .detail: return AnyShapeStyle(.secondary)
+        case .muted: return AnyShapeStyle(.tertiary)
+        case .warn: return AnyShapeStyle(.orange)
         }
     }
 

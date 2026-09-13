@@ -19,7 +19,7 @@ pub(crate) enum SpawnEvent {
     /// The child presented its first frame (its window is up and streaming).
     Ready,
     /// One `stats:` line, already human-formatted by the session (per 1 s window).
-    Stats(String),
+    Stats(Box<punktfunk_core::hud::StatsSnapshot>),
     /// The child exited (stdout EOF + reap; a kill lands here too). `error`/`ended`
     /// carry the contract lines seen on the way out, when any — routing keys off those,
     /// which say strictly more than a number. `code` is the process exit status (-1 = no
@@ -63,7 +63,7 @@ enum ChildLine {
         trust_rejected: bool,
     },
     Ended(String),
-    Stats(String),
+    Stats(Box<punktfunk_core::hud::StatsSnapshot>),
     /// The session window's logical size settled here under match-window — the SPAWNER
     /// persists it (design/client-architecture-split.md §5). This shell ignored the line
     /// until 2026-07-31, so its sessions fell back to persisting from the renderer.
@@ -74,8 +74,11 @@ enum ChildLine {
 }
 
 fn parse_line(line: &str) -> Option<ChildLine> {
-    if let Some(stats) = line.strip_prefix("stats: ") {
-        return Some(ChildLine::Stats(stats.to_string()));
+    // The text `stats:` line is for a person reading a log; the page renders the snapshot.
+    if let Some(json) = line.strip_prefix("stats-json: ") {
+        return serde_json::from_str(json)
+            .ok()
+            .map(|s| ChildLine::Stats(Box::new(s)));
     }
     let v: serde_json::Value = serde_json::from_str(line).ok()?;
     if v.get("ready").and_then(|r| r.as_bool()) == Some(true) {
@@ -326,11 +329,12 @@ mod tests {
             Some(ChildLine::Ended(m)) => assert_eq!(m, "Host ended the session"),
             _ => panic!("ended line"),
         }
-        // Stats lines become Stats events; stray output never becomes an event.
-        match parse_line("stats: 1280\u{00D7}800@60 \u{00B7} 60 fps") {
-            Some(ChildLine::Stats(s)) => assert!(s.starts_with("1280")),
+        // The snapshot becomes a Stats event; the text line and stray output never do.
+        match parse_line(r#"stats-json: {"width":1280,"received":60}"#) {
+            Some(ChildLine::Stats(s)) => assert_eq!((s.width, s.received), (1280, 60)),
             _ => panic!("stats line"),
         }
+        assert!(parse_line("stats: 1280\u{00D7}800@60 \u{00B7} 60 fps").is_none());
         // The match-window report: the SPAWNER persists it (§5) — dropping this line was
         // why Windows sessions fell back to renderer-local persistence.
         match parse_line("{\"window\":{\"w\":1600,\"h\":900}}") {

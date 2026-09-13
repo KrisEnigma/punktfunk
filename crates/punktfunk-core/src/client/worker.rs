@@ -29,6 +29,8 @@ pub(crate) struct WorkerArgs {
     /// [`crate::quic::CLIENT_CAP_AUDIO_HIRES`].
     pub(crate) audio_rate_hz: u32,
     pub(crate) audio_bits: u8,
+    /// Surround coupling asked for; the host answers in `Welcome::audio_layout`.
+    pub(crate) audio_layout: crate::audio::AudioLayout,
     pub(crate) video_codecs: u8,
     pub(crate) preferred_codec: u8,
     pub(crate) display_hdr: Option<HdrMeta>,
@@ -88,6 +90,8 @@ pub(crate) struct WorkerArgs {
     /// Seeded with the connect-time estimate; the control task's mid-stream re-syncs
     /// update it.
     pub(crate) clock_offset: Arc<AtomicI64>,
+    /// Smoothed QUIC round trip (µs) for the overlay; a pump task samples it.
+    pub(crate) rtt_us: Arc<AtomicU32>,
     /// Embedder decode-stage samples. The pump drains a window mean into the ABR
     /// decode signal.
     pub(crate) decode_lat: Arc<Mutex<DecodeLatAcc>>,

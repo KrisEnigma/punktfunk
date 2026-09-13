@@ -134,6 +134,12 @@ extension SettingsView {
         #endif
     }
 
+    static let advancedStatisticsDescription =
+        "Off shows the figures Moonlight's overlay also shows. On shows capture to glass as "
+            + "p50/p95 and every stage between."
+
+    static let statsDocsURL = URL(string: "https://docs.punktfunk.unom.io/docs/stats")!
+
     // MARK: - Controllers
 
     /// tvOS's cluster caption (the touch/desktop form describes each row inline instead).

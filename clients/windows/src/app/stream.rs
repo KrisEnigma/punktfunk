@@ -1,24 +1,23 @@
 //! The stream status page: streams run in the spawned `punktfunk-session` child's own window,
 //! so the shell shows a status card in the app's card language — host header, the child's live
-//! `stats:` line as a chip row + stage lines, the in-window shortcuts, and a Disconnect.
+//! stats window as a chip row + stage lines, the in-window shortcuts, and a Disconnect.
 
 use super::lucide;
 use super::style::{edges, uniform};
 use std::sync::Arc;
 use windows_reactor::*;
 
-/// One HUD refresh: the session child's latest formatted `stats:` line, mirrored into root state
+/// One HUD refresh: the session child's latest `stats-json:` window, mirrored into root state
 /// by the poll thread (`pf-hud`) and passed down as a prop.
 #[derive(Clone, Default, PartialEq)]
 pub(crate) struct HudSample {
-    /// The session child's latest formatted `stats:` line, for the status page. Empty before the
-    /// child's first stats window.
-    pub(crate) stats_line: String,
+    /// `None` before the child's first stats window.
+    pub(crate) stats: Option<punktfunk_core::hud::StatsSnapshot>,
 }
 
 /// Spawn mode's Stream screen: the stream runs in the punktfunk-session child's own
 /// window, so the shell shows a status card in the app's card language — monogram +
-/// host header, the child's live `stats:` line as a chip row + stage lines, the
+/// host header, the child's live stats window as a chip row + stage lines, the
 /// in-window shortcuts, and a Disconnect that kills the child (its exit event routes
 /// the app back to the host list, same as the child's window closing). No hooks.
 pub(crate) fn session_page(ctx: &Arc<super::AppCtx>, hud: &HudSample) -> Element {
@@ -54,57 +53,57 @@ pub(crate) fn session_page(ctx: &Arc<super::AppCtx>, hud: &HudSample) -> Element
     .columns([GridLength::Auto, GridLength::Star(1.0)])
     .into();
 
-    // The child prints one formatted stats line per 1 s window:
-    // "<mode> · <fps> · <Mb/s> · <path> [· HDR] | e2e … | …" — the first segment becomes
-    // a chip row (the decode path gets the status colour), the rest dim stage lines.
+    // The child's latest window in the vocabulary the user picked: line one becomes a chip
+    // row (the decode path gets the status colour), the rest dim lines.
     let mut body: Vec<Element> = vec![header];
-    if hud.stats_line.is_empty() {
-        // The child prints `stats:` lines only while its stats view is on (the Settings
-        // toggle / Ctrl+Alt+Shift+S) — say so instead of waiting forever. Browse idles in
-        // the library between launches, so no stats there is simply normal: no line.
-        if !browse {
-            let msg = if ctx.settings.lock().unwrap().show_stats {
-                "Waiting for the first stats window\u{2026}"
-            } else {
-                "Stats are off \u{2014} Ctrl+Alt+Shift+S in the stream window turns them on."
-            };
-            body.push(
-                text_block(msg)
-                    .font_size(11.0)
-                    .foreground(ThemeRef::SecondaryText)
-                    .into(),
-            );
+    match &hud.stats {
+        None => {
+            // The child prints stats only while its overlay is on (the Settings tier, or
+            // Ctrl+Alt+Shift+S) — say so instead of waiting forever. Browse idles in the
+            // library between launches, so no stats there is simply normal: no line.
+            if !browse {
+                let msg = if ctx.settings.lock().unwrap().show_stats {
+                    "Waiting for the first stats window\u{2026}"
+                } else {
+                    "Stats are off \u{2014} Ctrl+Alt+Shift+S in the stream window turns them on."
+                };
+                body.push(
+                    text_block(msg)
+                        .font_size(11.0)
+                        .foreground(ThemeRef::SecondaryText)
+                        .into(),
+                );
+            }
         }
-    } else {
-        let mut segments = hud.stats_line.split(" | ");
-        if let Some(first) = segments.next() {
-            let chips: Vec<Element> = first
-                .split(" \u{00B7} ")
-                .map(str::trim)
-                .filter(|c| !c.is_empty())
-                .map(|c| {
-                    // The `stats:` decode-path tags (see pf-client-core's session
-                    // pump). M10 removed the `vulkan`/`vaapi`/`d3d11va` tags with their
-                    // rungs; a hardware rung is now always a `native-*` one.
-                    let kind = match c {
-                        "native-vulkan" | "native-vaapi" | "native-d3d11va" | "pyrowave" => {
-                            Pill::Good
-                        }
-                        "software" => Pill::Info,
-                        _ => Pill::Neutral,
-                    };
-                    pill(c, kind).into()
-                })
-                .collect();
-            body.push(hstack(chips).spacing(6.0).into());
-        }
-        for seg in segments {
-            body.push(
-                text_block(seg.trim())
-                    .font_size(11.0)
-                    .foreground(ThemeRef::SecondaryText)
-                    .into(),
-            );
+        Some(snap) => {
+            use punktfunk_core::hud::{format, StatsVerbosity};
+            let advanced = ctx.settings.lock().unwrap().advanced_stats;
+            let mut lines = format(snap, StatsVerbosity::Detailed, advanced).into_iter();
+            if let Some(first) = lines.next() {
+                let chips: Vec<Element> = first
+                    .text
+                    .split(" \u{00B7} ")
+                    .map(str::trim)
+                    .filter(|c| !c.is_empty())
+                    .map(|c| {
+                        let kind = match c {
+                            _ if c != snap.decoder => Pill::Neutral,
+                            "software" => Pill::Info,
+                            _ => Pill::Good,
+                        };
+                        pill(c, kind).into()
+                    })
+                    .collect();
+                body.push(hstack(chips).spacing(6.0).into());
+            }
+            for line in lines {
+                body.push(
+                    text_block(&line.text)
+                        .font_size(11.0)
+                        .foreground(ThemeRef::SecondaryText)
+                        .into(),
+                );
+            }
         }
     }
 

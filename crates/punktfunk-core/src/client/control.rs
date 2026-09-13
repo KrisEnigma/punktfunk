@@ -72,6 +72,8 @@ pub(crate) struct Negotiated {
     /// `0xD3` frame duration (µs). `0` on Opus (fixed 5 ms on `0xC9`). Negotiated from path MTU,
     /// never assumed.
     pub(crate) audio_frame_us: u16,
+    /// `Welcome::audio_layout`, verbatim.
+    pub(crate) audio_layout: u8,
     /// The one codec the host will emit (`quic::CODEC_*`).
     pub(crate) codec: u8,
     /// [`crate::quic::Welcome::host_caps`], surfaced as [`NativeClient::host_caps`] so the

@@ -86,6 +86,7 @@ struct GamepadSettingsView: View {
     @AppStorage(DefaultsKey.statsVerbosity) private var statsVerbosityRaw
         = StatsVerbosity.current.rawValue
     @AppStorage(DefaultsKey.hudPlacement) private var hudPlacement = HUDPlacement.topTrailing.rawValue
+    @AppStorage(DefaultsKey.advancedStats) private var advancedStats = false
     /// The library's arrangement (shelf/grid) — one key, two surfaces: the library's own view/sort
     /// bar writes it too, so the field and this row can never disagree.
     @AppStorage(DefaultsKey.libraryView) private var libraryViewRaw = LibraryArrangement.shelf.stored
@@ -985,6 +986,12 @@ struct GamepadSettingsView: View {
                 detail: "Compact is a one-line pill; Detailed adds the latency breakdown.",
                 options: SettingsOptions.statsVerbosities, current: statsVerbosityRaw
             ) { statsVerbosityRaw = $0 },
+            toggleRow(
+                id: "advancedStats", tab: .interface, icon: "chart.line.uptrend.xyaxis",
+                label: "Advanced statistics",
+                detail: "Off shows the figures Moonlight's overlay also shows. On shows capture "
+                    + "to glass as p50/p95 and every stage between.",
+                value: $advancedStats),
             choiceRow(
                 id: "hudPlacement", tab: .interface, icon: "rectangle.inset.topright.filled",
                 label: "Overlay position",

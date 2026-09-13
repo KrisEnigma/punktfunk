@@ -164,9 +164,9 @@ pub(crate) struct Shared {
     /// The live session child (spawn mode) — the status page's Disconnect and the
     /// request-access Cancel kill it. A FRESH handle is installed per spawn.
     pub(crate) session: Mutex<crate::spawn::SessionChild>,
-    /// Latest `stats:` line from the session child (spawn mode), already formatted;
-    /// mirrored into the HUD sample for the session status page.
-    pub(crate) stats_line: Mutex<String>,
+    /// Latest stats window from the session child (spawn mode); mirrored into the HUD
+    /// sample for the session status page.
+    pub(crate) stats: Mutex<Option<punktfunk_core::hud::StatsSnapshot>>,
     /// Cancel flag for the in-flight "request access" connect. A FRESH flag is installed per
     /// request: the waiting screen's Cancel button reads it back from here and sets it, and that
     /// request's event loop (which captured the same `Arc` at spawn) then tears down silently when
@@ -540,7 +540,7 @@ fn root(cx: &mut RenderCx, ctx: &Arc<AppCtx>) -> Element {
                 .spawn(move || loop {
                     std::thread::sleep(std::time::Duration::from_millis(400));
                     set_hud.call(stream::HudSample {
-                        stats_line: shared.stats_line.lock().unwrap().clone(),
+                        stats: shared.stats.lock().unwrap().clone(),
                     });
                 })
                 .ok();

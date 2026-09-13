@@ -2,8 +2,8 @@
 //! ~1 Hz decode-stats drain for the HUD.
 
 use jni::errors::LogErrorAndDefault;
-use jni::objects::{JDoubleArray, JIntArray, JObject, JString};
-use jni::sys::{jboolean, jlong};
+use jni::objects::{JIntArray, JObject, JString};
+use jni::sys::{jboolean, jfloat, jint, jlong};
 use jni::EnvUnowned;
 
 use super::{get_session, jni_guard, lock_recover};
@@ -203,29 +203,6 @@ pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativePyrowaveCap
     jni_guard(false, crate::pyro::available)
 }
 
-/// `NativeBridge.nativeVideoDecoderLabel(handle): String` — the resolved decoder identity for the
-/// HUD, e.g. `c2.qti.avc.decoder · low-latency`, or `""` before the decode thread has resolved one.
-/// One-shot (the decoder is fixed for the session); poll once after the HUD appears. Not
-/// android-gated — pure `jni` + a lock, so it links on the host build too (Kotlin only calls it on
-/// device).
-#[unsafe(no_mangle)]
-pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativeVideoDecoderLabel<'local>(
-    mut env: EnvUnowned<'local>,
-    _this: JObject<'local>,
-    handle: jlong,
-) -> JString<'local> {
-    env.with_env(|env| -> jni::errors::Result<JString<'local>> {
-        if handle == 0 {
-            return Ok(JString::default());
-        }
-        let Some(h) = get_session(handle) else {
-            return Ok(JString::default());
-        };
-        env.new_string(h.stats.decoder_label())
-    })
-    .resolve::<LogErrorAndDefault>()
-}
-
 /// `NativeBridge.nativeStopVideo(handle)` — stop + join the decode thread (without closing the
 /// session). No-op on `0`.
 #[unsafe(no_mangle)]
@@ -266,151 +243,77 @@ pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativeVideoDrain(
     })
 }
 
-/// `NativeBridge.nativeVideoStats(handle): DoubleArray?` — drain ~1 s of decode stats for the HUD
-/// (unified stats spec, `design/stats-unification.md`). Returns 38 doubles
-/// `[fps, mbps, e2eP50Ms, e2eP95Ms, latValid, skewCorrected, width, height, refreshHz, framesLost,
-/// bitDepth, colorPrimaries, colorTransfer, chromaFormatIdc, hostNetP50Ms, decodeP50Ms, hostP50Ms,
-/// netP50Ms, lostWindow, skippedWindow, fecWindow, framesWindow, dispValid, displayP50Ms,
-/// e2eDispP50Ms, e2eDispP95Ms, paceP50Ms, latchP50Ms, presentsWindow, presenterActive,
-/// feedP50Ms, codecP50Ms, skippedOverflowWindow, audioBufferMs, audioAvOffsetMs, audioCodec,
-/// audioRateHz, audioBits]`
-/// (the flags are 1.0/0.0; indexes 0–21 match the previous 22-double layout — 0–13 the original
-/// 14-double one with the latency pair re-based to the end-to-end capture→decoded headline, 14/15
-/// the stage p50s tiling it: `host+network` = capture→received, `decode` = received→decoded; 16/17
-/// are the Phase-2 split of the `host+network` term from the per-AU 0xCF host timings — `host` =
-/// the host's capture→sent, `network` = the remainder — both 0.0 when no timing matched this
-/// window, i.e. an old host; 18–21 are the spec's per-window line-4 counters — `lost` =
-/// unrecoverable drops this window, `skipped` = client newest-wins/pacing drops, `fec` = shards
-/// recovered, `frames` = AUs received, so the HUD can compute `lost/(frames+lost)` — index 9 stays
-/// the cumulative session total for older readers; 22–25 are the `display` stage from the
-/// OnFrameRendered render timestamps — when `dispValid` is 1.0 the HUD headline becomes the
-/// directly-measured capture→displayed pair at 24/25 with `display` = decoded→displayed p50 at 23
-/// closing the equation, and when 0.0 — no render callback landed this window — it falls back to
-/// the capture→decoded headline at 2/3; 26–29 are the timeline presenter's split of the `display`
-/// term — `pace` = decoded→release (store + glass budget) p50 at 26, `latch` =
-/// release→displayed (SurfaceFlinger) p50 at 27, the window's on-glass confirm count at 28
-/// (`presents` vs `fps` is the presenter-health pair), and 29 = 1.0 while the timeline presenter
-/// is active this session; 30/31 are the `decode` stage's split p50s — `feed` =
-/// received→queued (hand-off + input-slot wait) at 30 and `codec` = queued→decoded (codec-pure,
-/// from the AU's last piece) at 31, both 0.0 when no sample landed (sync loop); 32 is the
-/// parked-AU overflow subset of the window's `skipped` at 19 (decoder fell behind, vs benign
-/// newest-wins pacing); 33/34 are the AUDIO plane's latency — the playback ring's live depth in ms
-/// and the A/V sync loop's smoothed offset in ms (positive = audio behind the picture) — both live
-/// gauges rather than windowed samples, like the cumulative drop total at 9; 35–37 are the audio
-/// FORMAT the host resolved at the handshake — `audioCodec` (`0` = Opus on `0xC9`, `2` = lossless
-/// PCM on `0xD3`), the resolved rate in Hz and the resolved depth in bits. Static for the session,
-/// and here because `design/hi-res-audio.md` §10 requires a surface for the RESOLVED format rather
-/// than the requested one: a session that spends 4.6 Mbps and a session whose host quietly
-/// declined look identical from the outside, which is §4.3's failure wearing a UI hat), or `null`
-/// when no decode thread is running.
-/// Poll ~1 Hz from the UI; each call
-/// resets the measurement window. Not android-gated — pure `jni` + connector reads, so it links on
-/// the host build too (Kotlin only ever calls it on device).
+/// `NativeBridge.nativeVideoStatsLines(handle, tier, advanced, panelHz, panelModeHz, profile):
+/// String?` — close the overlay window and return it formatted by `punktfunk_core::hud`, one
+/// `<role>\t<text>` per line, or `null` when no decode thread runs. `panelHz` is the rate this app
+/// may render at and `panelModeHz` the panel's mode (0 = unknown). Poll ~1 Hz; each call closes
+/// the window. Not android-gated — pure `jni` + connector reads, so it links on the host build too.
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativeVideoStats<'local>(
+#[allow(clippy::too_many_arguments)]
+pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativeVideoStatsLines<'local>(
     mut env: EnvUnowned<'local>,
     _this: JObject<'local>,
     handle: jlong,
-) -> JDoubleArray<'local> {
-    env.with_env(|env| -> jni::errors::Result<JDoubleArray<'local>> {
-        if handle == 0 {
-            return Ok(JDoubleArray::default());
-        }
+    tier: jint,
+    advanced: jboolean,
+    panel_hz: jfloat,
+    panel_mode_hz: jfloat,
+    profile: JString<'local>,
+) -> JString<'local> {
+    use punktfunk_core::hud::{self, Extra, Role, StatsVerbosity};
+    env.with_env(|env| -> jni::errors::Result<JString<'local>> {
         let Some(h) = get_session(handle) else {
-            return Ok(JDoubleArray::default());
+            return Ok(JString::default());
         };
         if lock_recover(&h.video).is_none() {
-            return Ok(JDoubleArray::default()); // not streaming → no stats
+            return Ok(JString::default()); // not streaming → no stats
         }
-        let snap = h
-            .stats
-            .drain(h.client.frames_dropped(), h.client.fec_recovered_shards());
-        let mode = h.client.mode();
-        let color = h.client.color;
-        let buf: [f64; 40] = [
-            snap.fps,
-            snap.mbps,
-            snap.e2e_p50_ms,
-            snap.e2e_p95_ms,
-            if snap.lat_valid { 1.0 } else { 0.0 },
-            if snap.skew_corrected { 1.0 } else { 0.0 },
-            mode.width as f64,
-            mode.height as f64,
-            mode.refresh_hz as f64,
-            h.client.frames_dropped() as f64,
-            // Video-feed properties the host resolved at the handshake (Welcome): encode bit depth
-            // (8 / 10), the CICP colour primaries + transfer code points (Kotlin maps these to a
-            // colour-space / HDR label — transfer 16 = PQ, 18 = HLG ⇒ HDR), and the HEVC
-            // chroma_format_idc (1 = 4:2:0, 3 = 4:4:4). Static for the session unless renegotiated.
-            h.client.bit_depth as f64,
-            color.primaries as f64,
-            color.transfer as f64,
-            h.client.chroma_format as f64,
-            // Stage p50s tiling the end-to-end headline (appended to keep 0–13 index-compatible).
-            snap.hostnet_p50_ms,
-            snap.decode_p50_ms,
-            // Phase-2 host/network split of the `host+network` stage (0xCF host timings): 0.0
-            // when no timing matched this window (old host) — the HUD keeps the combined term.
-            snap.host_p50_ms,
-            snap.net_p50_ms,
-            // Spec line-4 counters, per-window: lost (unrecoverable drops), skipped (client
-            // newest-wins/pacing drops), FEC shards recovered, and the received-AU count so the
-            // HUD computes the loss percentage `lost/(frames+lost)` exactly.
-            snap.lost as f64,
-            snap.skipped as f64,
-            snap.fec as f64,
-            snap.frames as f64,
-            // `display` stage (OnFrameRendered render timestamps): validity flag, the
-            // decoded→displayed stage p50, and the directly-measured capture→displayed headline
-            // pair that supersedes 2/3 whenever the flag is set (spec: the equation always tiles
-            // the headline interval, so endpoint and terms move together).
-            if snap.disp_valid { 1.0 } else { 0.0 },
-            snap.display_p50_ms,
-            snap.e2e_disp_p50_ms,
-            snap.e2e_disp_p95_ms,
-            // Timeline-presenter split of the `display` term (pace = decoded→release, latch =
-            // release→displayed), the window's on-glass confirm count, and whether the presenter
-            // is active at all (0.0 = legacy release-immediately path — split reads 0 too).
-            snap.pace_p50_ms,
-            snap.latch_p50_ms,
-            snap.presents as f64,
-            if h.stats.presenter_active() { 1.0 } else { 0.0 },
-            // The `decode` stage's split (P3 science): feed = received→queued (hand-off +
-            // input-slot wait), codec = queued→decoded (codec-pure) — and the parked-AU
-            // overflow subset of `skipped` (decoder-health vs benign pacing drops).
-            snap.feed_p50_ms,
-            snap.codec_p50_ms,
-            snap.skipped_overflow as f64,
-            // The audio plane's own latency (`design/audio-latency-overhaul.md`): how much decoded
-            // audio is queued ahead of the speaker, and where the A/V sync loop measures that
-            // PUTS it relative to the picture (+ = audio behind). Both, because a deep ring on a
-            // jittery link is correct behaviour and only the offset tells that apart from audio
-            // simply held late. Live gauges written by the audio thread — before this the whole
-            // plane published nothing any surface could render, so a "the audio delay is way too
-            // high" report had no instrument behind it at all.
-            h.client.audio_buffer_ms() as f64,
-            h.client.audio_av_offset_ms() as f64,
-            // The audio format the host RESOLVED (`Welcome`), not what this device asked for.
-            // A lossless session and a session whose host declined lossless are indistinguishable
-            // from the outside — same picture, same latency figures, one of them quietly spending
-            // 2.3–4.6 Mbps of the link on nothing — so the HUD has to be able to name which
-            // (`design/hi-res-audio.md` §10, and §4.3 for why it matters). Static for the session:
-            // the plane is settled at the handshake and the host never switches it underneath a
-            // client whose output device is already open.
-            h.client.audio_codec as f64,
-            h.client.audio_sample_rate_hz as f64,
-            h.client.audio_bits as f64,
-            // The presenter's cadence readout: off-mode present intervals (‰) and frames the
-            // compositor coalesced onto one vsync in the last 1 s window — the two numbers a
-            // stutter report needs and every latency figure above cannot show.
-            h.stats.judder_permille() as f64,
-            h.stats.coalesced() as f64,
-        ];
-        let arr = env.new_double_array(buf.len())?;
-        arr.set_region(env, 0, &buf)?;
-        Ok(arr)
+        let profile = profile.try_to_string(env).unwrap_or_default();
+        let mut s = h.client.hud_snapshot();
+        s.decoder = h.stats.decoder_label();
+        // SurfaceFlinger's latch is pipeline depth no client paces under: reported, not charged.
+        s.shave_os_floor = true;
+        s.profile = (!profile.is_empty()).then_some(profile);
+        let (judder, coalesced) = (h.stats.judder_permille(), h.stats.coalesced());
+        let cadence: Vec<String> = [
+            (judder > 0).then(|| format!("judder {judder}‰")),
+            (coalesced > 0).then(|| format!("coalesced {coalesced}")),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        if !cadence.is_empty() {
+            s.extras.push(Extra {
+                text: cadence.join(" · "),
+                tier: StatsVerbosity::Detailed,
+                advanced_only: true,
+                role: Role::Warn,
+            });
+        }
+        if let Some(text) = panel_warning(panel_hz, panel_mode_hz, s.refresh_hz) {
+            s.extras.push(Extra {
+                text,
+                tier: StatsVerbosity::Compact,
+                advanced_only: false,
+                role: Role::Warn,
+            });
+        }
+        let lines = hud::format(&s, StatsVerbosity::from_index(tier.max(0) as u32), advanced);
+        env.new_string(hud::encode_lines(&lines))
     })
     .resolve::<LogErrorAndDefault>()
+}
+
+/// A panel below the stream costs judder plus a refresh of latency, and reads as a host fault
+/// without this line. `rate` is what this app may render at and `mode` the panel's active mode:
+/// the first below the second is Android's per-uid cap (the game default frame rate).
+fn panel_warning(rate: f32, mode: f32, stream_hz: u32) -> Option<String> {
+    let shown = rate.round() as i32;
+    if rate > 0.0 && mode > 0.0 && rate + 1.0 < mode {
+        return Some(format!("⚠ app capped {shown} Hz by the system"));
+    }
+    (rate > 0.0 && stream_hz > 0 && rate + 1.0 < stream_hz as f32)
+        .then(|| format!("⚠ panel {shown} Hz, not {stream_hz} · check the game frame-rate limit"))
 }
 
 /// `NativeBridge.nativeVideoSize(handle): IntArray?` — the negotiated video mode as
@@ -460,13 +363,8 @@ pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativeSetVideoSta
 ) {
     jni_guard((), || {
         if let Some(h) = get_session(handle) {
-            // The current cumulative counters seed the window baselines, so the first snapshot's
-            // `lost`/`FEC` cover only time the HUD was actually up.
-            h.stats.set_enabled(
-                enabled,
-                h.client.frames_dropped(),
-                h.client.fec_recovered_shards(),
-            );
+            // Re-enabling opens a fresh window seeded from the current counters.
+            h.client.set_hud_enabled(enabled);
         }
     })
 }
@@ -723,4 +621,24 @@ pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativeMicActive(
     jni_guard(false, || {
         get_session(handle).is_some_and(|h| lock_recover(&h.mic).is_some())
     })
+}
+
+#[cfg(test)]
+mod panel_tests {
+    use super::panel_warning;
+
+    /// A per-uid cap, a real mode below the stream, and a full-rate panel that warns of nothing.
+    #[test]
+    fn a_panel_below_the_stream_is_named() {
+        assert_eq!(
+            panel_warning(60.0, 120.0, 120).as_deref(),
+            Some("⚠ app capped 60 Hz by the system")
+        );
+        assert_eq!(
+            panel_warning(60.0, 60.0, 120).as_deref(),
+            Some("⚠ panel 60 Hz, not 120 · check the game frame-rate limit")
+        );
+        assert_eq!(panel_warning(120.0, 120.0, 120), None);
+        assert_eq!(panel_warning(0.0, 0.0, 120), None);
+    }
 }

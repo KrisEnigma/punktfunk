@@ -60,9 +60,6 @@ public struct StreamView: UIViewControllerRepresentable {
     private let onResizeTarget: ((UInt32, UInt32) -> Void)?
     private let onDecodedSize: (@Sendable (Int, Int) -> Void)?
     private let endToEndMeter: LatencyMeter?
-    private let decodeMeter: LatencyMeter?
-    private let displayMeter: LatencyMeter?
-    private let presentFloorMeter: LatencyMeter?
 
     /// `onDisconnectRequest` exists for call-site parity with the macOS StreamView (the
     /// captured-state ⌃⌥⇧D combo is detected by the macOS NSEvent monitor only); on iOS a
@@ -78,10 +75,7 @@ public struct StreamView: UIViewControllerRepresentable {
         onSessionEnd: (@Sendable () -> Void)? = nil,
         onResizeTarget: ((UInt32, UInt32) -> Void)? = nil,
         onDecodedSize: (@Sendable (Int, Int) -> Void)? = nil,
-        endToEndMeter: LatencyMeter? = nil,
-        decodeMeter: LatencyMeter? = nil,
-        displayMeter: LatencyMeter? = nil,
-        presentFloorMeter: LatencyMeter? = nil
+        endToEndMeter: LatencyMeter? = nil
     ) {
         self.connection = connection
         self.captureEnabled = captureEnabled
@@ -92,9 +86,6 @@ public struct StreamView: UIViewControllerRepresentable {
         self.onResizeTarget = onResizeTarget
         self.onDecodedSize = onDecodedSize
         self.endToEndMeter = endToEndMeter
-        self.decodeMeter = decodeMeter
-        self.displayMeter = displayMeter
-        self.presentFloorMeter = presentFloorMeter
     }
 
     public func makeUIViewController(context: Context) -> StreamViewController {
@@ -103,9 +94,6 @@ public struct StreamView: UIViewControllerRepresentable {
         controller.onDial = onDial
         controller.captureEnabled = captureEnabled
         controller.endToEndMeter = endToEndMeter
-        controller.decodeMeter = decodeMeter
-        controller.displayMeter = displayMeter
-        controller.presentFloorMeter = presentFloorMeter
         controller.onResizeTarget = onResizeTarget
         controller.onDecodedSize = onDecodedSize
         controller.start(connection: connection, onFrame: onFrame, onSessionEnd: onSessionEnd)
@@ -117,9 +105,6 @@ public struct StreamView: UIViewControllerRepresentable {
         controller.onDial = onDial
         controller.captureEnabled = captureEnabled
         controller.endToEndMeter = endToEndMeter
-        controller.decodeMeter = decodeMeter
-        controller.displayMeter = displayMeter
-        controller.presentFloorMeter = presentFloorMeter
         controller.onResizeTarget = onResizeTarget
         controller.onDecodedSize = onDecodedSize
         if controller.connection !== connection {
@@ -150,12 +135,8 @@ public typealias StreamViewControllerBase = UIViewController
 public final class StreamViewController: StreamViewControllerBase {
     public private(set) var connection: PunktfunkConnection?
     private var observers: [NSObjectProtocol] = []
-    /// Record the unified latency stages (end-to-end / decode / display) when the stage-2
-    /// presenter is active. Consulted at start().
+    /// Capture→on-glass for the A/V sync loop while the stage-2 presenter runs. Read at start().
     var endToEndMeter: LatencyMeter?
-    var decodeMeter: LatencyMeter?
-    var displayMeter: LatencyMeter?
-    var presentFloorMeter: LatencyMeter?
     /// The shared presenter stack: stage-2 (CAMetalLayer sublayer + display link) with the
     /// stage-1 StreamPump → displayLayer path as the Metal-unavailable / DEBUG fallback.
     private let presenter = SessionPresenter()
@@ -667,9 +648,6 @@ public final class StreamViewController: StreamViewControllerBase {
             connection: connection,
             baseLayer: videoLayer,
             endToEndMeter: endToEndMeter,
-            decodeMeter: decodeMeter,
-            displayMeter: displayMeter,
-            presentFloorMeter: presentFloorMeter,
             makeDisplayLink: { CADisplayLink(target: $0, selector: $1) },
             onFrame: onFrame,
             onSessionEnd: onSessionEnd,

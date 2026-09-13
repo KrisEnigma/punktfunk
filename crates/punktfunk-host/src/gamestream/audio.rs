@@ -73,7 +73,12 @@ pub use punktfunk_core::audio::{
 /// Shared [`punktfunk_core::audio::layout_for`]. Unknown channel counts fall back
 /// to stereo — clients may only request 2/6/8 (`AUDIO_CONFIGURATION_*`).
 pub fn layout_for(params: &AudioParams) -> &'static OpusLayout {
-    punktfunk_core::audio::layout_for(params.channels, params.high_quality)
+    let layout = if params.high_quality {
+        punktfunk_core::audio::AudioLayout::Uncoupled
+    } else {
+        punktfunk_core::audio::AudioLayout::Legacy
+    };
+    punktfunk_core::audio::layout_for(params.channels, layout)
 }
 
 /// `a=fmtp:97 surround-params=` digit string: channelCount, streams, coupledStreams,

@@ -341,10 +341,14 @@ struct ContentView: View {
         // tap uses, so trust policy / WoL / the approval sheet all come along. Never starts a
         // parallel session — this drives the one `model` ContentView owns.
         .onOpenURL { handleDeepLink($0) }
-        // A live stats-overlay cycle from ANY surface (⌃⌥⇧S, the three-finger tap, the Stream
-        // menu) writes the global; push it into the session so the overlay follows it from there
-        // on, whatever tier the session's profile started on.
+        // A Settings change to the stored tier moves a live session too.
         .onChange(of: statsVerbosityRaw) { _, raw in
+            model.setStatsVerbosity(StatsVerbosity(rawValue: raw) ?? .normal)
+        }
+        // The in-stream cycle (⌃⌥⇧S, the three-finger tap, the Stream menu) is session-local:
+        // it moves only this session's tier, never the stored one.
+        .onReceive(NotificationCenter.default.publisher(for: .punktfunkStatsCycled)) { note in
+            guard let raw = note.userInfo?["tier"] as? String else { return }
             model.setStatsVerbosity(StatsVerbosity(rawValue: raw) ?? .normal)
         }
         #if os(iOS) || os(tvOS)
@@ -1095,25 +1099,10 @@ struct ContentView: View {
                         model?.disconnect() // the captured-state ⌃⌥⇧D combo
                     },
                     onDial: dialSink,
-                    onFrame: { [meter = model.meter, latency = model.latency,
-                                split = model.latencySplit, queue = model.clientQueue] au in
+                    onFrame: { [meter = model.meter, queue = model.clientQueue] au in
                         meter.note(byteCount: au.data.count)
-                        // Read the offset PER AU (an atomic load), never in the capture list: a
-                        // capture-list `offset =` froze the connect-time estimate for the whole
-                        // session, and on a host whose wall clock steps (VM + NTP) that frozen
-                        // value shifted hostnet/e2e by ~15 ms between sessions while the meter's
-                        // impossible-sample guard hid the damage (field 2026-08-13). See
-                        // `PunktfunkConnection.clockOffsetNs`.
-                        let offset = conn.clockOffsetNs
-                        latency.record(ptsNs: au.ptsNs, offsetNs: offset)
-                        // The same receipt, keyed by pts, awaiting its 0xCF host timing (the
-                        // host/network split — drained by the 1 s stats tick). receivedNs is
-                        // the core's reassembly stamp (ABI v9), so the split's network term no
-                        // longer contains the client-queue wait...
-                        split.recordReceipt(
-                            ptsNs: au.ptsNs, receivedNs: au.receivedNs, offsetNs: offset)
-                        // ...which is measured as its own term instead (receipt→pull, both
-                        // client-local).
+                        // Receipt and the host split are the core's; the client-queue wait
+                        // (receipt → pull, both client-local) is Apple's own overlay line.
                         queue.record(
                             ptsNs: UInt64(bitPattern: au.receivedNs), atNs: au.pulledNs,
                             offsetNs: 0)
@@ -1131,10 +1120,7 @@ struct ContentView: View {
                     onDecodedSize: { [weak model] w, h in
                         Task { @MainActor in model?.resizeDecoded(width: w, height: h) }
                     },
-                    endToEndMeter: model.endToEnd,
-                    decodeMeter: model.decodeStage,
-                    displayMeter: model.displayStage,
-                    presentFloorMeter: model.presentFloor
+                    endToEndMeter: model.endToEnd
                 )
                 .overlay(alignment: placement.alignment) {
                     // The stats overlay MORPHS between tiers and SCALES UP on enter. With no `.id`, a

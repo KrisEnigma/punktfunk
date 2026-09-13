@@ -1170,6 +1170,15 @@ pub(crate) fn settings_page(
     let hud_combo = setting_combo(ctx, scope, (rev, set_rev), hud_names, hud_i, |s, i| {
         s.set_stats_verbosity(STATS_TIERS[i].0);
     });
+    let advanced_toggle = setting_toggle(ctx, scope, (rev, set_rev), s.advanced_stats, |s, on| {
+        s.advanced_stats = on
+    });
+    // Explorer hands a URL to the default browser; best-effort, like the log folder below.
+    let stats_docs_button = button("What each number means").on_click(|| {
+        let _ = std::process::Command::new("explorer.exe")
+            .arg("https://docs.punktfunk.unom.io/docs/stats")
+            .spawn();
+    });
 
     let licenses_button = {
         let ss = set_screen.clone();
@@ -1769,21 +1778,27 @@ pub(crate) fn settings_page(
                 .collect(),
                 None,
             );
-            out.extend(group(
-                Some("Statistics"),
-                vec![described_overridable(
-                    (rev, set_rev),
-                    scope,
-                    "stats_verbosity",
-                    "Stats overlay (HUD)",
-                    over.stats_verbosity,
-                    hud_combo,
-                    "Live session stats in a corner overlay \u{2014} Compact is a one-line pill, \
-                     Detailed adds the latency stage breakdown. Ctrl+Alt+Shift+S cycles the \
-                     tiers any time.",
-                )],
-                None,
-            ));
+            let mut stats_rows = vec![described_overridable(
+                (rev, set_rev),
+                scope,
+                "stats_verbosity",
+                "Stats overlay (HUD)",
+                over.stats_verbosity,
+                hud_combo,
+                "Live session stats in a corner overlay \u{2014} Compact is a one-line pill, \
+                 Detailed adds the stage breakdown. Ctrl+Alt+Shift+S cycles the tiers any time.",
+            )];
+            // Device-wide: a profile never carries the vocabulary.
+            if !profile_mode {
+                stats_rows.push(described_labeled(
+                    "Advanced statistics",
+                    advanced_toggle,
+                    "Off shows the figures Moonlight's overlay also shows. On shows capture to \
+                     glass as p50/p95 and every stage between.",
+                ));
+                stats_rows.push(stats_docs_button.into());
+            }
+            out.extend(group(Some("Statistics"), stats_rows, None));
             ("General", out)
         }
     };
