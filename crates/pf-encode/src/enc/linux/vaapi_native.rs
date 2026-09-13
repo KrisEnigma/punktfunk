@@ -20,7 +20,7 @@ use pf_vaapi::hevc::{HdrStatic, COLOUR_BT2020_PQ, COLOUR_BT709};
 use pf_vaapi::vpp;
 
 use super::{ChromaFormat, Codec, EncodedFrame, Encoder, EncoderCaps};
-use pf_encode_win::rfi::{self, plan_slot_recovery, Wave};
+use pf_encode_win::rfi::{self, plan_slot_recovery, Wave, WaveMark};
 
 /// Slots a session keeps: how far back a recovery anchor may reach. A report
 /// names frames the client missed two frames ago and spends a round trip
@@ -38,8 +38,12 @@ pub struct NativeVaapiEncoder {
     /// A loss plan's anchor, consumed by the next submit.
     anchor: Option<usize>,
     /// Intra refresh wave in flight: the rung a loss with no anchor takes instead of the
-    /// IDR. An anchor or a forced IDR abandons it; a new loss restarts it.
+    /// IDR. An anchor or a forced IDR abandons it; a loss reported while it runs spoils it
+    /// and queues a fresh one behind it, never a restart: iHD tracks each reference's
+    /// refreshed rows itself and a stripe that jumps back to the top never heals there.
     wave: Option<Wave>,
+    wave_spoiled: bool,
+    wave_queued: bool,
     /// The host's wire index minus the session's own picture count.
     wire_offset: i64,
     frames: u64,
@@ -105,6 +109,8 @@ impl NativeVaapiEncoder {
             force_kf: true,
             anchor: None,
             wave: None,
+            wave_spoiled: false,
+            wave_queued: false,
             wire_offset: 0,
             frames: 0,
             pending: None,
@@ -232,8 +238,11 @@ impl Encoder for NativeVaapiEncoder {
         }
         if self.force_kf || self.anchor.is_some() {
             self.wave = None;
+            self.wave_spoiled = false;
+            self.wave_queued = false;
         }
         let wave = self.wave;
+        let mark = wave.map_or(WaveMark::None, |w| w.mark(self.wave_spoiled));
         let pic = match (self.anchor.take(), wave) {
             (Some(slot), _) => session.encode_anchored(slot)?,
             (None, Some(w)) => {
@@ -242,13 +251,20 @@ impl Encoder for NativeVaapiEncoder {
                     first_row: first_row as u16,
                     rows: rows as u16,
                 };
-                session.encode_wave(stripe, !w.closes())?
+                // A spoiled close still leans on the lost frame: never an anchor.
+                session.encode_wave(stripe, !w.closes() || self.wave_spoiled)?
             }
             (None, None) => session.encode(self.force_kf)?,
         };
         self.force_kf = false;
         if let Some(w) = wave {
             self.wave = w.next();
+            if self.wave.is_none() {
+                self.wave_spoiled = false;
+                if std::mem::take(&mut self.wave_queued) {
+                    self.wave = Some(Wave::start(w.cycle));
+                }
+            }
         }
         if let Some(f) = &mut self.dump {
             use std::io::Write as _;
@@ -261,8 +277,8 @@ impl Encoder for NativeVaapiEncoder {
             pts_ns,
             keyframe: pic.is_idr,
             recovery_anchor: pic.recovery_anchor,
-            recovery_point: wave.is_some_and(Wave::marks) && !pic.is_idr,
-            recovery_close: wave.is_some_and(Wave::closes) && !pic.is_idr,
+            recovery_point: mark.point() && !pic.is_idr,
+            recovery_close: mark.close() && !pic.is_idr,
             chunk_aligned: false,
         });
         Ok(())
@@ -325,8 +341,15 @@ impl Encoder for NativeVaapiEncoder {
             return true;
         }
         if rfi::wave_enabled() && session.next_wire() > 0 {
-            // No anchor, but a wave heals without one; the client re-armed at this loss,
-            // so a wave already running restarts to give it a fresh start and close.
+            if self.wave.is_some() {
+                // The client re-armed at this loss: this wave runs out unmarked and a
+                // fresh one, whose start and close it counts, starts behind it.
+                self.wave_spoiled = true;
+                self.wave_queued = true;
+                tracing::debug!(first, last, "vaapi-native RFI: loss mid-wave — wave queued");
+                return true;
+            }
+            // No anchor, but a wave heals without one.
             let cycle = rfi::wave_cycle(
                 session.wave_rows(),
                 (self.params.fps_num / self.params.fps_den.max(1)).max(1),
@@ -369,6 +392,8 @@ impl Encoder for NativeVaapiEncoder {
         self.pending = None;
         self.anchor = None;
         self.wave = None;
+        self.wave_spoiled = false;
+        self.wave_queued = false;
         self.force_kf = true;
         true
     }
@@ -525,10 +550,10 @@ mod tests {
         let mut enc = NativeVaapiEncoder::open(codec, w, h, 60, 4_000_000, 8, ChromaFormat::Yuv420)
             .expect("open");
         const WAVE_START: usize = 3;
-        // `PF_WAVE_RESTART=1`: two frames into the wave a frame inside its sweep is lost, so
-        // it restarts there with a fresh start mark; only the restarted close may lift.
-        let restart = std::env::var("PF_WAVE_RESTART").is_ok_and(|v| v == "1");
-        let start2 = if restart { WAVE_START + 2 } else { WAVE_START };
+        // `PF_WAVE_SPOIL=1`: two frames into the wave a frame inside its sweep is lost, so
+        // it closes unmarked and the wave queued behind it carries the start and close.
+        let restart = std::env::var("PF_WAVE_SPOIL").is_ok_and(|v| v == "1");
+        let mut start2 = WAVE_START;
         let mut aus = Vec::new();
         let mut cycle = 0usize;
         let mut i = 0usize;
@@ -541,18 +566,23 @@ mod tests {
                 let w = enc.wave.expect("the wave is armed");
                 assert_eq!(w.index, 0);
                 cycle = w.cycle as usize;
+                if restart {
+                    start2 = WAVE_START + cycle;
+                }
                 eprintln!(
-                    "run_wave_smoke: {} rows, cycle {cycle}",
-                    enc.session.as_ref().unwrap().wave_rows()
+                    "run_wave_smoke: {} rows, cycle {cycle}, low_power={}",
+                    enc.session.as_ref().unwrap().wave_rows(),
+                    enc.session.as_ref().unwrap().low_power()
                 );
             }
-            if restart && i == start2 {
+            if restart && i == WAVE_START + 2 {
                 let lost = (i - 1) as i64;
                 assert!(
                     enc.invalidate_ref_frames(lost, lost),
                     "a loss inside the sweep"
                 );
-                assert_eq!(enc.wave.map(|w| w.index), Some(0), "the wave restarts");
+                assert!(enc.wave_spoiled && enc.wave_queued, "spoiled, one queued");
+                assert_eq!(enc.wave.map(|w| w.index), Some(2), "the sweep runs on");
             }
             let after_wave = start2 + cycle; // the plain P after the close
             let anchor_p = after_wave + 1;
@@ -602,7 +632,9 @@ mod tests {
             let dropped: Vec<u8> = aus
                 .iter()
                 .enumerate()
-                .filter(|(i, _)| *i == 0 || (*i >= WAVE_START && *i != start2 - 1))
+                .filter(|(i, _)| {
+                    *i == 0 || (*i >= WAVE_START && !(restart && *i == WAVE_START + 1))
+                })
                 .flat_map(|(_, a)| a.data.iter().copied())
                 .collect();
             let p2 = format!("{dir}/vaenc-wave-smoke-dropped.{ext}");
