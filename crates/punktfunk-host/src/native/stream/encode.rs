@@ -68,6 +68,7 @@ fn au_flags(
     ir_wave_pos: &mut u32,
     keyframe: bool,
     recovery_point: bool,
+    recovery_close: bool,
     recovery_anchor: bool,
     chunk_aligned: bool,
 ) -> u32 {
@@ -84,6 +85,9 @@ fn au_flags(
     }
     if recovery_point {
         flags |= punktfunk_core::packet::USER_FLAG_RECOVERY_POINT;
+    }
+    if recovery_close {
+        flags |= punktfunk_core::packet::USER_FLAG_RECOVERY_CLOSE;
     }
     if recovery_anchor {
         flags |= punktfunk_core::packet::USER_FLAG_RECOVERY_ANCHOR;
@@ -433,6 +437,7 @@ impl StreamState {
                     &mut self.ir_wave_pos,
                     c.keyframe,
                     c.recovery_point,
+                    c.recovery_close,
                     c.recovery_anchor,
                     c.chunk_aligned,
                 );
@@ -524,6 +529,7 @@ impl StreamState {
             &mut self.ir_wave_pos,
             au.keyframe,
             au.recovery_point,
+            au.recovery_close,
             au.recovery_anchor,
             au.chunk_aligned,
         );

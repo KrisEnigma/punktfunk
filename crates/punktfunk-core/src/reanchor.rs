@@ -2,8 +2,10 @@
 //!
 //! Hardware decoders return Ok on a missing reference and conceal; presenting that is the
 //! gray-plate artifact. Every client holds the last good picture instead, and lifts only on
-//! a real IDR, an honoured [`USER_FLAG_RECOVERY_ANCHOR`], the second [`USER_FLAG_RECOVERY_POINT`]
-//! since the loss, or a local recovery-point SEI ([`ReanchorGate::on_local_recovery`]).
+//! a real IDR, an honoured [`USER_FLAG_RECOVERY_ANCHOR`], an intra-refresh wave's close
+//! after a start seen since the loss ([`USER_FLAG_RECOVERY_CLOSE`]; the second
+//! [`USER_FLAG_RECOVERY_POINT`] from a host without the close bit), or a local
+//! recovery-point SEI ([`ReanchorGate::on_local_recovery`]).
 //!
 //! One shared state machine so embedders do not re-derive it. Time-driven but takes `now`
 //! so tests need no clock; C ABI wrappers pass `Instant::now()`. Lanes without a bitstream
@@ -16,9 +18,12 @@
 //! [`AnchorEvidence::Unavailable`].
 //!
 //! [`USER_FLAG_RECOVERY_POINT`]: crate::packet::USER_FLAG_RECOVERY_POINT
+//! [`USER_FLAG_RECOVERY_CLOSE`]: crate::packet::USER_FLAG_RECOVERY_CLOSE
 //! [`USER_FLAG_RECOVERY_ANCHOR`]: crate::packet::USER_FLAG_RECOVERY_ANCHOR
 
-use crate::packet::{FLAG_SOF, USER_FLAG_RECOVERY_ANCHOR, USER_FLAG_RECOVERY_POINT};
+use crate::packet::{
+    FLAG_SOF, USER_FLAG_RECOVERY_ANCHOR, USER_FLAG_RECOVERY_CLOSE, USER_FLAG_RECOVERY_POINT,
+};
 use std::time::{Duration, Instant};
 
 /// Consecutive no-output AUs that force a keyframe request. 3 ≈ 50 ms at 60 Hz: skip a one-frame
@@ -31,10 +36,13 @@ pub const NO_OUTPUT_KEYFRAME_STREAK: u32 = 3;
 pub const REANCHOR_FREEZE_MAX: Duration = Duration::from_millis(500);
 
 /// Intra-refresh [`USER_FLAG_RECOVERY_POINT`]s since the latest loss before the freeze lifts
-/// without an IDR. Two, not one: the first wave boundary after a loss is only half-healed
-/// (stripes swept before the loss still reference the lost frame). Every arm resets the count.
+/// without an IDR, on a host that marks both ends of a wave alike. Two, not one: the first
+/// boundary after a loss may be the close of a wave that began before it. A host that sets
+/// [`USER_FLAG_RECOVERY_CLOSE`] on the close needs no count: the first close after a start
+/// seen since the arm lifts. Every arm resets the count.
 ///
 /// [`USER_FLAG_RECOVERY_POINT`]: crate::packet::USER_FLAG_RECOVERY_POINT
+/// [`USER_FLAG_RECOVERY_CLOSE`]: crate::packet::USER_FLAG_RECOVERY_CLOSE
 pub const REANCHOR_MARKS_TO_LIFT: u32 = 2;
 
 /// Extra freeze time each live recovery mark buys. Must exceed one intra-refresh wave
@@ -56,22 +64,36 @@ pub fn index_gap(expected: u32, got: u32) -> Option<u32> {
     (ahead != 0 && ahead < u32::MAX / 2).then_some(ahead)
 }
 
-/// Fold one decoded frame: IDR or honoured LTR-RFI anchor lifts immediately; a recovery mark
-/// is only half a re-anchor so [`REANCHOR_MARKS_TO_LIFT`] must accumulate. Returns `(lift,
-/// new_marks)` with the count reset to 0 on a lift. The caller applies [`AnchorEvidence`]
-/// before `has_anchor` so this stays a pure statement of the wire rules.
+/// Fold one decoded frame: IDR or honoured LTR-RFI anchor lifts immediately. With a host
+/// that marks the close (`close_aware`), `marks` counts wave starts since the arm and the
+/// first close after one lifts; otherwise [`REANCHOR_MARKS_TO_LIFT`] marks must accumulate.
+/// Returns `(lift, new_marks)` with the count reset to 0 on a lift. The caller applies
+/// [`AnchorEvidence`] before `has_anchor` so this stays a pure statement of the wire rules.
 fn reanchor_after_frame(
     is_keyframe: bool,
     has_anchor: bool,
     has_mark: bool,
+    has_close: bool,
+    close_aware: bool,
     marks: u32,
 ) -> (bool, u32) {
-    let marks = if has_mark {
-        marks.saturating_add(1)
+    let (marks, swept) = if close_aware {
+        if has_close {
+            (marks, marks >= 1)
+        } else if has_mark {
+            (marks.saturating_add(1), false)
+        } else {
+            (marks, false)
+        }
     } else {
-        marks
+        let marks = if has_mark {
+            marks.saturating_add(1)
+        } else {
+            marks
+        };
+        (marks, marks >= REANCHOR_MARKS_TO_LIFT)
     };
-    if is_keyframe || has_anchor || marks >= REANCHOR_MARKS_TO_LIFT {
+    if is_keyframe || has_anchor || swept {
         (true, 0)
     } else {
         (false, marks)
@@ -142,9 +164,12 @@ pub struct ReanchorGate {
     /// Freeze is up: withhold concealed output until a lift. Armed by any loss; cleared only
     /// by a lift in [`on_decoded`](Self::on_decoded) / [`on_local_recovery`](Self::on_local_recovery).
     awaiting: bool,
-    /// Recovery marks since the latest arm. Zeroed on every arm so a fresh loss waits out two
-    /// new marks ([`REANCHOR_MARKS_TO_LIFT`]).
+    /// Recovery marks since the latest arm: wave starts once the host marks closes, else
+    /// every mark ([`REANCHOR_MARKS_TO_LIFT`]). Zeroed on every arm.
     marks: u32,
+    /// The host sets [`USER_FLAG_RECOVERY_CLOSE`] on a wave's close. Latched by the first
+    /// one seen; a stream never loses the bit, so it is never cleared.
+    close_marks: bool,
     /// When [`poll`](Self::poll) re-asks while still holding. Never presents concealment. `None`
     /// when not frozen.
     deadline: Option<Instant>,
@@ -177,6 +202,7 @@ impl ReanchorGate {
         ReanchorGate {
             awaiting: false,
             marks: 0,
+            close_marks: false,
             deadline: None,
             no_output_streak: 0,
             last_dropped: frames_dropped,
@@ -283,11 +309,20 @@ impl ReanchorGate {
         let is_keyframe = decoder_keyframe || (wire_flags & FLAG_SOF as u32 != 0);
         // Refuted anchors are stripped here so `reanchor_after_frame` stays the pure wire rules.
         let has_anchor = wire_flags & USER_FLAG_RECOVERY_ANCHOR != 0 && evidence.honours_anchor();
-        let has_mark = wire_flags & USER_FLAG_RECOVERY_POINT != 0;
+        let has_close = wire_flags & USER_FLAG_RECOVERY_CLOSE != 0;
+        let has_mark = wire_flags & USER_FLAG_RECOVERY_POINT != 0 || has_close;
+        self.close_marks |= has_close;
         if has_mark && self.awaiting {
             self.deadline = Some(now + RECOVERY_MARK_PATIENCE);
         }
-        let (lift, marks) = reanchor_after_frame(is_keyframe, has_anchor, has_mark, self.marks);
+        let (lift, marks) = reanchor_after_frame(
+            is_keyframe,
+            has_anchor,
+            has_mark,
+            has_close,
+            self.close_marks,
+            self.marks,
+        );
         self.marks = marks;
         if lift {
             self.awaiting = false;
@@ -373,7 +408,7 @@ mod tests {
         let mut marks = 0u32;
         for (i, &(is_kf, has_mark)) in frames.iter().enumerate() {
             // Intra-refresh-mark model: no LTR-RFI path here (`an_rfi_anchor_lifts_immediately`).
-            let (lift, m) = reanchor_after_frame(is_kf, false, has_mark, marks);
+            let (lift, m) = reanchor_after_frame(is_kf, false, has_mark, false, false, marks);
             marks = m;
             if lift {
                 return Some(i);
@@ -423,24 +458,68 @@ mod tests {
         assert!(!g.lifted_by_marks(), "an IDR lift is not a wave lift");
     }
 
+    /// A host that marks the close apart: a close whose wave began before the loss does not
+    /// count, the next start is not a second mark, and that wave's close lifts.
+    #[test]
+    fn a_close_mark_lifts_only_after_a_start_since_the_arm() {
+        const CLOSE: u32 = USER_FLAG_RECOVERY_POINT | USER_FLAG_RECOVERY_CLOSE;
+        let t = Instant::now();
+        let mut g = ReanchorGate::new(0);
+        g.arm(t);
+        assert_eq!(g.on_decoded(CLOSE, false, t), GateVerdict::Hold);
+        assert_eq!(
+            g.on_decoded(USER_FLAG_RECOVERY_POINT, false, t),
+            GateVerdict::Hold,
+            "the next start would have been the second mark"
+        );
+        assert_eq!(g.on_decoded(0, false, t), GateVerdict::Hold);
+        assert_eq!(g.on_decoded(CLOSE, false, t), GateVerdict::Present);
+        assert!(g.lifted_by_marks());
+        // A restarted wave: two starts, then the close.
+        g.arm(t);
+        g.on_decoded(USER_FLAG_RECOVERY_POINT, false, t);
+        g.on_decoded(USER_FLAG_RECOVERY_POINT, false, t);
+        assert!(g.is_holding(), "two starts are not a sweep");
+        assert_eq!(g.on_decoded(CLOSE, false, t), GateVerdict::Present);
+    }
+
+    /// The bit latches on first sight: the wave that introduces it lifts on its close, and
+    /// from then on a lone close is no longer a countable mark.
+    #[test]
+    fn the_close_bit_latches_on_first_sight() {
+        const CLOSE: u32 = USER_FLAG_RECOVERY_POINT | USER_FLAG_RECOVERY_CLOSE;
+        let t = Instant::now();
+        let mut g = ReanchorGate::new(0);
+        g.arm(t);
+        g.on_decoded(USER_FLAG_RECOVERY_POINT, false, t);
+        assert_eq!(g.on_decoded(CLOSE, false, t), GateVerdict::Present);
+        g.arm(t);
+        g.on_decoded(CLOSE, false, t);
+        g.on_decoded(USER_FLAG_RECOVERY_POINT, false, t);
+        assert!(
+            g.is_holding(),
+            "close then start: one wave early under the old rule"
+        );
+    }
+
     #[test]
     fn a_fresh_gap_resets_the_mark_count() {
         let mut marks = 0u32;
-        let (_, m) = reanchor_after_frame(false, false, true, marks);
+        let (_, m) = reanchor_after_frame(false, false, true, false, false, marks);
         marks = m;
         assert_eq!(marks, 1);
         marks = 0;
-        let (lift, m) = reanchor_after_frame(false, false, true, marks);
+        let (lift, m) = reanchor_after_frame(false, false, true, false, false, marks);
         assert!(!lift, "a single post-gap mark must not lift");
         assert_eq!(m, 1);
     }
 
     #[test]
     fn an_rfi_anchor_lifts_immediately() {
-        let (lift, marks) = reanchor_after_frame(false, true, false, 0);
+        let (lift, marks) = reanchor_after_frame(false, true, false, false, false, 0);
         assert!(lift, "an RFI anchor must lift the freeze immediately");
         assert_eq!(marks, 0, "a lift resets the running mark count");
-        let (lift, _) = reanchor_after_frame(false, true, true, 1);
+        let (lift, _) = reanchor_after_frame(false, true, true, false, false, 1);
         assert!(lift, "an anchor lifts regardless of the pending mark count");
     }
 

@@ -26,6 +26,12 @@ pub const USER_FLAG_RECOVERY_POINT: u32 = 0x10;
 /// is enough. Coded P, so the decoder never sets `AV_FRAME_FLAG_KEY`.
 pub const USER_FLAG_RECOVERY_ANCHOR: u32 = 0x20;
 
+/// `user_flags` bit. The close of an intra-refresh wave, set beside
+/// [`USER_FLAG_RECOVERY_POINT`]: the picture is fully swept on this AU. A client that
+/// has seen the bit lifts on the first close after a start seen since its loss instead
+/// of counting two marks, so a close whose wave began before the loss never lifts.
+pub const USER_FLAG_RECOVERY_CLOSE: u32 = 0x200;
+
 /// `user_flags` bit. Each `shard_payload`-sized window of the frame buffer
 /// is a self-delimiting codec packet, zero-padded. Missing shards stay zero
 /// and the codec skips those windows; even a complete frame must be consumed

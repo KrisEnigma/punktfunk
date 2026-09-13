@@ -1542,6 +1542,9 @@ pub mod encode {
         /// Start or close of an encoder-driven intra refresh wave; the host forwards it as the
         /// wire's recovery-point user flag. A driver that never waves leaves it clear.
         pub const AU_RECOVERY_POINT: u32 = 1 << 5;
+        /// The wave's close, beside [`AU_RECOVERY_POINT`]; the host forwards it as the wire's
+        /// recovery-close user flag.
+        pub const AU_RECOVERY_CLOSE: u32 = 1 << 6;
 
         /// [`AuSlot::state`]: the encode thread may take this slot. There is no WRITING state —
         /// the encode thread fills the heap before it claims a slot.
@@ -3944,10 +3947,11 @@ mod tests {
             AU_RECOVERY_ANCHOR,
             AU_CHUNK_ALIGNED,
             AU_RECOVERY_POINT,
+            AU_RECOVERY_CLOSE,
         ];
         println!("AU flags: {flags:?}; states: {FREE} {PUBLISHED} {READING}");
-        assert_eq!(flags, [1, 2, 4, 8, 16, 32]);
-        assert_eq!(flags.iter().fold(0, |a, b| a | b), 0b11_1111);
+        assert_eq!(flags, [1, 2, 4, 8, 16, 32, 64]);
+        assert_eq!(flags.iter().fold(0, |a, b| a | b), 0b111_1111);
         // A whole non-key AU is FIRST|LAST — the two must not alias.
         assert_eq!(AU_FIRST | AU_LAST, 3);
         assert_eq!([FREE, PUBLISHED, READING], [0, 1, 2]);

@@ -55,6 +55,7 @@ pub mod nvenc_core;
 // the union of callers, and the VAAPI one is featureless on Linux.
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 pub mod rfi;
+pub mod smoke_pattern;
 // Shared loss-recovery env knobs. Defaults and API clamps stay per-backend.
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 pub mod policy;

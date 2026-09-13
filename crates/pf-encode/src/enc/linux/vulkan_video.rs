@@ -573,6 +573,7 @@ struct Frame {
     keyframe: bool,
     recovery_anchor: bool,
     recovery_point: bool,
+    recovery_close: bool,
     /// Deferred-requeue hold cloned at submit, dropped when the fence signals. Extends
     /// "producer must not rewrite" across the async GPU read; the host's clone dies at the
     /// next capture, which with a ring of 2 is before this slot finishes.
@@ -2886,6 +2887,7 @@ impl VulkanVideoEncoder {
         // close is part dirty, so it never becomes an RFI anchor: `slot_wire` stays -1.
         let wave = self.wave;
         self.frames[slot].recovery_point = wave.is_some_and(Wave::marks);
+        self.frames[slot].recovery_close = wave.is_some_and(Wave::closes);
         if is_idr {
             self.slot_wire.iter_mut().for_each(|s| *s = -1);
             self.slot_poc.iter_mut().for_each(|s| *s = -1);
@@ -3650,6 +3652,7 @@ impl VulkanVideoEncoder {
             keyframe: f.keyframe,
             recovery_anchor: f.recovery_anchor,
             recovery_point: f.recovery_point,
+            recovery_close: f.recovery_close,
             chunk_aligned: false,
         })
     }
@@ -4169,20 +4172,10 @@ mod tests {
         }
     }
 
-    /// BGRX frame of horizontal bands scrolled down by `shift` rows, with a diagonal so no
-    /// two rows are alike: the encoder must reach for rows above to predict it.
-    fn cpu_frame_scroll(w: u32, h: u32, pts_ns: u64, shift: u32) -> CapturedFrame {
-        let mut buf = vec![0u8; (w * h * 4) as usize];
-        for y in 0..h {
-            let band = ((y + h - shift % h) % h) as u8;
-            for x in 0..w {
-                let px = ((y * w + x) * 4) as usize;
-                buf[px] = band.wrapping_mul(3);
-                buf[px + 1] = band ^ (x as u8);
-                buf[px + 2] = 255 - band;
-                buf[px + 3] = 255;
-            }
-        }
+    /// BGRX frame of the shared moving texture at `frame` frames of motion
+    /// (`pf_encode_win::smoke_pattern`): the encoder must reach for rows above to predict it.
+    fn cpu_frame_scroll(w: u32, h: u32, pts_ns: u64, frame: u32) -> CapturedFrame {
+        let buf = crate::smoke_pattern::scroll_pattern(w as usize, h as usize, frame as usize);
         CapturedFrame {
             provenance: Default::default(),
             width: w,
@@ -4355,7 +4348,12 @@ mod tests {
             eprintln!("run_wave_smoke: intra refresh unavailable on this driver — skipping");
             return;
         }
-        let after_wave = WAVE_START + WAVE_CYCLE; // the plain P after the close
+        // `PF_WAVE_RESTART=1`: two frames into the wave a frame inside its sweep is lost, so
+        // it restarts there with a fresh start mark; only the restarted close may lift.
+        let restart = std::env::var("PF_WAVE_RESTART").is_ok_and(|v| v == "1");
+        let start2 = if restart { WAVE_START + 2 } else { WAVE_START };
+        let close = start2 + WAVE_CYCLE - 1;
+        let after_wave = close + 1; // the plain P after the close
         let anchor_p = after_wave + 1; // re-anchors on the close after `after_wave` is lost
         let mut aus: Vec<crate::EncodedFrame> = Vec::new();
         for i in 0..=anchor_p {
@@ -4369,6 +4367,13 @@ mod tests {
                     "the wave starts at frame-build, not here"
                 );
             }
+            if restart && i == start2 {
+                let lost = (i - 1) as i64;
+                assert!(
+                    enc.invalidate_ref_frames(lost, lost),
+                    "a loss inside the sweep"
+                );
+            }
             if i == anchor_p {
                 assert!(
                     enc.invalidate_ref_frames(after_wave as i64, after_wave as i64),
@@ -4378,17 +4383,18 @@ mod tests {
             // Scrolling texture: vertical motion makes the encoder reach for rows above,
             // which is what the clean-region constraint has to refuse across a stripe.
             enc.submit_indexed(
-                &cpu_frame_scroll(w, h, i as u64 * 16_666_667, i as u32 * 6),
+                &cpu_frame_scroll(w, h, i as u64 * 16_666_667, i as u32),
                 i as u32,
             )
             .expect("submit");
-            if i == WAVE_START {
+            if i == WAVE_START || i == start2 {
                 assert_eq!(
                     enc.wave,
                     Some(crate::rfi::Wave {
                         cycle: WAVE_CYCLE as u32,
                         index: 1
-                    })
+                    }),
+                    "frame {i} started a wave at frame-build"
                 );
             }
             while let Some(au) = enc.poll().expect("poll") {
@@ -4409,21 +4415,21 @@ mod tests {
                 !au.keyframe,
                 "AU {i}: no IDR after frame 0 — the wave replaced it"
             );
-            let start = i == WAVE_START;
-            let close = i == WAVE_START + WAVE_CYCLE - 1;
+            let start = i == WAVE_START || i == start2;
             assert_eq!(
                 au.recovery_point,
-                start || close,
-                "AU {i}: recovery_point marks exactly the wave start and close"
+                start || i == close,
+                "AU {i}: recovery_point marks every start and the close"
             );
+            assert_eq!(au.recovery_close, i == close, "AU {i}: the close bit");
             assert_eq!(
                 au.recovery_anchor,
                 i == anchor_p,
                 "AU {i}: the only anchor P answers the post-wave loss"
             );
         }
-        // Full stream, and the client's view with the pre-wave P frames lost: decoded side by
-        // side, the close frame must match the full decode while the frames before it differ.
+        // Full stream, and the client's view with the pre-wave P frames lost (and the
+        // restart's frame): decoded side by side, the close must match the full decode.
         if let Ok(home) = std::env::var("HOME") {
             let full: Vec<u8> = aus.iter().flat_map(|a| a.data.iter().copied()).collect();
             let p = format!("{home}/vkenc-wave-smoke.{ext}");
@@ -4431,18 +4437,17 @@ mod tests {
             let dropped: Vec<u8> = aus
                 .iter()
                 .enumerate()
-                .filter(|(i, _)| *i == 0 || *i >= WAVE_START)
+                .filter(|(i, _)| *i == 0 || (*i >= WAVE_START && *i != start2 - 1))
                 .flat_map(|(_, a)| a.data.iter().copied())
                 .collect();
             let p2 = format!("{home}/vkenc-wave-smoke-dropped.{ext}");
             let _ = std::fs::write(&p2, &dropped);
             eprintln!(
                 "run_wave_smoke: wrote {p} ({} bytes, {} AUs) and {p2} (frames 1..{} dropped; \
-                 the close at {} must decode identical to the full stream)",
+                 the close at {close} must decode identical to the full stream)",
                 full.len(),
                 aus.len(),
                 WAVE_START,
-                WAVE_START + WAVE_CYCLE - 1
             );
         }
     }

@@ -27,7 +27,7 @@ use super::nvenc_core::{
     resolve_slices, resolve_split_subframe, resolve_subframe, store_ceiling, subframe_env_forced,
     wave_rows, CeilingKey, LowLatencyConfig, NvStatusExt, RangePlan,
 };
-use crate::rfi::Wave;
+use crate::rfi::{Wave, WaveMark};
 // Shared with Linux's direct session. Do not fork this copy.
 use super::nvenc_core::{
     cached_split_verdict, store_split_verdict, ArbAction, SplitArbiter, SplitKey,
@@ -499,7 +499,7 @@ pub struct NvencD3d11Encoder {
         u64,
         bool,
         bool,
-        bool,
+        WaveMark,
     )>,
     /// Next submission's `inputTimeStamp`. [`Encoder::submit_indexed`] pins it to the
     /// wire index so RFI timestamps stay 1:1 across rebuilds.
@@ -1496,7 +1496,8 @@ impl NvencD3d11Encoder {
                 pts_ns,
                 keyframe,
                 recovery_anchor: anchor,
-                recovery_point: mark,
+                recovery_point: mark.point(),
+                recovery_close: mark.close(),
                 chunk_aligned: false,
             });
         Ok(())
@@ -1696,7 +1697,7 @@ impl Encoder for NvencD3d11Encoder {
                 self.wave_queued = false;
             }
             let wave = self.wave;
-            let mark = wave.is_some_and(|w| w.marks() && !(w.closes() && self.wave_spoiled));
+            let mark = wave.map_or(WaveMark::None, |w| w.mark(self.wave_spoiled));
             if let Some(w) = wave {
                 let ts = pts as i64;
                 if w.index == 0 {
@@ -1999,7 +2000,8 @@ impl Encoder for NvencD3d11Encoder {
                 pts_ns,
                 keyframe,
                 recovery_anchor: anchor,
-                recovery_point: mark,
+                recovery_point: mark.point(),
+                recovery_close: mark.close(),
                 chunk_aligned: false,
             }))
         }
@@ -2084,7 +2086,8 @@ impl Encoder for NvencD3d11Encoder {
                             pts_ns,
                             keyframe: idr_hint,
                             recovery_anchor: anchor,
-                            recovery_point: mark,
+                            recovery_point: mark.point(),
+                            recovery_close: mark.close(),
                             chunk_aligned: false,
                             first,
                             last: false,
@@ -2178,7 +2181,8 @@ impl Encoder for NvencD3d11Encoder {
                 pts_ns,
                 keyframe,
                 recovery_anchor: anchor,
-                recovery_point: mark,
+                recovery_point: mark.point(),
+                recovery_close: mark.close(),
                 chunk_aligned: false,
                 first: !cs.opened,
                 last: true,
@@ -2660,54 +2664,7 @@ mod tests {
         px
     }
 
-    /// BGRA rows scrolled down by `shift`, with a diagonal so no two rows match: the encoder
-    /// must reach for rows above, which is what a stripe's clean region has to refuse.
-    /// A texture that moves `dx` px right and `dy` px down per frame (negative = left/up):
-    /// the rows band by luma, the columns band the green so horizontal motion codes too.
-    /// `PF_WAVE_SCROLL=dx,dy` pins it; the default moves down, so motion vectors point up
-    /// into rows the sweep already refreshed. Down-pointing vectors are the hard case.
-    fn scroll_pattern(w: usize, h: usize, frame: usize) -> Vec<u8> {
-        let (dx, dy) = std::env::var("PF_WAVE_SCROLL")
-            .ok()
-            .and_then(|s| {
-                let (x, y) = s.split_once(',')?;
-                Some((x.trim().parse::<i64>().ok()?, y.trim().parse::<i64>().ok()?))
-            })
-            .unwrap_or((0, 6));
-        let (sx, sy) = (dx * frame as i64, dy * frame as i64);
-        // `PF_WAVE_NOISE=1` adds per-pixel noise that scrolls with the content, so the
-        // encoder is starved the way game content starves it and residual coding cannot
-        // paper over a prediction from a dirty row.
-        let noise = std::env::var("PF_WAVE_NOISE").is_ok_and(|v| v == "1");
-        let mut px = vec![0u8; w * h * 4];
-        for y in 0..h {
-            let cy = (y as i64 - sy).rem_euclid(h as i64);
-            let band = cy as u8;
-            for x in 0..w {
-                let cx = (x as i64 - sx).rem_euclid(w as i64);
-                let col = cx as u8;
-                let o = (y * w + x) * 4;
-                let n = if noise {
-                    // xorshift of the content coordinate: white noise, ±32 per channel.
-                    let mut v = (cx as u32).wrapping_mul(0x9E37_79B9)
-                        ^ (cy as u32).wrapping_mul(0x85EB_CA6B)
-                        ^ 0x5bd1_e995;
-                    v ^= v << 13;
-                    v ^= v >> 17;
-                    v ^= v << 5;
-                    (v & 63) as i16 - 32
-                } else {
-                    0
-                };
-                let c = |b: u8| (i16::from(b) + n).clamp(0, 255) as u8;
-                px[o] = c(band.wrapping_mul(3));
-                px[o + 1] = c(band ^ col);
-                px[o + 2] = c(255 - band);
-                px[o + 3] = 255;
-            }
-        }
-        px
-    }
+    use crate::smoke_pattern::scroll_pattern;
 
     /// The wave on NVENC, one HEVC stream: a loss with no anchor starts wave A (marks on
     /// its start and close, no IDR); a loss of the plain P after it anchors on the close; a
@@ -2899,6 +2856,11 @@ mod tests {
                     "AU {i}: marks on every start and close but the spoiled close {b_close}"
                 );
                 assert_eq!(au.recovery_anchor, i == anchor_p, "AU {i}: one anchor P");
+                assert_eq!(
+                    au.recovery_close,
+                    i == a_close || i == c_close,
+                    "AU {i}: the close bit on every unspoiled close"
+                );
             }
             let full: Vec<u8> = aus.iter().flat_map(|a| a.data.iter().copied()).collect();
             let view = |lost: std::ops::Range<usize>| -> Vec<u8> {
@@ -2954,6 +2916,19 @@ mod tests {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(12);
+        // `PF_WAVE_SPOIL=1`: three frames into every wave a frame inside its sweep is lost,
+        // so it closes unmarked and the wave queued behind it is the one that must be exact.
+        // `PF_WAVE_IDR=1`: two frames into every wave an IDR is forced, which flushes it.
+        let spoil = std::env::var("PF_WAVE_SPOIL").is_ok_and(|v| v == "1");
+        let idr = std::env::var("PF_WAVE_IDR").is_ok_and(|v| v == "1");
+        // `PF_WAVE_CODEC=av1`: the AV1 wave's bookkeeping; the dump is `.obu`, which the
+        // hash maps do not read yet.
+        let av1 = std::env::var("PF_WAVE_CODEC").is_ok_and(|v| v == "av1");
+        let (codec, ext) = if av1 {
+            (Codec::Av1, "obu")
+        } else {
+            (Codec::H265, "h265")
+        };
         assert!(
             std::env::var("PUNKTFUNK_NVENC_IR_ALWAYS").is_ok_and(|v| v == "1"),
             "PUNKTFUNK_NVENC_IR_ALWAYS=1 makes every ask a wave"
@@ -3021,7 +2996,7 @@ mod tests {
                 tex.expect("null frame texture")
             };
             let mut enc = NvencD3d11Encoder::open(
-                Codec::H265,
+                codec,
                 format,
                 W,
                 H,
@@ -3040,19 +3015,45 @@ mod tests {
             );
             let cycle = enc.wave_cycle() as usize;
             assert!(cycle >= 2, "the wave is on");
-            // Wave k starts at 3 + k * (cycle + gap); its lost frame is two before that.
-            let period = cycle + gap;
+            // Wave k starts at 3 + k * period; its lost frame is two before that. A spoiled
+            // wave is followed by the queued one, so its period holds two cycles.
+            assert!(
+                cycle > 3 || !spoil,
+                "the spoiling loss lands inside the sweep"
+            );
+            let period = if spoil { 2 * cycle + gap } else { cycle + gap };
             let last = 3 + waves * period;
             let mut lost = Vec::new();
+            let mut starts = Vec::new();
             let mut closes = Vec::new();
+            let mut idrs = Vec::new();
             let mut aus = Vec::new();
             for i in 0..=last {
-                if i >= 3 && (i - 3) % period == 0 && (i - 3) / period < waves {
-                    let l = (i - 2) as i64;
-                    assert!(enc.invalidate_ref_frames(l, l), "the always-wave answers");
-                    assert_eq!(enc.wave.map(|w| w.index), Some(0), "a fresh wave");
-                    lost.push(i - 2);
-                    closes.push(i + cycle - 1);
+                let offset = (i >= 3 && (i - 3) / period < waves).then(|| (i - 3) % period);
+                match offset {
+                    Some(0) => {
+                        let l = (i - 2) as i64;
+                        assert!(enc.invalidate_ref_frames(l, l), "the always-wave answers");
+                        assert_eq!(enc.wave.map(|w| w.index), Some(0), "a fresh wave");
+                        lost.push(i - 2);
+                        starts.push(i);
+                        if !spoil && !idr {
+                            closes.push(i + cycle - 1);
+                        }
+                    }
+                    Some(2) if idr => {
+                        enc.request_keyframe();
+                        idrs.push(i);
+                    }
+                    Some(3) if spoil => {
+                        let l = (i - 1) as i64;
+                        assert!(enc.invalidate_ref_frames(l, l), "a loss inside the sweep");
+                        assert!(enc.wave_spoiled && enc.wave_queued, "spoiled, one queued");
+                        lost.push(i - 1);
+                        starts.push(i - 3 + cycle);
+                        closes.push(i - 3 + 2 * cycle - 1);
+                    }
+                    _ => {}
                 }
                 let tex = texture(i);
                 let frame = CapturedFrame {
@@ -3070,16 +3071,27 @@ mod tests {
                 };
                 enc.submit_indexed(&frame, i as u32).expect("submit");
                 let au = enc.poll().expect("poll").expect("an AU per submit (sync)");
+                if idrs.last() == Some(&i) {
+                    assert!(enc.wave.is_none(), "the IDR flushed the wave");
+                }
                 aus.push(au);
             }
             enc.flush().ok();
             for (i, au) in aus.iter().enumerate() {
-                assert_eq!(au.keyframe, i == 0, "AU {i}: the only IDR is frame 0");
-                let start = i >= 3 && (i - 3) % period == 0 && (i - 3) / period < waves;
+                assert_eq!(
+                    au.keyframe,
+                    i == 0 || idrs.contains(&i),
+                    "AU {i}: IDRs only where forced"
+                );
                 assert_eq!(
                     au.recovery_point,
-                    start || closes.contains(&i),
-                    "AU {i}: marks on every start and close"
+                    starts.contains(&i) || closes.contains(&i),
+                    "AU {i}: marks on every start and unspoiled close"
+                );
+                assert_eq!(
+                    au.recovery_close,
+                    closes.contains(&i),
+                    "AU {i}: the close bit on every unspoiled close"
                 );
             }
             let full: Vec<u8> = aus.iter().flat_map(|a| a.data.iter().copied()).collect();
@@ -3090,8 +3102,8 @@ mod tests {
                 .flat_map(|(_, a)| a.data.iter().copied())
                 .collect();
             let dir = std::env::var("PUNKTFUNK_SMOKE_DIR").unwrap_or_else(|_| ".".into());
-            std::fs::write(format!("{dir}/nvenc-wave.h265"), &full).expect("write");
-            std::fs::write(format!("{dir}/nvenc-wave-dropS.h265"), &view).expect("write");
+            std::fs::write(format!("{dir}/nvenc-wave.{ext}"), &full).expect("write");
+            std::fs::write(format!("{dir}/nvenc-wave-dropS.{ext}"), &view).expect("write");
             let csv = |v: &[usize]| {
                 v.iter()
                     .map(|n| n.to_string())
@@ -3100,11 +3112,12 @@ mod tests {
             };
             println!(
                 "nvenc_wave_soak: {W}x{H} {}-bit {fps} fps {mbps} Mbps cycle={cycle} gap={gap} \
-                 waves={waves} aus={} lost={} closes={}",
+                 waves={waves} aus={} lost={} closes={} spoil={spoil} idrs={}",
                 if ten_bit { 10 } else { 8 },
                 aus.len(),
                 csv(&lost),
-                csv(&closes)
+                csv(&closes),
+                csv(&idrs)
             );
         }
     }

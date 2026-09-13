@@ -323,6 +323,7 @@ impl AuChunker {
             keyframe: self.keyframe,
             recovery_anchor: self.recovery_anchor,
             recovery_point: false,
+            recovery_close: false,
             chunk_aligned: self.chunk_aligned,
             first,
             last,
@@ -482,6 +483,7 @@ mod tests {
             keyframe: true,
             recovery_anchor: false,
             recovery_point: false,
+            recovery_close: false,
             chunk_aligned: true,
         }
     }

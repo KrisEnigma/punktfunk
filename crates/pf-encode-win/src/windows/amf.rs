@@ -695,6 +695,7 @@ fn retrieve_loop(
                     keyframe: key_prop || forced,
                     recovery_anchor,
                     recovery_point: false,
+                    recovery_close: false,
                     chunk_aligned: false,
                 });
                 // Under the lock, so it cannot race the clear `poll` does when it empties.

@@ -235,6 +235,7 @@ impl Encoder for OpenH264Encoder {
                 keyframe,
                 recovery_anchor: false,
                 recovery_point: false,
+                recovery_close: false,
                 chunk_aligned: false,
             });
         }
