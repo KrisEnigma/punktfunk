@@ -175,6 +175,11 @@ pub struct Presenter {
     /// presenter window line. A submit that blocks on a keyed-mutex acquire shows here.
     last_import_us: u32,
     last_submit_us: u32,
+    /// Wall time of the in-flight fence wait, `vkAcquireNextImageKHR`, and
+    /// `vkQueuePresentKHR`: where a present blocks on the GPU or the swapchain.
+    last_fence_us: u32,
+    last_acquire_us: u32,
+    last_present_us: u32,
     /// External-sync lock over this device's queues, shared with decode and the overlay.
     /// The decoder submits on this same graphics queue from the pump thread; every
     /// `vkQueueSubmit` / `vkQueuePresentKHR` / wait-idle here must hold it or the
@@ -280,13 +285,23 @@ impl Presenter {
         }
     }
 
-    /// Active swapchain present mode for the stats overlay. Can differ from the request
-    /// when the surface does not offer it.
     /// `(import_us, submit_us)` of the last present: D3D11 import lookup and `vkQueueSubmit`.
     pub(crate) fn last_timings(&self) -> (u32, u32) {
         (self.last_import_us, self.last_submit_us)
     }
 
+    /// `(fence_us, acquire_us, present_us)` of the last present: the in-flight fence
+    /// wait, `vkAcquireNextImageKHR`, and `vkQueuePresentKHR`.
+    pub(crate) fn last_waits(&self) -> (u32, u32, u32) {
+        (
+            self.last_fence_us,
+            self.last_acquire_us,
+            self.last_present_us,
+        )
+    }
+
+    /// Active swapchain present mode for the stats overlay. Can differ from the request
+    /// when the surface does not offer it.
     pub(crate) fn present_mode_name(&self) -> &'static str {
         match self.present_mode {
             vk::PresentModeKHR::MAILBOX => "mailbox",

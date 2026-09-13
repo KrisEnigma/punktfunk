@@ -130,6 +130,7 @@ impl Presenter {
         // One frame in flight: the fence covers the command buffer, the staging
         // buffer, and the previously submitted hw frame.
 
+        let fence_started = std::time::Instant::now();
         // SAFETY: `fence` is owned here. `submitted` means the last `queue_submit`
         // named it; wait idles that submit, then reset is legal.
         unsafe {
@@ -139,6 +140,7 @@ impl Presenter {
             }
             self.device.reset_fences(&[self.fence])?;
         }
+        self.last_fence_us = fence_started.elapsed().as_micros() as u32;
         if let Some(old) = self.retired_hw.take() {
             old.destroy(&self.device);
         }
@@ -265,6 +267,7 @@ impl Presenter {
             unsafe { self.device.update_descriptor_sets(&writes, &[]) };
         }
 
+        let acquire_started = std::time::Instant::now();
         // SAFETY: `swapchain` and `acquire_sem` are owned here. Fence wait above
         // completed the last submit that waited `acquire_sem`, so it is not pending.
         let (index, _suboptimal) = match unsafe {
@@ -287,6 +290,7 @@ impl Presenter {
             }
             Err(e) => return Err(e).context("vkAcquireNextImageKHR"),
         };
+        self.last_acquire_us = acquire_started.elapsed().as_micros() as u32;
         let swap_image = self.images[index as usize];
 
         // SAFETY: `cmd_buf` is owned and idle (fence wait above). Recording names
@@ -740,12 +744,14 @@ impl Presenter {
                 self.next_present_id += 1;
                 present_info = present_info.push_next(&mut pid_info);
             }
+            let present_started = std::time::Instant::now();
             // Same queue external-sync as the submit. Scoped tightly: OUT_OF_DATE
             // re-enters the lock via `recreate_swapchain`'s queue drain.
             let present_res = {
                 let _q = self.queue_lock.guard();
                 self.swap_d.queue_present(self.queue, &present_info)
             };
+            self.last_present_us = present_started.elapsed().as_micros() as u32;
             match present_res {
                 Ok(_) => {
                     // A failed present's id may never signal — claim it only on Ok.

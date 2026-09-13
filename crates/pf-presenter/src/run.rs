@@ -217,6 +217,9 @@ struct StreamState {
     /// Per present: D3D11 import lookup (0 off that lane) and `vkQueueSubmit` wall time.
     win_import_us: Vec<u64>,
     win_submit_us: Vec<u64>,
+    win_fence_us: Vec<u64>,
+    win_acquire_us: Vec<u64>,
+    win_present_us: Vec<u64>,
     win_start: Instant,
     presented: PresentedWindow,
     /// Newest-wins under latency, smoothing FIFO under smoothness. A smoothing store
@@ -372,6 +375,9 @@ impl StreamState {
             win_latch_us: Vec::with_capacity(256),
             win_import_us: Vec::with_capacity(256),
             win_submit_us: Vec::with_capacity(256),
+            win_fence_us: Vec::with_capacity(256),
+            win_acquire_us: Vec::with_capacity(256),
+            win_present_us: Vec::with_capacity(256),
             win_start: Instant::now(),
             presented: PresentedWindow::default(),
             store: FrameStore::new(usize::from(priority.fifo_capacity())),
@@ -2204,6 +2210,10 @@ fn run_inner(mut opts: SessionOpts, mut mode: ModeCtl) -> Result<Option<Outcome>
                     let (import_us, submit_us) = presenter.last_timings();
                     st.win_import_us.push(u64::from(import_us));
                     st.win_submit_us.push(u64::from(submit_us));
+                    let (fence_us, acquire_us, present_us) = presenter.last_waits();
+                    st.win_fence_us.push(u64::from(fence_us));
+                    st.win_acquire_us.push(u64::from(acquire_us));
+                    st.win_present_us.push(u64::from(present_us));
                     if opts.json_status && !st.ready_announced {
                         st.ready_announced = true;
                         println!("{{\"ready\":true}}");
@@ -2250,6 +2260,11 @@ fn run_inner(mut opts: SessionOpts, mut mode: ModeCtl) -> Result<Option<Outcome>
                 let (import_p50, _) = session::window_percentiles(&mut st.win_import_us);
                 let (submit_p50, _) = session::window_percentiles(&mut st.win_submit_us);
                 let submit_max = st.win_submit_us.iter().copied().max().unwrap_or(0);
+                let (fence_p50, _) = session::window_percentiles(&mut st.win_fence_us);
+                let fence_max = st.win_fence_us.iter().copied().max().unwrap_or(0);
+                let (acquire_p50, _) = session::window_percentiles(&mut st.win_acquire_us);
+                let acquire_max = st.win_acquire_us.iter().copied().max().unwrap_or(0);
+                let (present_p50, _) = session::window_percentiles(&mut st.win_present_us);
                 // Drained once per window and shared by the HUD and the log line — a
                 // second `take_counters` would read zeros.
                 let (replaced, q_drop, q_dry) = st.store.take_counters();
@@ -2274,6 +2289,9 @@ fn run_inner(mut opts: SessionOpts, mut mode: ModeCtl) -> Result<Option<Outcome>
                 st.win_latch_us.clear();
                 st.win_import_us.clear();
                 st.win_submit_us.clear();
+                st.win_fence_us.clear();
+                st.win_acquire_us.clear();
+                st.win_present_us.clear();
                 st.win_start = Instant::now();
                 // Adaptive slot margin: start at 0 — a fixed lead is display tax — and
                 // widen one step per window whose measured latch misses demand it.
@@ -2306,6 +2324,11 @@ fn run_inner(mut opts: SessionOpts, mut mode: ModeCtl) -> Result<Option<Outcome>
                         import_us = import_p50,
                         submit_us = submit_p50,
                         submit_max_us = submit_max,
+                        fence_us = fence_p50,
+                        fence_max_us = fence_max,
+                        acquire_us = acquire_p50,
+                        acquire_max_us = acquire_max,
+                        present_us = present_p50,
                         period_us = st.clock.period_ns() / 1000,
                         margin_us = st.margin_ns / 1000,
                         // Cadence loop's current hold and the jitter it is sized from,
