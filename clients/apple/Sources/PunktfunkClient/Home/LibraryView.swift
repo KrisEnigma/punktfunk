@@ -630,11 +630,11 @@ struct LibraryView: View {
             columns: columnCount)
     }
 
-    /// How many columns `.adaptive(minimum:spacing:)` fits into the measured width — the same
-    /// arithmetic the layout does, so up/down move exactly one visual row rather than a guess.
-    /// Falls back to one column before the first measurement lands.
+    /// How many `rowTileWidth` columns fit into the measured width — the same arithmetic the
+    /// layout does, so up/down move exactly one visual row rather than a guess. Falls back to one
+    /// column before the first measurement lands.
     private var columnCount: Int {
-        let minimum: CGFloat = 130 // matches `columns` below on iOS/macOS
+        let minimum = rowTileWidth // `columns` below fixes the grid at this width
         let spacing: CGFloat = 18
         // The VStack's `.padding()` is inside the measured width, so take it back off.
         let usable = gridWidth - 32
@@ -644,7 +644,7 @@ struct LibraryView: View {
     #endif
 
     private func tiles(_ entries: [GameEntry]) -> some View {
-        LazyVGrid(columns: columns, spacing: 18) {
+        LazyVGrid(columns: columns, alignment: .leading, spacing: 18) {
             ForEach(entries) { game in
                 tile(game, caption: sortCaption(game))
             }
@@ -770,13 +770,14 @@ struct LibraryView: View {
             .foregroundStyle(.secondary)
     }
 
+    /// The rows' poster width on iOS and the Mac: the grid fits as many columns as the width holds
+    /// from the leading edge, so a poster keeps one size. tvOS still fills its row.
     private var columns: [GridItem] {
         #if os(tvOS)
-        let minW: CGFloat = 220
+        [GridItem(.adaptive(minimum: 220), spacing: 18)]
         #else
-        let minW: CGFloat = 130
+        [GridItem(.adaptive(minimum: rowTileWidth, maximum: rowTileWidth), spacing: 18)]
         #endif
-        return [GridItem(.adaptive(minimum: minW), spacing: 18)]
     }
 
     private func errorState(_ text: String) -> some View {
