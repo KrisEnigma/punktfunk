@@ -265,6 +265,13 @@ impl NativeD3d11Decoder {
         DECODER_PIN
     }
 
+    /// Hand NV12 / P010 pictures over as planar copies when the presenter imports them
+    /// ([`HandoffRing::set_planar`]); RGB through the video processor otherwise.
+    pub(crate) fn with_planar(mut self, nv12: bool, p010: bool) -> Self {
+        self.handoff.set_planar(nv12, p010);
+        self
+    }
+
     pub(crate) fn health(&self) -> DecodeHealth {
         self.health
     }

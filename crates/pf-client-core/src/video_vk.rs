@@ -125,6 +125,11 @@ pub struct VulkanDecodeDevice {
     /// Presenter can import RGB10A2 and offers an HDR10 swapchain, so D3D11VA
     /// emits PQ pass-through instead of tonemapping to sRGB. Always `false` off Windows.
     pub d3d11_hdr10: bool,
+    /// Presenter imports two-plane NV12 / P010 D3D11 textures for sampling and the vendor
+    /// survives it, so D3D11VA copies into planar slots instead of running the video
+    /// processor. Always `false` off Windows.
+    pub d3d11_nv12: bool,
+    pub d3d11_p010: bool,
     /// Adapter LUID when the driver reports one. D3D11VA builds on the same
     /// adapter so shared textures never cross GPUs. `None` off Windows or when unreported.
     pub adapter_luid: Option<[u8; 8]>,

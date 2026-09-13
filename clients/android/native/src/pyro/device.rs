@@ -260,6 +260,8 @@ impl PyroDevice {
             api_version: probe.api_version,
             queue_families: vec![qf],
             d3d11_import: false,
+            d3d11_nv12: false,
+            d3d11_p010: false,
             d3d11_hdr10: false,
             adapter_luid: None,
             queue_lock: std::sync::Arc::new(QueueLock::new()),

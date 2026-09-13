@@ -125,19 +125,22 @@ pub(super) fn native_layer_barrier(
 
 /// The keyed mutex on the submit is the cross-API order. UNDEFINED old-layout
 /// on externally-bound memory preserves contents (unlike ordinary images);
-/// this is the layout/ownership hop only.
+/// this is the layout/ownership hop only, into whatever the reader needs.
 #[cfg(windows)]
 pub(super) fn external_acquire_barrier(
     device: &ash::Device,
     cmd: vk::CommandBuffer,
     image: vk::Image,
     qfi: u32,
+    layout: vk::ImageLayout,
+    stage: vk::PipelineStageFlags,
+    access: vk::AccessFlags,
 ) {
     let b = vk::ImageMemoryBarrier::default()
         .src_access_mask(vk::AccessFlags::empty())
-        .dst_access_mask(vk::AccessFlags::TRANSFER_READ)
+        .dst_access_mask(access)
         .old_layout(vk::ImageLayout::UNDEFINED)
-        .new_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
+        .new_layout(layout)
         .src_queue_family_index(vk::QUEUE_FAMILY_EXTERNAL)
         .dst_queue_family_index(qfi)
         .image(image)
@@ -148,7 +151,7 @@ pub(super) fn external_acquire_barrier(
         device.cmd_pipeline_barrier(
             cmd,
             vk::PipelineStageFlags::TOP_OF_PIPE,
-            vk::PipelineStageFlags::TRANSFER,
+            stage,
             vk::DependencyFlags::empty(),
             &[],
             &[],
