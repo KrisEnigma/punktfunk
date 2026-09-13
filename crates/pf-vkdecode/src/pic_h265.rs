@@ -8,8 +8,9 @@
 //! corruption. See [`DecodePlanVkH265::std_pic`].
 //!
 //! The AU-level binding set is the union of the plan's three current RPS sets
-//! ([`pf_bitstream::h265::RpsPlan`]). Per-slice lists are a closed check: every
-//! entry must be in that set.
+//! ([`pf_bitstream::h265::RpsPlan`]), then the other marked pictures
+//! ([`AuPlan::dpb_refs`]). Per-slice lists are a closed check against the
+//! current sets.
 //!
 //! A lost reference is absent from the RPS (`PlanWarning::MissingReference`);
 //! the index arrays compact past it. There is no slot to point at.
@@ -76,9 +77,11 @@ pub struct DecodePlanVkH265 {
     /// setup slot then exists for the decode itself plus any remaining DPB
     /// residency, and must never be bound as a reference for later AUs.
     pub setup_is_reference: bool,
-    /// Unique referenced pictures: union of the three current RPS sets in set
-    /// order (StCurrBefore, StCurrAfter, LtCurr), first appearance first. Every
-    /// slot [`Self::std_pic`]'s index arrays name appears here exactly once.
+    /// `pReferenceSlots`: the union of the three current RPS sets in set order
+    /// (StCurrBefore, StCurrAfter, LtCurr), first appearance first, then every
+    /// other marked picture (the *Foll* sets) in DPB order. AMD's Windows driver
+    /// decodes a later reference to an omitted *Foll* picture wrong. Every slot
+    /// [`Self::std_pic`]'s index arrays name appears here exactly once.
     pub refs: Vec<VkRefH265>,
 }
 
@@ -95,8 +98,8 @@ pub enum PlanToVkH265Error {
     /// [`SlotMap`].
     UnresolvedReference(PicId),
     /// A slice list names a picture outside the current RPS sets. 8.3.4 builds
-    /// every list from those sets; the picture would be missing from
-    /// `pReferenceSlots` and hardware could not resolve it.
+    /// every list from those sets; no index array could name it, so hardware
+    /// could not resolve it.
     ReferenceOutsideRps(PicId),
     Slot(SlotError),
     /// Vulkan submits slice offsets as `u32`.
@@ -194,8 +197,8 @@ fn ref_info(rp: &RefPic) -> hh::StdVideoDecodeH265ReferenceInfo {
     let mut std: hh::StdVideoDecodeH265ReferenceInfo = unsafe { std::mem::zeroed() };
     std.flags
         .set_used_for_long_term_reference(u32::from(rp.is_long_term));
-    // unused_for_reference stays 0: membership in a CURRENT set is the
-    // definition of being used for reference by this picture.
+    // unused_for_reference stays 0: every bound picture is one the RPS keeps
+    // marked, current or *Foll*.
     std.PicOrderCntVal = rp.pic_order_cnt;
     std
 }
@@ -354,6 +357,23 @@ pub fn plan_to_vk_h265(
         }
     }
 
+    // The *Foll* pictures bind after the current sets, as FFmpeg's Vulkan hwaccel
+    // binds them. A picture this AU retires is no reference: skipping it keeps the
+    // setup slot, assigned below from freed slots, out of the list.
+    for rp in &plan.dpb_refs {
+        if plan.dpb.removed.contains(&rp.id) || refs.iter().any(|r| r.id == rp.id) {
+            continue;
+        }
+        match slots.slot_of(rp.id) {
+            Some(slot) => refs.push(VkRefH265 {
+                slot,
+                std: ref_info(rp),
+                id: rp.id,
+            }),
+            None => trace!(id = rp.id, "a marked picture holds no slot — left unbound"),
+        }
+    }
+
     let pic = &plan.picture;
 
     // SAFETY: StdVideoDecodeH265PictureInfo is a plain-C bindgen struct of a
@@ -484,23 +504,21 @@ mod tests {
     /// 120 AUs retire a picture. The stream the GPU legs decode against.
     const LOWDELAY_640X480_H265: &[u8] = include_bytes!("../tests/data/lowdelay-640x480.h265");
 
-    /// This conversion binds `plan.rps` (the current sets), never `dpb_refs`.
-    /// Widening `dpb_refs` to the pre-RPS marked set — the mutation that aliases
-    /// the DXVA rung on 115 of these 120 AUs — must change nothing here.
+    /// Every marked picture binds, the *Foll* ones after the current sets, and none
+    /// aliases the setup slot. Also with `dpb_refs` widened to the pre-RPS marked
+    /// set, the mutation that aliases the DXVA rung on 115 of these 120 AUs.
     ///
-    /// A failure means the conversion started binding the marked DPB and now
-    /// needs the `release_after_decode` deferral H.264 and AV1 carry. A *Foll*
-    /// long-term anchor invisible to the hardware is the reason one might want
-    /// that; Vulkan `pReferenceSlots` is the slots this decode uses, so it does
-    /// not.
+    /// A failure means a picture this AU retires reached `pReferenceSlots`: the
+    /// setup slot is assigned from freed slots, so the two would alias.
     #[test]
-    fn a_pre_rps_marked_dpb_changes_nothing_here_because_the_current_sets_are_what_bind() {
+    fn every_marked_picture_binds_and_none_aliases_the_setup_slot() {
         let aus = split_into_aus(LOWDELAY_640X480_H265);
         let mut planner = H265Planner::new();
         let mut slots: Option<SlotMap> = None;
         let mut prev: Option<AuPlan> = None;
         let mut converted = 0usize;
         let mut widened = 0usize;
+        let mut foll_bound = 0usize;
 
         for au in aus {
             let plan = planner.plan_au(au).expect("the low-delay stream plans");
@@ -530,16 +548,37 @@ mod tests {
             if as_if.dpb_refs.len() > plan.dpb_refs.len() {
                 widened += 1;
             }
-
-            let vk = plan_to_vk_h265(&as_if, map).expect("conversion");
-            converted += 1;
-            for r in &vk.refs {
+            let wide = plan_to_vk_h265(&as_if, &mut map.clone()).expect("conversion");
+            for r in &wide.refs {
                 assert_ne!(
-                    r.slot, vk.setup_slot,
-                    "a reference aliases the setup slot even though this conversion \
-                     binds only the current RPS sets — it has started reading \
-                     `dpb_refs`, and now needs a deferred release"
+                    r.slot, wide.setup_slot,
+                    "a retired picture aliases the setup slot"
                 );
+            }
+
+            let vk = plan_to_vk_h265(&plan, map).expect("conversion");
+            converted += 1;
+            let mut current: Vec<PicId> = Vec::new();
+            let sets = plan.rps.st_curr_before.iter();
+            for rp in sets.chain(&plan.rps.st_curr_after).chain(&plan.rps.lt_curr) {
+                if !current.contains(&rp.id) {
+                    current.push(rp.id);
+                }
+            }
+            let bound: Vec<PicId> = vk.refs.iter().map(|r| r.id).collect();
+            assert_eq!(bound[..current.len()], current[..], "the current sets lead");
+            for rp in &plan.dpb_refs {
+                assert!(
+                    bound.contains(&rp.id),
+                    "AU {converted}: marked {} unbound",
+                    rp.id
+                );
+            }
+            for r in &vk.refs {
+                assert_ne!(r.slot, vk.setup_slot, "a reference aliases the setup slot");
+            }
+            if bound.len() > current.len() {
+                foll_bound += 1;
             }
             prev = Some(plan);
         }
@@ -550,6 +589,46 @@ mod tests {
             "the mutation must actually widen the marked set on the access units that \
              retire a picture, else this test asserts nothing about anything"
         );
+        assert_eq!(foll_bound, 118, "AUs that bind a *Foll* picture");
+    }
+
+    #[test]
+    fn a_foll_picture_binds_after_the_current_set() {
+        // POC 2 predicts from POC 1 and keeps POC 0 for a later anchor. AMD's
+        // driver decodes that anchor wrong unless POC 0 stays bound here.
+        let mut slots = SlotMap::new(4);
+        slots.assign(10).unwrap(); // POC 0, slot 0
+        slots.assign(11).unwrap(); // POC 1, slot 1
+        let mut plan = mini_plan(
+            12,
+            2,
+            RpsPlan {
+                st_curr_before: vec![st_ref(11, 1)],
+                st_curr_after: Vec::new(),
+                lt_curr: Vec::new(),
+            },
+            Vec::new(),
+            4,
+        );
+        plan.dpb_refs = vec![st_ref(10, 0), st_ref(11, 1)];
+        let vk = plan_to_vk_h265(&plan, &mut slots).unwrap();
+
+        let bound: Vec<(u8, i32)> = vk
+            .refs
+            .iter()
+            .map(|r| (r.slot, r.std.PicOrderCntVal))
+            .collect();
+        assert_eq!(
+            bound,
+            vec![(1, 1), (0, 0)],
+            "current first, then the *Foll* picture"
+        );
+        assert_eq!(
+            vk.std_pic.RefPicSetStCurrBefore[0], 1,
+            "the index array names slot 1"
+        );
+        assert_eq!(vk.std_pic.RefPicSetStCurrBefore[1], UNUSED_RPS_ENTRY);
+        assert_eq!(vk.setup_slot, 2);
     }
 
     #[test]
@@ -836,8 +915,7 @@ mod tests {
         list0.extend(rps.st_curr_before.iter().copied());
         list0.extend(rps.st_curr_after.iter().copied());
         list0.extend(rps.lt_curr.iter().copied());
-        // Vulkan binds `pReferenceSlots` from the current sets; `dpb_refs` is
-        // not an input to anything under test.
+        // The marked DPB is the current sets alone unless a test widens it.
         let dpb_refs = list0.clone();
         AuPlan {
             picture: mini_picture(poc, max_dpb_frames),

@@ -72,10 +72,10 @@ pub struct AuPlan {
     /// A SUPERSET of [`Self::rps`]: 8.3.2's *Foll* sets stay marked for later
     /// pictures while this AU names none of them.
     ///
-    /// DXVA `RefPicList` is those marked pictures; a driver may treat absence as
-    /// "no longer a reference" and drop a long-term RFI anchor. Vulkan
-    /// `pReferenceSlots` is the slots THIS decode uses, so the native rung
-    /// binds [`Self::rps`].
+    /// Both rungs bind them: DXVA as `RefPicList`, Vulkan in `pReferenceSlots`
+    /// after the current sets. A driver may treat absence as "no longer a
+    /// reference": AMD's Vulkan driver then decodes an RFI anchor on a *Foll*
+    /// picture wrong.
     ///
     /// Captured after 8.3.2 marking and C.5.2.2's pre-decode update, before the
     /// current picture is stored — never contains it, never a picture the RPS
