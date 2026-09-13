@@ -74,6 +74,10 @@ struct LibraryView: View {
     /// The collection the gamepad shelf is drilled into (its label), or nil — reported so a host
     /// screen (GamepadLibraryScreen's pinned title) can read `host · preset · collection`.
     var onCollectionChanged: ((String?) -> Void)?
+    #if DEBUG
+    /// Shot harness: a canned phase in place of the fetch (`ShotGallery.swift`).
+    var shotPhase: ShotLibraryPhase?
+    #endif
     /// The same, for this view's own navigation title (the sheet/cover presentations).
     @State private var collectionLabel: String?
     /// The touch grid's sort (the shared `library_sort` key, the same one the console's bar
@@ -123,7 +127,11 @@ struct LibraryView: View {
     @AppStorage(DefaultsKey.gamepadUIMode) private var gamepadUIMode =
         GamepadUIEnvironment.modeWhenConnected
     private var gamepadUIActive: Bool {
-        GamepadUIEnvironment.isActive(
+        #if DEBUG
+        // A shot phase is a touch-UI scene, whatever controller or stored mode the device has.
+        if shotPhase != nil { return false }
+        #endif
+        return GamepadUIEnvironment.isActive(
             gamepadConnected: gamepadManager.uiPadConnected, enabledSetting: gamepadUIEnabled,
             mode: gamepadUIMode)
     }
@@ -532,6 +540,12 @@ struct LibraryView: View {
     }
 
     private func load() async {
+        #if DEBUG
+        if let shotPhase {
+            applyShot(shotPhase)
+            return
+        }
+        #endif
         loading = true
         errorText = nil
         // Dev hook, the twin of the desktop console's `PUNKTFUNK_FAKE_LIBRARY`: a file holding
@@ -663,6 +677,27 @@ struct LibraryView: View {
         loading = false
     }
 
+    #if DEBUG
+    private func applyShot(_ phase: ShotLibraryPhase) {
+        artLoader = ShotPosterArt.source
+        switch phase {
+        case .loading:
+            loading = true
+        case .error(let text):
+            errorText = text
+        case .empty:
+            games = []
+        case .catalog(let list, let staleness, let up):
+            games = list.launchersFirst
+            servedFromCacheAt = staleness == .none ? nil : Date()
+            loading = staleness == .waking
+            running = Dictionary(
+                up.compactMap { id in ShotMock.running(id).map { (id, $0) } },
+                uniquingKeysWith: { first, _ in first })
+        }
+    }
+    #endif
+
     /// The `PUNKTFUNK_FAKE_LIBRARY` path: a plain `[GameEntry]` array, or a `{ "library": [...] }`
     /// wrapper (the shared vectors file). A bad file reads as an error state, not a crash.
     private func loadFake(path: String) {
@@ -744,6 +779,16 @@ struct LibraryView: View {
     }
 }
 
+#if DEBUG
+/// A shelf phase the shot harness shows without a host.
+enum ShotLibraryPhase {
+    case loading
+    case error(String)
+    case empty
+    case catalog([GameEntry], staleness: LibraryStaleness = .none, running: [String] = [])
+}
+#endif
+
 /// The catalog's provenance, as the shelf states it. Three states rather than a flag so "waking
 /// the host…" can never be shown while nothing is happening — the same enum the desktop console
 /// keeps (`Stale::{No, Waking, Offline}`), with its exact wording.
@@ -801,7 +846,7 @@ private struct LibraryBackCatcher: View {
 
 /// One poster tile. Steam vs custom is marked with a badge; the art walks the candidate URLs
 /// (portrait → header → hero) and finally a text placeholder.
-private struct GameCard: View {
+struct GameCard: View {
     let game: GameEntry
     let artLoader: (any LibraryArtSource)?
     /// The hardware-keyboard cursor is on this tile — drawn as an accent ring, since the plain

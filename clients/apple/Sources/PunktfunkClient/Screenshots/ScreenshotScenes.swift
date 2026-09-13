@@ -70,6 +70,21 @@ enum ShotScenes {
             ShotScene(name: "13b-launch-hold-flight", orientation: .landscape, colorScheme: .dark) {
                 AnyView(ShotLaunchHold(flight: true))
             },
+            // Variant galleries: every state of one component on one sheet (ShotGallery.swift).
+            ShotScene(name: "14-gallery-host-cards", orientation: .natural, colorScheme: .dark) {
+                AnyView(ShotGalleryView(title: "Host cards", variants: ShotMock.hostCardVariants))
+            },
+            ShotScene(name: "14b-gallery-library-tiles", orientation: .natural, colorScheme: .dark) {
+                AnyView(ShotGalleryView(
+                    title: "Library tiles", variants: ShotMock.libraryTileVariants, minWidth: 150))
+            },
+            ShotScene(name: "14d-gallery-library-states", orientation: .natural, colorScheme: .dark) {
+                AnyView(ShotGalleryView(
+                    title: "Library states", variants: ShotMock.libraryStateVariants))
+            },
+            ShotScene(name: "15-library-touch", orientation: .natural, colorScheme: .dark) {
+                AnyView(ShotLibraryTouch())
+            },
         ]
         #if os(iOS) || os(macOS)
         // The gamepad-mode console screens (no tvOS — native focus engine there). Dev-only shots
@@ -139,6 +154,9 @@ enum ShotMock {
 
     static let hdrProfileID = "a71c4e0d9f22"
     static let couchProfileID = "3e88b107c4da"
+    static let hdrPreset = StreamPreset(name: "4K HDR", id: hdrProfileID, accent: "#8B7BF7")
+    static let couchPreset = StreamPreset(
+        name: "Couch 1080p", id: couchProfileID, accent: "#4FD1A5")
 
     /// The catalog the host cards read their chips and pinned cards from. Seeded once, on the
     /// first store build — `PresetStore` is a singleton, and in shot mode its write-back is
@@ -146,10 +164,7 @@ enum ShotMock {
     static func installPresets() {
         guard !presetsInstalled else { return }
         presetsInstalled = true
-        PresetStore.shared.debugSet([
-            StreamPreset(name: "4K HDR", id: hdrProfileID, accent: "#8B7BF7"),
-            StreamPreset(name: "Couch 1080p", id: couchProfileID, accent: "#4FD1A5"),
-        ])
+        PresetStore.shared.debugSet([hdrPreset, couchPreset])
     }
 
     private static var presetsInstalled = false
