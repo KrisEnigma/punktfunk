@@ -759,7 +759,6 @@ impl Encoder {
             vah::VA_ENC_MISC_PARAMETER_TYPE_FRAME_RATE,
             &frame_rate,
         )?;
-        self.render_stripe(owned, stripe)?;
 
         if is_idr {
             let (packed_sps, packed_pps) = pf_vaapi::enc_params::packed_parameter_sets(sps, pps);
@@ -817,6 +816,9 @@ impl Encoder {
             bail!("reference slot {:?} is not held", slice.reference_slot);
         }
         self.render(owned, vah::VA_ENC_SLICE_PARAMETER_BUFFER_TYPE, &va_slice)?;
+        // After the slice: iHD parses buffers in order and its slice parser drops a rolling
+        // refresh it has not yet seen a P slice for; Mesa stores it whenever it arrives.
+        self.render_stripe(owned, stripe)?;
 
         // Neither driver writes a slice header of its own: radeonsi templates its
         // from this one, iHD copies it.
@@ -847,7 +849,6 @@ impl Encoder {
             vah::VA_ENC_MISC_PARAMETER_TYPE_FRAME_RATE,
             &frame_rate,
         )?;
-        self.render_stripe(owned, stripe)?;
 
         if is_idr {
             let mut sets = hevc.vps();
@@ -930,6 +931,9 @@ impl Encoder {
             bail!("reference slot {:?} is not held", slice.reference_slot);
         }
         self.render(owned, vah::VA_ENC_SLICE_PARAMETER_BUFFER_TYPE, &va_slice)?;
+        // After the slice: iHD parses buffers in order and its slice parser drops a rolling
+        // refresh it has not yet seen a P slice for; Mesa stores it whenever it arrives.
+        self.render_stripe(owned, stripe)?;
 
         let header = hevc.slice_header(HevcSlice {
             is_idr,

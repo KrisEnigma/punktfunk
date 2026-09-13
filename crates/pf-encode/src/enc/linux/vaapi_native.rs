@@ -542,8 +542,9 @@ mod tests {
                 assert_eq!(w.index, 0);
                 cycle = w.cycle as usize;
                 eprintln!(
-                    "run_wave_smoke: {} rows, cycle {cycle}",
-                    enc.session.as_ref().unwrap().wave_rows()
+                    "run_wave_smoke: {} rows, cycle {cycle}, low_power={}",
+                    enc.session.as_ref().unwrap().wave_rows(),
+                    enc.session.as_ref().unwrap().low_power()
                 );
             }
             if restart && i == start2 {
