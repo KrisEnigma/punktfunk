@@ -2963,6 +2963,11 @@ mod tests {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(12);
+        // `PF_WAVE_SPOIL=1`: three frames into every wave a frame inside its sweep is lost,
+        // so it closes unmarked and the wave queued behind it is the one that must be exact.
+        // `PF_WAVE_IDR=1`: two frames into every wave an IDR is forced, which flushes it.
+        let spoil = std::env::var("PF_WAVE_SPOIL").is_ok_and(|v| v == "1");
+        let idr = std::env::var("PF_WAVE_IDR").is_ok_and(|v| v == "1");
         assert!(
             std::env::var("PUNKTFUNK_NVENC_IR_ALWAYS").is_ok_and(|v| v == "1"),
             "PUNKTFUNK_NVENC_IR_ALWAYS=1 makes every ask a wave"
@@ -3049,19 +3054,45 @@ mod tests {
             );
             let cycle = enc.wave_cycle() as usize;
             assert!(cycle >= 2, "the wave is on");
-            // Wave k starts at 3 + k * (cycle + gap); its lost frame is two before that.
-            let period = cycle + gap;
+            // Wave k starts at 3 + k * period; its lost frame is two before that. A spoiled
+            // wave is followed by the queued one, so its period holds two cycles.
+            assert!(
+                cycle > 3 || !spoil,
+                "the spoiling loss lands inside the sweep"
+            );
+            let period = if spoil { 2 * cycle + gap } else { cycle + gap };
             let last = 3 + waves * period;
             let mut lost = Vec::new();
+            let mut starts = Vec::new();
             let mut closes = Vec::new();
+            let mut idrs = Vec::new();
             let mut aus = Vec::new();
             for i in 0..=last {
-                if i >= 3 && (i - 3) % period == 0 && (i - 3) / period < waves {
-                    let l = (i - 2) as i64;
-                    assert!(enc.invalidate_ref_frames(l, l), "the always-wave answers");
-                    assert_eq!(enc.wave.map(|w| w.index), Some(0), "a fresh wave");
-                    lost.push(i - 2);
-                    closes.push(i + cycle - 1);
+                let offset = (i >= 3 && (i - 3) / period < waves).then(|| (i - 3) % period);
+                match offset {
+                    Some(0) => {
+                        let l = (i - 2) as i64;
+                        assert!(enc.invalidate_ref_frames(l, l), "the always-wave answers");
+                        assert_eq!(enc.wave.map(|w| w.index), Some(0), "a fresh wave");
+                        lost.push(i - 2);
+                        starts.push(i);
+                        if !spoil && !idr {
+                            closes.push(i + cycle - 1);
+                        }
+                    }
+                    Some(2) if idr => {
+                        enc.request_keyframe();
+                        idrs.push(i);
+                    }
+                    Some(3) if spoil => {
+                        let l = (i - 1) as i64;
+                        assert!(enc.invalidate_ref_frames(l, l), "a loss inside the sweep");
+                        assert!(enc.wave_spoiled && enc.wave_queued, "spoiled, one queued");
+                        lost.push(i - 1);
+                        starts.push(i - 3 + cycle);
+                        closes.push(i - 3 + 2 * cycle - 1);
+                    }
+                    _ => {}
                 }
                 let tex = texture(i);
                 let frame = CapturedFrame {
@@ -3079,16 +3110,27 @@ mod tests {
                 };
                 enc.submit_indexed(&frame, i as u32).expect("submit");
                 let au = enc.poll().expect("poll").expect("an AU per submit (sync)");
+                if idrs.last() == Some(&i) {
+                    assert!(enc.wave.is_none(), "the IDR flushed the wave");
+                }
                 aus.push(au);
             }
             enc.flush().ok();
             for (i, au) in aus.iter().enumerate() {
-                assert_eq!(au.keyframe, i == 0, "AU {i}: the only IDR is frame 0");
-                let start = i >= 3 && (i - 3) % period == 0 && (i - 3) / period < waves;
+                assert_eq!(
+                    au.keyframe,
+                    i == 0 || idrs.contains(&i),
+                    "AU {i}: IDRs only where forced"
+                );
                 assert_eq!(
                     au.recovery_point,
-                    start || closes.contains(&i),
-                    "AU {i}: marks on every start and close"
+                    starts.contains(&i) || closes.contains(&i),
+                    "AU {i}: marks on every start and unspoiled close"
+                );
+                assert_eq!(
+                    au.recovery_close,
+                    closes.contains(&i),
+                    "AU {i}: the close bit on every unspoiled close"
                 );
             }
             let full: Vec<u8> = aus.iter().flat_map(|a| a.data.iter().copied()).collect();
@@ -3109,11 +3151,12 @@ mod tests {
             };
             println!(
                 "nvenc_wave_soak: {W}x{H} {}-bit {fps} fps {mbps} Mbps cycle={cycle} gap={gap} \
-                 waves={waves} aus={} lost={} closes={}",
+                 waves={waves} aus={} lost={} closes={} spoil={spoil} idrs={}",
                 if ten_bit { 10 } else { 8 },
                 aus.len(),
                 csv(&lost),
-                csv(&closes)
+                csv(&closes),
+                csv(&idrs)
             );
         }
     }
