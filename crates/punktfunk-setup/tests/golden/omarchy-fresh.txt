@@ -10,10 +10,10 @@
   + grep -q '^\[punktfunk\]' /etc/pacman.conf || printf '\n[punktfunk]\nServer = https://git.unom.io/api/packages/unom/arch/$repo/$arch\n' | sudo tee -a /etc/pacman.conf >/dev/null
   + sudo pacman -Sy
   + sudo pacman -S --noconfirm punktfunk-host punktfunk-web punktfunk-scripting punktfunk-client
-==> Omarchy
-  + punktfunk-omarchy setup --groups=1 --cert=1 --toasts=1 --idle-guard=1 --theme=1
 ==> Checking for Sunshine / Apollo / Vibeshine
   ok No conflicting game-streaming host detected.
+==> Omarchy
+  + punktfunk-omarchy setup --groups=1 --cert=1 --toasts=1 --idle-guard=1 --theme=1
 ==> Controller access
   + sudo usermod -aG input "$USER"
   + sudo usermod -aG punktfunk "$USER"

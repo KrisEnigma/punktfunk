@@ -190,6 +190,16 @@ pub fn build(facts: &Facts, choices: &Choices) -> Plan {
         );
     }
 
+    // Before the Omarchy hand-off, which starts the host and ends the run: next to Sunshine the
+    // host's first bind must already be on the moved mgmt port.
+    if choices.components.host {
+        plan.push(
+            Phase::Conflicts,
+            "Checking for Sunshine / Apollo / Vibeshine",
+            conflict_steps(facts, choices),
+        );
+    }
+
     if facts.omarchy {
         plan.push(Phase::Omarchy, "Omarchy", omarchy_steps(facts, choices));
     }
@@ -199,11 +209,6 @@ pub fn build(facts: &Facts, choices: &Choices) -> Plan {
         return plan;
     }
 
-    plan.push(
-        Phase::Conflicts,
-        "Checking for Sunshine / Apollo / Vibeshine",
-        conflict_steps(facts, choices),
-    );
     plan.push(
         Phase::Groups,
         "Controller access",
