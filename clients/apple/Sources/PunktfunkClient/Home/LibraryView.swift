@@ -91,6 +91,9 @@ struct LibraryView: View {
     var inTab = false
     /// Stream a saved host's desktop, launching nothing: the tab's Desktops section.
     var onConnectHost: ((StoredHost) -> Void)?
+    /// Drawn above the tab's sections, inside the scroll, so it moves with the title: the host
+    /// filter.
+    var tabHeader: AnyView?
     #if DEBUG
     /// Shot harness: a canned phase in place of the fetch (`ShotGallery.swift`).
     var shotPhase: ShotLibraryPhase?
@@ -462,6 +465,7 @@ struct LibraryView: View {
             keyNavigation(sections: groups, proxy: proxy) {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 26) {
+                        tabHeader
                         staleNote
                         ForEach(sectionLayout.visible) { section in
                             tabSection(section, groups: groups, proxy: proxy)

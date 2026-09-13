@@ -51,12 +51,6 @@ struct LibraryTabView: View {
             if let shelf {
                 library(shelf)
                     .id(shelf.id)
-                    .safeAreaInset(edge: .top, spacing: 0) {
-                        let all = shelves
-                        if all.count > 1 {
-                            ShelfFilter(shelves: all, current: shelf.id) { shelfID = $0 }
-                        }
-                    }
             } else {
                 LibraryNoHostView(showHosts: showHosts)
             }
@@ -68,12 +62,26 @@ struct LibraryTabView: View {
         LibraryView(
             store: store, target: shelf, onLaunch: { onLaunch(shelf, $0) },
             onConnect: { onConnectShelf(shelf) }, inTab: true, onConnectHost: onConnectHost,
-            shotPhase: shotPhase)
+            tabHeader: filter(current: shelf), shotPhase: shotPhase)
         #else
         LibraryView(
             store: store, target: shelf, onLaunch: { onLaunch(shelf, $0) },
-            onConnect: { onConnectShelf(shelf) }, inTab: true, onConnectHost: onConnectHost)
+            onConnect: { onConnectShelf(shelf) }, inTab: true, onConnectHost: onConnectHost,
+            tabHeader: filter(current: shelf))
         #endif
+    }
+
+    /// The host filter, when there is more than one shelf to pick. A pick opens the shelf at its
+    /// top: its remembered title is for coming back from a stream, not for switching hosts.
+    private func filter(current: LibraryTarget) -> AnyView? {
+        let all = shelves
+        guard all.count > 1 else { return nil }
+        return AnyView(ShelfFilter(shelves: all, current: current.id) { id in
+            if let picked = all.first(where: { $0.id == id }) {
+                LibraryScrollMemory.forget(hostID: picked.host.id.uuidString)
+            }
+            shelfID = id
+        })
     }
 }
 
@@ -86,14 +94,18 @@ private struct ShelfFilter: View {
     @ObservedObject private var presets = PresetStore.shared
 
     var body: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 8) {
-                ForEach(shelves) { shelf in
-                    chip(shelf)
+        ScrollViewReader { proxy in
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    ForEach(shelves) { shelf in
+                        chip(shelf).id(shelf.id)
+                    }
                 }
+                .padding(.horizontal)
+                .padding(.vertical, 2)
             }
-            .padding(.horizontal)
-            .padding(.vertical, 8)
+            // The row is rebuilt with each shelf, so bring the current chip back into view.
+            .onAppear { proxy.scrollTo(current) }
         }
     }
 
