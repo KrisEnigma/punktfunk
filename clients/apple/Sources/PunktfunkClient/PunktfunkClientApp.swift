@@ -56,12 +56,13 @@ struct PunktfunkClientApp: App {
             #if !os(tvOS)
             .tint(.brand)
             #endif
-            // Geist Sans is the app's typeface. This sets the default for unstyled text and the
-            // form row labels; views that pick an explicit size/weight use `.geist(…)` directly.
-            // tvOS reads from across the room: its system body is 29pt, so pinning the phone's
-            // 17pt there shrank every unstyled control (rows, fields, buttons) to postage size.
+            // Geist Sans at each platform's own body size: the default for unstyled text, form
+            // rows and fields. The phone's 17 pt shrank every tvOS control (29 pt there) and
+            // bloated every Mac one (13 pt); views with an explicit size use `.geist(…)`.
             #if os(tvOS)
             .font(.geist(29, relativeTo: .body))
+            #elseif os(macOS)
+            .font(.geist(13, relativeTo: .body))
             #else
             .font(.geist(17, relativeTo: .body))
             #endif
