@@ -171,7 +171,8 @@ struct LibraryView: View {
 
     var body: some View {
         content
-            .navigationTitle(inTab ? shelfTitle : "\(shelfTitle) — Library")
+            // In the tab the host filter names the shelf, so the title names the place.
+            .navigationTitle(inTab ? "Library" : "\(shelfTitle) — Library")
             #if os(iOS)
             .navigationBarTitleDisplayMode(inTab ? .large : .inline)
             #endif

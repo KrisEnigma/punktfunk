@@ -102,6 +102,10 @@ enum ShotScenes {
             ShotScene(name: "06-gamepad-home", orientation: .natural, colorScheme: .dark) {
                 AnyView(ShotGamepadHome())
             },
+            // The Library tab with its host filter (iOS) and the Mac's Library row.
+            ShotScene(name: "15f-library-filter", orientation: .natural, colorScheme: .dark) {
+                AnyView(ShotLibraryFilter())
+            },
             ShotScene(name: "07-gamepad-settings", orientation: .natural, colorScheme: .dark) {
                 AnyView(ShotGamepadSettings())
             },
