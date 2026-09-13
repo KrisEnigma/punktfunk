@@ -202,9 +202,9 @@ impl Presenter {
         // RGB10A2) as IMPORTABLE. Creating an unsupported external image is UB
         // (`VK_ERROR_DEVICE_LOST` on first submit).
         #[cfg(windows)]
-        let (import_bgra8, import_rgb10) = crate::d3d11::import_supported(&instance, pdev);
+        let import = crate::d3d11::import_supported(&instance, pdev);
         #[cfg(windows)]
-        let win_capable = crate::d3d11::DEVICE_EXTENSIONS.iter().all(|n| has(n)) && import_bgra8;
+        let win_capable = crate::d3d11::DEVICE_EXTENSIONS.iter().all(|n| has(n)) && import.bgra8;
         #[cfg(windows)]
         if win_capable {
             dev_exts.extend(crate::d3d11::DEVICE_EXTENSIONS.iter().map(|n| n.as_ptr()));
@@ -527,6 +527,8 @@ impl Presenter {
                 d3d11_import: false,
                 // HDR10 surface facts arrive with `pick_formats` below.
                 d3d11_hdr10: false,
+                d3d11_nv12: false,
+                d3d11_p010: false,
                 adapter_luid,
                 queue_lock: queue_lock.clone(),
             })
@@ -537,11 +539,15 @@ impl Presenter {
         let mut video_export = video_export;
 
         let (format, hdr10_format) = pick_formats(&surface_i, pdev, surface, has_colorspace_ext)?;
-        // D3D11VA may emit its RGB10 PQ ring only when this device imports 10-bit and
-        // the surface offers an HDR10 swapchain; otherwise PQ stays decoder-tonemapped.
+        // D3D11VA may emit its RGB10 PQ ring only when this device imports 10-bit and the
+        // surface offers an HDR10 swapchain. Planar NV12/P010 slots need the planar import
+        // and a vendor that survives it (`planar_allowed`).
         #[cfg(windows)]
         if let Some(v) = video_export.as_mut() {
-            v.d3d11_hdr10 = win_capable && import_rgb10 && hdr10_format.is_some();
+            v.d3d11_hdr10 = win_capable && import.rgb10 && hdr10_format.is_some();
+            let planar = win_capable && crate::d3d11::planar_allowed(v.vendor_id);
+            v.d3d11_nv12 = planar && import.nv12;
+            v.d3d11_p010 = planar && import.p010;
         }
         let mut pref = pref;
         pref.vrr_fifo_opt_in = vrr_fifo_opt_in();

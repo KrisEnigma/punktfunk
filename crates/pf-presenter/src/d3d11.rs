@@ -1,9 +1,9 @@
 //! D3D11 shared-texture → Vulkan import (Windows): presenter half of
 //! D3D11VA (`pf_client_core::video_d3d11`). Each frame names the NT handle of
-//! a shareable single-plane RGB ring slot — BGRA8 sRGB, or RGB10A2 PQ (the
-//! video processor already did YUV→RGB) — imported as one `VkImage`
-//! (`VK_KHR_external_memory_win32`, dedicated allocation) and composited
-//! straight into the swapchain; no CSC and no video image.
+//! a shareable ring slot: single-plane RGB the video processor filled (BGRA8
+//! sRGB or RGB10A2 PQ), composited straight into the swapchain; or a two-plane
+//! NV12/P010 copy of the decoded picture, sampled per plane by the CSC pass.
+//! Imported as one `VkImage` (`VK_KHR_external_memory_win32`, dedicated allocation).
 //!
 //! Slots stay imported across frames ([`ImportCache`], keyed by ring
 //! generation and handle); a superseded generation is destroyed after the
@@ -13,7 +13,7 @@
 
 use anyhow::{bail, Context as _, Result};
 use ash::vk;
-use pf_client_core::video::{D3d11Frame, SlotHandle};
+use pf_client_core::video::{D3d11Frame, SlotFormat, SlotHandle};
 use std::sync::Arc;
 
 /// Required at device creation. Missing either, `supports_d3d11()` is false.
@@ -51,11 +51,30 @@ fn format_importable(
             .contains(vk::ExternalMemoryFeatureFlags::IMPORTABLE)
 }
 
-/// `(bgra8, rgb10)`: BGRA8 gates D3D11VA; RGB10A2 gates only PQ pass-through.
-/// Without RGB10, a PQ stream tone-maps to BGRA8 on the decoder. The planar and
-/// fence answers are only logged: they are what a planar slot or a shared fence
-/// would need, and nothing imports either yet.
-pub fn import_supported(instance: &ash::Instance, pdev: vk::PhysicalDevice) -> (bool, bool) {
+/// What this device imports from D3D11. BGRA8 gates D3D11VA; RGB10A2 gates PQ
+/// pass-through on the RGB ring; NV12/P010 gate the planar ring. The shared-fence
+/// answer is only logged.
+#[derive(Clone, Copy)]
+pub struct ImportSupport {
+    pub bgra8: bool,
+    pub rgb10: bool,
+    pub nv12: bool,
+    pub p010: bool,
+}
+
+/// Planar slots on this vendor? A planar D3D11 import device-losts on NVIDIA however
+/// it is consumed, so NVIDIA stays on the RGB ring. `PUNKTFUNK_D3D11_PLANAR=0|1`
+/// overrides it both ways.
+pub fn planar_allowed(vendor_id: u32) -> bool {
+    match std::env::var("PUNKTFUNK_D3D11_PLANAR").as_deref() {
+        Ok("0") => false,
+        Ok("1") => true,
+        _ => vendor_id != 0x10DE,
+    }
+}
+
+/// Ask the driver, once at setup, which D3D11 slot formats import here.
+pub fn import_supported(instance: &ash::Instance, pdev: vk::PhysicalDevice) -> ImportSupport {
     let copy = vk::ImageUsageFlags::TRANSFER_SRC;
     let none = vk::ImageCreateFlags::empty();
     let bgra8 = format_importable(instance, pdev, vk::Format::B8G8R8A8_UNORM, copy, none);
@@ -88,7 +107,12 @@ pub fn import_supported(instance: &ash::Instance, pdev: vk::PhysicalDevice) -> (
         fence,
         "D3D11 texture → Vulkan import support"
     );
-    (bgra8, rgb10)
+    ImportSupport {
+        bgra8,
+        rgb10,
+        nv12,
+        p010,
+    }
 }
 
 /// Whether a shared D3D11 fence imports here as a timeline semaphore.
@@ -113,6 +137,8 @@ pub struct Imported {
     pub image: vk::Image,
     /// The submit's keyed-mutex acquire/release info names this allocation.
     pub memory: vk::DeviceMemory,
+    /// Luma and chroma views of a planar slot for the CSC pass; `None` on the RGB ring.
+    pub planes: Option<[vk::ImageView; 2]>,
 }
 
 struct Entry {
@@ -184,10 +210,46 @@ impl ImportCache {
 /// # Safety
 /// The GPU must be idle on `imported`.
 unsafe fn destroy(device: &ash::Device, imported: Imported) {
-    // SAFETY: per this fn's contract; the cache created both handles and drops them once.
+    // SAFETY: per this fn's contract; the cache created every handle and drops each once.
     unsafe {
+        for view in imported.planes.into_iter().flatten() {
+            device.destroy_image_view(view, None);
+        }
         device.destroy_image(imported.image, None);
         device.free_memory(imported.memory, None);
+    }
+}
+
+/// Luma and chroma views of a two-plane image, in the per-plane `formats`.
+fn plane_views(
+    device: &ash::Device,
+    image: vk::Image,
+    formats: [vk::Format; 2],
+) -> Result<[vk::ImageView; 2]> {
+    let view = |format, aspect| {
+        let info = vk::ImageViewCreateInfo::default()
+            .image(image)
+            .view_type(vk::ImageViewType::TYPE_2D)
+            .format(format)
+            .subresource_range(vk::ImageSubresourceRange {
+                aspect_mask: aspect,
+                base_mip_level: 0,
+                level_count: 1,
+                base_array_layer: 0,
+                layer_count: 1,
+            });
+        // SAFETY: `image` is live and bound, created MUTABLE_FORMAT with a two-plane format
+        // whose plane `aspect` matches `format`; `info` is a local that outlives the call.
+        unsafe { device.create_image_view(&info, None) }
+    };
+    let luma = view(formats[0], vk::ImageAspectFlags::PLANE_0).context("create luma view")?;
+    match view(formats[1], vk::ImageAspectFlags::PLANE_1) {
+        Ok(chroma) => Ok([luma, chroma]),
+        Err(e) => {
+            // SAFETY: `luma` was created above and nothing has recorded it yet.
+            unsafe { device.destroy_image_view(luma, None) };
+            Err(e).context("create chroma view")
+        }
     }
 }
 
@@ -201,15 +263,38 @@ fn import(
     if std::env::var_os("PUNKTFUNK_HW_FAULT").is_some_and(|v| v == "import") {
         bail!("injected import failure (PUNKTFUNK_HW_FAULT=import)");
     }
-    // DXGI R10G10B10A2 matches Vulkan A2B10G10R10_PACK32 (R in the low bits).
-    let mp_format = if frame.rgb10 {
-        vk::Format::A2B10G10R10_UNORM_PACK32
+    // DXGI R10G10B10A2 matches Vulkan A2B10G10R10_PACK32 (R in the low bits). NV12/P010
+    // map to the two-plane formats; the CSC pass samples them through per-plane views.
+    let (mp_format, plane_formats) = match frame.format {
+        SlotFormat::Bgra8 => (vk::Format::B8G8R8A8_UNORM, None),
+        SlotFormat::Rgb10a2 => (vk::Format::A2B10G10R10_UNORM_PACK32, None),
+        SlotFormat::Nv12 => (
+            vk::Format::G8_B8R8_2PLANE_420_UNORM,
+            Some([vk::Format::R8_UNORM, vk::Format::R8G8_UNORM]),
+        ),
+        SlotFormat::P010 => (
+            vk::Format::G10X6_B10X6R10X6_2PLANE_420_UNORM_3PACK16,
+            Some([
+                vk::Format::R10X6_UNORM_PACK16,
+                vk::Format::R10X6G10X6_UNORM_2PACK16,
+            ]),
+        ),
+    };
+    // RGB slots are only blitted; planar slots are sampled per plane. Exactly what
+    // `import_supported` asked the driver about.
+    let (usage, flags) = if plane_formats.is_some() {
+        (
+            vk::ImageUsageFlags::SAMPLED,
+            vk::ImageCreateFlags::MUTABLE_FORMAT,
+        )
     } else {
-        vk::Format::B8G8R8A8_UNORM
+        (
+            vk::ImageUsageFlags::TRANSFER_SRC,
+            vk::ImageCreateFlags::empty(),
+        )
     };
     let handle_type = vk::ExternalMemoryHandleTypeFlags::D3D11_TEXTURE;
 
-    // Single-plane, TRANSFER_SRC only: match the D3D11 resource (no view-format aliasing).
     let mut external_info = vk::ExternalMemoryImageCreateInfo::default().handle_types(handle_type);
     // SAFETY: `external_info` is a local that outlives the call; the returned handle is owned here.
     let image = unsafe {
@@ -227,7 +312,8 @@ fn import(
                 .array_layers(1)
                 .samples(vk::SampleCountFlags::TYPE_1)
                 .tiling(vk::ImageTiling::OPTIMAL)
-                .usage(vk::ImageUsageFlags::TRANSFER_SRC)
+                .usage(usage)
+                .flags(flags)
                 .initial_layout(vk::ImageLayout::UNDEFINED),
             None,
         )
@@ -281,12 +367,31 @@ fn import(
         }
         Ok(memory)
     })();
-    match result {
-        Ok(memory) => Ok(Imported { image, memory }),
+    let memory = match result {
+        Ok(memory) => memory,
         Err(e) => {
             // SAFETY: `image` was created in this call and never bound, so the GPU is idle on it.
             unsafe { device.destroy_image(image, None) };
-            Err(e)
+            return Err(e);
         }
-    }
+    };
+    let planes = match plane_formats
+        .map(|f| plane_views(device, image, f))
+        .transpose()
+    {
+        Ok(planes) => planes,
+        Err(e) => {
+            // SAFETY: `image` and `memory` were created in this call; nothing recorded them.
+            unsafe {
+                device.destroy_image(image, None);
+                device.free_memory(memory, None);
+            }
+            return Err(e);
+        }
+    };
+    Ok(Imported {
+        image,
+        memory,
+        planes,
+    })
 }

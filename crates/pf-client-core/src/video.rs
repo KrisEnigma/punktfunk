@@ -43,7 +43,7 @@ pub struct DecodedFrame {
 
 /// Re-export so the presenter names every frame type through `video::`.
 #[cfg(windows)]
-pub use crate::video_d3d11::{D3d11Frame, SlotHandle};
+pub use crate::video_d3d11::{D3d11Frame, SlotFormat, SlotHandle};
 
 pub enum DecodedImage {
     /// Tightly-packed 8-bit I420 for the presenter's planar CSC upload.
@@ -1169,26 +1169,26 @@ impl Decoder {
         #[cfg(windows)]
         if choice == crate::video_d3d11_native::DECODER_PIN {
             match (native_d3d11_codec(wire), vk.filter(|v| v.d3d11_import)) {
-                (Some(codec), Some(v)) => {
-                    match crate::video_d3d11_native::NativeD3d11Decoder::new(
-                        codec,
-                        stream,
-                        v.adapter_luid,
-                        v.d3d11_hdr10,
-                    ) {
-                        Ok(d) => {
-                            tracing::info!(
-                                codec = codec_name,
-                                decoder = d.name(),
-                                "native D3D11VA hardware decode active \
+                (Some(codec), Some(v)) => match crate::video_d3d11_native::NativeD3d11Decoder::new(
+                    codec,
+                    stream,
+                    v.adapter_luid,
+                    v.d3d11_hdr10,
+                )
+                .map(|d| d.with_planar(v.d3d11_nv12, v.d3d11_p010))
+                {
+                    Ok(d) => {
+                        tracing::info!(
+                            codec = codec_name,
+                            decoder = d.name(),
+                            "native D3D11VA hardware decode active \
                                  (pf-dxvadec, shared-texture hand-off)"
-                            );
-                            return done(Backend::NativeD3d11va(Box::new(d)));
-                        }
-                        Err(e) => tracing::warn!(reason = %format!("{e:#}"),
-                            "native D3D11VA init failed — demoting to the standard ladder"),
+                        );
+                        return done(Backend::NativeD3d11va(Box::new(d)));
                     }
-                }
+                    Err(e) => tracing::warn!(reason = %format!("{e:#}"),
+                            "native D3D11VA init failed — demoting to the standard ladder"),
+                },
                 (None, _) => tracing::warn!(
                     codec = codec_name,
                     "PUNKTFUNK_DECODER=native-d3d11va refused (needs an H.264, HEVC or \
@@ -1346,7 +1346,9 @@ impl Decoder {
                     stream,
                     v.adapter_luid,
                     v.d3d11_hdr10,
-                ) {
+                )
+                .map(|d| d.with_planar(v.d3d11_nv12, v.d3d11_p010))
+                {
                     Ok(d) => {
                         tracing::info!(
                             codec = codec_name,
@@ -1695,7 +1697,14 @@ impl Decoder {
                                 self.stream,
                                 self.adapter_luid,
                                 self.d3d11_hdr10,
-                            ) {
+                            )
+                            .map(|d| {
+                                let (nv12, p010) = self
+                                    .vk
+                                    .as_ref()
+                                    .map_or((false, false), |v| (v.d3d11_nv12, v.d3d11_p010));
+                                d.with_planar(nv12, p010)
+                            }) {
                                 Ok(d) => {
                                     tracing::warn!(error = %format!("{e:#}"), fails = self.vaapi_fails,
                                         from = which, decoder = d.name(),
@@ -2056,6 +2065,8 @@ mod tests {
             present_timing: false,
             d3d11_import: false,
             d3d11_hdr10: false,
+            d3d11_nv12: false,
+            d3d11_p010: false,
             adapter_luid: None,
             queue_lock: std::sync::Arc::new(QueueLock::new()),
         }

@@ -1,6 +1,6 @@
 //! Per-frame present: `FrameInput` → video image → CSC → letterboxed blit → present.
-//! The D3D11 lane arrives as RGB already; its imported ring slot is the blit source
-//! and the `Redraw` picture, with no video image.
+//! A D3D11 RGB slot arrives converted: it is the blit source and the `Redraw` picture,
+//! with no video image. A D3D11 planar slot goes through CSC like the native lane.
 //!
 //! [`Presenter::present`] returns `false` when the swapchain is out of date; the
 //! caller recreates with current window state and may retry. One frame in flight:
@@ -23,6 +23,8 @@ use crate::overlay::OverlayFrame;
 use anyhow::{Context as _, Result};
 use ash::vk;
 use ash::vk::Handle as _;
+#[cfg(windows)]
+use pf_client_core::video::SlotFormat;
 use pf_client_core::video::{NativeVkFrame, NativeVkLayout, RawVkFormat};
 
 impl Presenter {
@@ -173,6 +175,22 @@ impl Presenter {
             self.csc
                 .bind_planes(&self.device, f.luma_view, f.chroma_view);
         }
+        // A planar D3D11 slot goes through the CSC pass into the video image, like the
+        // native lane; an RGB slot needs no video image. Descriptor set idle: fence wait above.
+        #[cfg(windows)]
+        if let Some((f, imported)) = &win_frame {
+            if let Some(planes) = imported.planes {
+                if self
+                    .video
+                    .as_ref()
+                    .is_none_or(|v| v.width != f.width || v.height != f.height)
+                {
+                    self.rebuild_video_image(f.width, f.height)?;
+                    tracing::info!(width = f.width, height = f.height, "video image (re)built");
+                }
+                self.csc.bind_planes(&self.device, planes[0], planes[1]);
+            }
+        }
         if let Some(f) = &native_frame {
             if self
                 .video
@@ -306,16 +324,57 @@ impl Presenter {
             }
 
             // The VideoProcessor already delivered RGB matching the HDR mode: the
-            // composite reads the slot itself (this frame's, or the retained one on
-            // `Redraw`). Cross-API sync is the keyed mutex on submit, not this barrier.
+            // composite reads an RGB slot itself (this frame's, or the retained one on
+            // `Redraw`). Cross-API sync is the keyed mutex on submit, not these barriers.
             #[cfg(windows)]
             let slot = win_frame
                 .as_ref()
+                .filter(|(_, f)| f.planes.is_none())
                 .map(|(d, f)| (*f, d.width, d.height))
                 .or(self.retained_slot.filter(|_| redraw));
             #[cfg(windows)]
             if let Some((f, _, _)) = slot {
-                external_acquire_barrier(&self.device, self.cmd_buf, f.image, self.qfi);
+                external_acquire_barrier(
+                    &self.device,
+                    self.cmd_buf,
+                    f.image,
+                    self.qfi,
+                    vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                    vk::PipelineStageFlags::TRANSFER,
+                    vk::AccessFlags::TRANSFER_READ,
+                );
+            }
+            // A planar slot is sampled by the CSC pass into the video image; the composite
+            // then reads that, as on the native lane.
+            #[cfg(windows)]
+            if let (Some((d, f)), Some(v)) = (&win_frame, &self.video) {
+                if f.planes.is_some() {
+                    external_acquire_barrier(
+                        &self.device,
+                        self.cmd_buf,
+                        f.image,
+                        self.qfi,
+                        vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                        vk::PipelineStageFlags::FRAGMENT_SHADER,
+                        vk::AccessFlags::SHADER_READ,
+                    );
+                    let (depth, msb_packed) = match d.format {
+                        SlotFormat::P010 => (10, true),
+                        _ => (8, false),
+                    };
+                    let extent = vk::Extent2D {
+                        width: v.width,
+                        height: v.height,
+                    };
+                    self.record_csc(
+                        v.framebuffer,
+                        extent,
+                        [1.0, 1.0],
+                        d.color,
+                        depth,
+                        msb_packed,
+                    );
+                }
             }
 
             // Image already on this device; layout and semaphore ride the frame.
@@ -607,9 +666,9 @@ impl Presenter {
             if native_wait.is_some() {
                 submit = submit.push_next(&mut timeline);
             }
-            // Keyed mutex, key 0 both ways (decode copies under acquire(0)/release(0)
+            // Keyed mutex, key 0 both ways (decode writes under acquire(0)/release(0)
             // too), on every submit that reads a slot, `Redraw` included. Acquire orders
-            // the read after the decoder's Blt; release unblocks the ring slot.
+            // the read after the decoder's Blt or copy; release unblocks the ring slot.
             #[cfg(windows)]
             let keyed_mem;
             #[cfg(windows)]
@@ -619,11 +678,15 @@ impl Presenter {
             #[cfg(windows)]
             let mut keyed_info;
             #[cfg(windows)]
-            if let Some((f, _, _)) = slot {
+            if let Some(memory) = win_frame
+                .as_ref()
+                .map(|(_, f)| f.memory)
+                .or(slot.map(|(f, _, _)| f.memory))
+            {
                 // `PUNKTFUNK_D3D11_NO_MUTEX=1` skips acquire/release (torn frames;
                 // debugging only).
                 if std::env::var_os("PUNKTFUNK_D3D11_NO_MUTEX").is_none() {
-                    keyed_mem = [f.memory];
+                    keyed_mem = [memory];
                     keyed_info = vk::Win32KeyedMutexAcquireReleaseInfoKHR::default()
                         .acquire_syncs(&keyed_mem)
                         .acquire_keys(&keyed_keys)

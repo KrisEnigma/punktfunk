@@ -1,15 +1,15 @@
 //! D3D11 decode device and shareable hand-off ring for the Windows DXVA rung.
-//! [`crate::video_d3d11_native`] fills the decode surfaces; this module converts
-//! each slice through `ID3D11VideoProcessor` into RGBA textures the presenter
-//! imports (`pf-presenter/src/d3d11.rs`, `VK_KHR_external_memory_win32`).
+//! [`crate::video_d3d11_native`] fills the decode surfaces; this module hands each slice
+//! to the presenter (`pf-presenter/src/d3d11.rs`, `VK_KHR_external_memory_win32`),
+//! converted to RGBA by `ID3D11VideoProcessor`, or copied into a two-plane NV12/P010 slot
+//! the presenter's CSC pass samples when it can import one ([`HandoffRing::set_planar`]).
 //!
 //! Auto's first choice on Intel — the driver advertises Vulkan Video, but that
 //! decode path is not the shipping one. NVIDIA/AMD fall back here below Vulkan
 //! Video, including mid-session demotion.
 //!
-//! Decode surfaces carry no share flags. Ring slots are single-plane RGBA
-//! (`SHARED_NTHANDLE | SHARED_KEYEDMUTEX`): a multiplanar NV12 import TDRs on
-//! NVIDIA. Both sides acquire the keyed mutex with **key 0**; a dropped frame
+//! Decode surfaces carry no share flags; slots carry `SHARED_NTHANDLE |
+//! SHARED_KEYEDMUTEX`. Both sides acquire the keyed mutex with **key 0**; a dropped frame
 //! is never acquired, which a ping-pong key would deadlock on. The device is
 //! created on the presenter's adapter (Vulkan LUID) so shares stay on one GPU.
 //! A frame keeps its slot's NT handle open ([`SlotHandle`]): a ring rebuilt
@@ -31,8 +31,8 @@ use windows::Win32::d3d11::{
     ID3D11Multithread, ID3D11Query, ID3D11Texture2D, ID3D11VideoContext1, ID3D11VideoDevice,
     ID3D11VideoProcessor, ID3D11VideoProcessorEnumerator, ID3D11VideoProcessorEnumerator1,
     ID3D11VideoProcessorInputView, ID3D11VideoProcessorOutputView, D3D11_ASYNC_GETDATA_DONOTFLUSH,
-    D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-    D3D11_CREATE_DEVICE_VIDEO_SUPPORT, D3D11_FENCE_FLAG_SHARED,
+    D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, D3D11_BOX,
+    D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_CREATE_DEVICE_VIDEO_SUPPORT, D3D11_FENCE_FLAG_SHARED,
     D3D11_QUERY_DATA_TIMESTAMP_DISJOINT, D3D11_QUERY_DESC, D3D11_QUERY_TIMESTAMP,
     D3D11_QUERY_TIMESTAMP_DISJOINT, D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX,
     D3D11_RESOURCE_MISC_SHARED_NTHANDLE, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC,
@@ -49,9 +49,9 @@ use windows::Win32::dxgi::{
     DXGI_COLOR_SPACE_YCBCR_FULL_G22_LEFT_P2020, DXGI_COLOR_SPACE_YCBCR_FULL_G22_LEFT_P601,
     DXGI_COLOR_SPACE_YCBCR_FULL_G22_LEFT_P709, DXGI_COLOR_SPACE_YCBCR_STUDIO_G2084_LEFT_P2020,
     DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P2020, DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P601,
-    DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P709, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_P010,
-    DXGI_FORMAT_R10G10B10A2_UNORM, DXGI_RATIONAL, DXGI_SAMPLE_DESC, DXGI_SHARED_RESOURCE_READ,
-    DXGI_SHARED_RESOURCE_WRITE,
+    DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P709, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_NV12,
+    DXGI_FORMAT_P010, DXGI_FORMAT_R10G10B10A2_UNORM, DXGI_RATIONAL, DXGI_SAMPLE_DESC,
+    DXGI_SHARED_RESOURCE_READ, DXGI_SHARED_RESOURCE_WRITE,
 };
 use windows::Win32::windef::RECT;
 use windows::Win32::winnt::{GENERIC_ALL, HANDLE};
@@ -97,16 +97,28 @@ impl Drop for SlotHandle {
     }
 }
 
+/// Pixel format of a hand-off slot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SlotFormat {
+    /// Video-processor output, sRGB.
+    Bgra8,
+    /// Video-processor output, PQ pass-through.
+    Rgb10a2,
+    /// Two-plane copies of the decoded picture; the presenter's CSC pass converts them.
+    Nv12,
+    P010,
+}
+
 /// One decoded frame in a ring slot the presenter imports by NT handle. Exclusion and
 /// visibility ride the slot's keyed mutex (key 0), not this struct.
 pub struct D3d11Frame {
     pub width: u32,
     pub height: u32,
-    /// Colour after the video processor: sRGB BT.709 full-range, or PQ BT.2020 full-range
-    /// when the HDR pass-through ring is active (`rgb10`). The presenter keys SDR/HDR off this.
+    /// Colour of the slot's contents: sRGB or PQ RGB after the video processor, the
+    /// stream's own YCbCr signalling in a planar slot. The presenter keys SDR/HDR off this.
     pub color: ColorDesc,
-    /// Slot format: `false` = BGRA8, `true` = RGB10A2. The presenter's Vulkan import must match.
-    pub rgb10: bool,
+    /// What the slot holds; the presenter's Vulkan import must match it.
+    pub format: SlotFormat,
     /// Intra (IDR/I) — the pump's post-loss re-anchor. See [`crate::video::DecodedImage::is_keyframe`].
     pub keyframe: bool,
     /// Whole prediction chain was fully available. Corroborates a host
@@ -277,6 +289,120 @@ struct Slot {
     out_view: ID3D11VideoProcessorOutputView,
 }
 
+/// One shareable slot texture with its keyed mutex and NT handle.
+fn shared_texture(
+    device: &ID3D11Device,
+    desc: &D3D11_TEXTURE2D_DESC,
+) -> Result<(ID3D11Texture2D, IDXGIKeyedMutex, Arc<SlotHandle>)> {
+    let mut tex = None;
+    // SAFETY: a `?`-checked `CreateTexture2D` on the live device, over the caller's
+    // fully-initialized descriptor and a live `Option` out-param.
+    unsafe { device.CreateTexture2D(desc, None, Some(&mut tex)) }
+        .ok()
+        .context("create shared hand-off texture")?;
+    let tex: ID3D11Texture2D = tex.expect("CreateTexture2D succeeded");
+    let mutex: IDXGIKeyedMutex = tex.cast().context("shared texture lacks IDXGIKeyedMutex")?;
+    let resource: IDXGIResource1 = tex.cast().context("shared texture lacks IDXGIResource1")?;
+    // SAFETY: the shared-handle creation runs on the live texture just created; the returned
+    // NT handle is owned by the `SlotHandle` built below, which closes it in `Drop`.
+    let handle = unsafe {
+        resource.CreateSharedHandle(
+            None,
+            DXGI_SHARED_RESOURCE_READ | DXGI_SHARED_RESOURCE_WRITE as u32,
+            None,
+        )
+    }
+    .context("CreateSharedHandle")?;
+    Ok((tex, mutex, Arc::new(SlotHandle(handle))))
+}
+
+/// `AcquireSync` reports a timeout (`WAIT_TIMEOUT`) and an abandoned mutex as success
+/// codes; only `S_OK` means this side owns the slot.
+fn keyed_acquired(hr: windows::core::HRESULT) -> Result<()> {
+    if hr.0 == 0 {
+        Ok(())
+    } else {
+        Err(anyhow!(
+            "keyed-mutex acquire (decode side) returned {:#010x}",
+            hr.0
+        ))
+    }
+}
+
+/// A planar slot: the texture the copy writes, its keyed mutex, its NT handle.
+struct PlanarSlot {
+    tex: ID3D11Texture2D,
+    mutex: IDXGIKeyedMutex,
+    handle: Arc<SlotHandle>,
+}
+
+/// Two-plane slots in the decode pool's own format, filled by a copy. No video processor:
+/// the presenter's CSC pass converts, PQ tone-map included.
+struct PlanarRing {
+    slots: Vec<PlanarSlot>,
+    width: u32,
+    height: u32,
+    format: SlotFormat,
+    next: usize,
+    generation: u32,
+}
+
+impl PlanarRing {
+    fn build(
+        device: &ID3D11Device,
+        width: u32,
+        height: u32,
+        format: SlotFormat,
+        generation: u32,
+    ) -> Result<PlanarRing> {
+        let desc = D3D11_TEXTURE2D_DESC {
+            Width: width,
+            Height: height,
+            MipLevels: 1,
+            ArraySize: 1,
+            Format: if format == SlotFormat::P010 {
+                DXGI_FORMAT_P010
+            } else {
+                DXGI_FORMAT_NV12
+            },
+            SampleDesc: DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0,
+            },
+            Usage: D3D11_USAGE_DEFAULT,
+            BindFlags: D3D11_BIND_SHADER_RESOURCE as u32,
+            CPUAccessFlags: 0,
+            MiscFlags: (D3D11_RESOURCE_MISC_SHARED_NTHANDLE | D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX)
+                as u32,
+        };
+        let slots = (0..RING_SLOTS)
+            .map(|_| {
+                shared_texture(device, &desc).map(|(tex, mutex, handle)| PlanarSlot {
+                    tex,
+                    mutex,
+                    handle,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        tracing::info!(
+            width,
+            height,
+            slots = RING_SLOTS,
+            generation,
+            ?format,
+            "D3D11 shared hand-off ring built (copy → planar)"
+        );
+        Ok(PlanarRing {
+            slots,
+            width,
+            height,
+            format,
+            next: 0,
+            generation,
+        })
+    }
+}
+
 /// Video processor plus shareable slots, both sized to the stream. A mid-stream
 /// `Reconfigure` rebuilds the whole bundle. Stream state that is fixed per ring (source
 /// rect, output colour space) is set at build; the input colour space is set on change.
@@ -379,27 +505,7 @@ impl SharedRing {
         };
         let mut slots = Vec::with_capacity(RING_SLOTS);
         for _ in 0..RING_SLOTS {
-            let mut tex = None;
-            // SAFETY: a `?`-checked `CreateTexture2D` on the live device, over a fully-initialized
-            // stack descriptor and a live `Option` out-param.
-            unsafe { device.CreateTexture2D(&desc, None, Some(&mut tex)) }
-                .ok()
-                .context("create shared hand-off texture")?;
-            let tex: ID3D11Texture2D = tex.expect("CreateTexture2D succeeded");
-            let mutex: IDXGIKeyedMutex =
-                tex.cast().context("shared texture lacks IDXGIKeyedMutex")?;
-            let resource: IDXGIResource1 =
-                tex.cast().context("shared texture lacks IDXGIResource1")?;
-            // SAFETY: the shared-handle creation runs on the live texture just created; the
-            // returned NT handle is owned by the `Slot` built below, which closes it in `Drop`.
-            let handle = unsafe {
-                resource.CreateSharedHandle(
-                    None,
-                    DXGI_SHARED_RESOURCE_READ | DXGI_SHARED_RESOURCE_WRITE as u32,
-                    None,
-                )
-            }
-            .context("CreateSharedHandle")?;
+            let (tex, mutex, handle) = shared_texture(device, &desc)?;
             let ov_desc = D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC {
                 ViewDimension: D3D11_VPOV_DIMENSION_TEXTURE2D,
                 // Anonymous.Texture2D.MipSlice = 0 — the zeroed default.
@@ -422,7 +528,7 @@ impl SharedRing {
             slots.push(Slot {
                 _tex: tex,
                 mutex,
-                handle: Arc::new(SlotHandle(handle)),
+                handle,
                 out_view,
             });
         }
@@ -740,8 +846,9 @@ pub(crate) struct HandoffSource<'a> {
     pub decoder: &'a str,
 }
 
-/// Video processor, shareable RGBA ring, and the D3D11 objects they live on.
-/// Turns a decoded NV12/P010 surface into a [`D3d11Frame`] the presenter can import.
+/// The shareable hand-off rings (video-processor RGB, or planar copies) and the D3D11
+/// objects they live on. Turns a decoded NV12/P010 surface into a [`D3d11Frame`] the
+/// presenter can import.
 pub(crate) struct HandoffRing {
     device: ID3D11Device,
     context: ID3D11DeviceContext,
@@ -752,6 +859,14 @@ pub(crate) struct HandoffRing {
     /// Presenter can import RGB10A2 and has an HDR10 swapchain
     /// ([`crate::video::VulkanDecodeDevice::d3d11_hdr10`]). PQ then uses the pass-through ring.
     hdr10_out: bool,
+    /// Planar copies for NV12 / P010 pools the presenter imports ([`Self::set_planar`]);
+    /// cleared for a format whose planar hand-off failed.
+    planar_nv12: bool,
+    planar_p010: bool,
+    planar_ring: Option<PlanarRing>,
+    /// Next ring generation, shared by both rings so the presenter's import cache never
+    /// sees one generation twice.
+    generation: u32,
     /// Blt GPU timing; `None` when the device has no timestamp queries.
     timer: Option<BltTimer>,
     window: HandoffWindow,
@@ -782,9 +897,121 @@ impl HandoffRing {
             video_context1,
             ring: None,
             hdr10_out,
+            planar_nv12: false,
+            planar_p010: false,
+            planar_ring: None,
+            generation: 0,
             timer,
             window: HandoffWindow::new(),
         })
+    }
+
+    /// Copy NV12 / P010 pools into planar slots from the next frame on: only for formats
+    /// the presenter imports ([`crate::video::VulkanDecodeDevice::d3d11_nv12`]).
+    pub(crate) fn set_planar(&mut self, nv12: bool, p010: bool) {
+        self.planar_nv12 = nv12;
+        self.planar_p010 = p010;
+    }
+
+    /// The planar slot format for `pool`, when planar is on for its format.
+    fn planar_format(&self, pool: &ID3D11Texture2D) -> Option<SlotFormat> {
+        if !self.planar_nv12 && !self.planar_p010 {
+            return None;
+        }
+        let mut desc = D3D11_TEXTURE2D_DESC::default();
+        // SAFETY: a COM call on the caller's live texture filling a local descriptor.
+        unsafe { pool.GetDesc(&mut desc) };
+        match desc.Format {
+            f if f == DXGI_FORMAT_NV12 && self.planar_nv12 => Some(SlotFormat::Nv12),
+            f if f == DXGI_FORMAT_P010 && self.planar_p010 => Some(SlotFormat::P010),
+            _ => None,
+        }
+    }
+
+    /// Copy one decoded slice into the next planar slot under its keyed mutex. The
+    /// presenter's CSC pass converts it, so the frame carries the stream's own colour.
+    fn present_planar(
+        &mut self,
+        source: &HandoffSource<'_>,
+        format: SlotFormat,
+    ) -> Result<D3d11Frame> {
+        // Two-plane 4:2:0 copies need even extents; the pool is aligned larger, so rounding
+        // up stays inside the decoded surface.
+        let width = source.width.next_multiple_of(2);
+        let height = source.height.next_multiple_of(2);
+        let rebuild = self
+            .planar_ring
+            .as_ref()
+            .is_none_or(|r| r.width != width || r.height != height || r.format != format);
+        if rebuild {
+            let generation = self.generation;
+            self.generation += 1;
+            self.planar_ring = Some(PlanarRing::build(
+                &self.device,
+                width,
+                height,
+                format,
+                generation,
+            )?);
+            self.ring = None;
+        }
+        let context = self.context.clone();
+        let ring = self.planar_ring.as_mut().expect("ring built above");
+        let slot_idx = ring.next;
+        ring.next = (ring.next + 1) % ring.slots.len();
+        let slot = &ring.slots[slot_idx];
+        let generation = ring.generation;
+        let src_box = D3D11_BOX {
+            left: 0,
+            top: 0,
+            front: 0,
+            right: width,
+            bottom: height,
+            back: 1,
+        };
+        let started = Instant::now();
+        // SAFETY: a COM call on the slot's live keyed mutex.
+        let acquired = unsafe { slot.mutex.AcquireSync(0, ACQUIRE_TIMEOUT_MS) };
+        let acquire_wait = started.elapsed();
+        keyed_acquired(acquired)?;
+        let sample = self.timer.as_mut().and_then(|t| t.begin(&context));
+        // SAFETY: COM calls on the live context. The slot texture and the caller's decode
+        // pool are live, `array_slice` is one of the pool's slices, and `src_box` lies inside
+        // both (the slot is exactly that size; the pool is aligned larger).
+        unsafe {
+            context.CopySubresourceRegion(
+                &slot.tex,
+                0,
+                0,
+                0,
+                0,
+                source.texture,
+                source.array_slice,
+                Some(&src_box),
+            );
+        }
+        if let Some(t) = &self.timer {
+            t.end(&context);
+        }
+        // SAFETY: releases the acquire above on the same live keyed mutex.
+        unsafe { slot.mutex.ReleaseSync(0) }
+            .ok()
+            .context("keyed-mutex release")?;
+        // SAFETY: a COM call on the live context; the presenter's acquire waits on this copy.
+        unsafe { context.Flush() };
+        let frame = D3d11Frame {
+            width,
+            height,
+            color: source.color,
+            format,
+            keyframe: source.keyframe,
+            references_clean: source.references_clean,
+            handle: slot.handle.clone(),
+            generation,
+        };
+        self.window.note_frame(acquire_wait, sample);
+        self.window.flush_if_due();
+        Ok(frame)
     }
 
     /// Same `ID3D11VideoDevice` the native rung enumerates decode profiles on.
@@ -798,10 +1025,25 @@ impl HandoffRing {
         self.window.begin_wait += waited;
     }
 
-    /// Blit one decoded surface into the next ring slot under its keyed mutex.
-    /// The acquire also back-pressures if the presenter is still reading this slot
-    /// (only possible `RING_SLOTS` frames ahead of present).
+    /// Hand one decoded surface to the next ring slot under its keyed mutex: a planar copy
+    /// when the presenter imports the pool's format, a video-processor Blt to RGB otherwise.
+    /// A failed planar hand-off turns planar off for that format and takes the RGB path.
+    /// The acquire also back-pressures if the presenter is still reading this slot.
     pub(crate) fn present(&mut self, source: HandoffSource<'_>) -> Result<D3d11Frame> {
+        if let Some(format) = self.planar_format(source.texture) {
+            match self.present_planar(&source, format) {
+                Ok(frame) => return Ok(frame),
+                Err(e) => {
+                    tracing::warn!(error = %format!("{e:#}"), ?format,
+                        "D3D11 planar hand-off failed — using the video processor for this format");
+                    match format {
+                        SlotFormat::P010 => self.planar_p010 = false,
+                        _ => self.planar_nv12 = false,
+                    }
+                    self.planar_ring = None;
+                }
+            }
+        }
         let HandoffSource {
             texture: src,
             array_slice,
@@ -825,7 +1067,8 @@ impl HandoffRing {
             .as_ref()
             .is_none_or(|r| r.width != width || r.height != height || r.pq_out != pq_out);
         if rebuild {
-            let generation = self.ring.as_ref().map_or(0, |r| r.generation + 1);
+            let generation = self.generation;
+            self.generation += 1;
             self.ring = Some(SharedRing::build(
                 &self.device,
                 &video_device,
@@ -835,6 +1078,7 @@ impl HandoffRing {
                 generation,
                 pq_out,
             )?);
+            self.planar_ring = None;
         }
         let ring = self.ring.as_mut().expect("ring built above");
         if ring.in_views_pool != src.as_raw() as usize {
@@ -895,18 +1139,18 @@ impl HandoffRing {
             let acquired = slot.mutex.AcquireSync(0, ACQUIRE_TIMEOUT_MS);
             let acquire_wait = acquire_started.elapsed();
             // Balance the ManuallyDrop refs BEFORE any error exit.
-            let blt = acquired.ok().and_then(|()| {
+            let blt = keyed_acquired(acquired).and_then(|()| {
                 let sample = self.timer.as_mut().and_then(|t| t.begin(&context));
                 let blt = video_context1.VideoProcessorBlt(&ring.vp, &slot.out_view, 0, &streams);
                 if let Some(t) = &self.timer {
                     t.end(&context);
                 }
-                blt.ok().map(|()| sample)
+                blt.ok().map(|()| sample).context("VideoProcessorBlt")
             });
             std::mem::ManuallyDrop::drop(&mut streams[0].pInputSurface);
             std::mem::ManuallyDrop::drop(&mut streams[0].pInputSurfaceRight);
             let release = slot.mutex.ReleaseSync(0);
-            let sample = blt.context("keyed-mutex acquire (decode side) or VideoProcessorBlt")?;
+            let sample = blt?;
             release.ok().context("keyed-mutex release")?;
             // Flush now: the presenter's GPU acquire waits on this blit; an unflushed
             // deferred batch adds a driver-decided delay.
@@ -934,7 +1178,11 @@ impl HandoffRing {
                     full_range: true,
                 }
             },
-            rgb10: pq_out,
+            format: if pq_out {
+                SlotFormat::Rgb10a2
+            } else {
+                SlotFormat::Bgra8
+            },
             keyframe,
             references_clean,
             handle: slot.handle.clone(),
