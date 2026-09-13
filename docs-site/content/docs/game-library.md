@@ -148,8 +148,9 @@ which is also the only way back into one the host started on its own. On the App
 - **Native clients** — a **paired** host's card offers **Browse library…** (**Browse Library…** on
   Apple) with nothing to switch on first; pairing is the only condition, on every client. Pick a
   title and the stream starts with the host launching it. On iPhone and iPad the library is its own
-  **Library** tab, and on the Mac a row in the window's sidebar; there a long press or right-click
-  on a title offers **Play** (or **Resume**), **Favorites**, **Details…** and **Copy Link**.
+  **Library** tab, and on the Mac the **Library** row in the window's sidebar, where the title menu
+  picks the host. There a long press or right-click on a title offers **Play** (or **Resume**),
+  **Favorites**, **Details…** and **Copy Link**.
 - **Android** — the library lives only in the controller-optimized home, which a TV always uses and a
   phone or tablet switches to when a controller is connected. Press **Y** on a saved host, or press
   **up** for its options and choose **Library** — the route a TV remote takes, having no **Y** to

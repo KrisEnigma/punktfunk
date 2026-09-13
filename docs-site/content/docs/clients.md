@@ -24,13 +24,14 @@ protocol — the lowest-latency, most resilient path, with the full feature set:
 - **Controllers**, including DualSense — rumble, adaptive triggers, lightbar, motion, and touchpad.
 - A **[game library](/docs/game-library)** — browse the host's installed games with cover art and
   launch one straight into the stream. On iPhone and iPad it is the **Library** tab, on the Mac the
-  Library rows of the window's sidebar: desktops, recently played, favorites, launchers and games,
-  in sections you reorder or hide with **Customize**.
+  **Library** row of the window's sidebar, with the host picked from its title menu: desktops,
+  recently played, favorites, launchers and games, in sections you reorder or hide with
+  **Customize**.
 - A **host page** behind each card's ⓘ: presets, address, pairing, power and support in one place.
-  On the Mac it opens as an inspector beside the grid (⌥⌘I), and ⌘1 and ⌘2 switch between Hosts
-  and the Library.
+  On the Mac it opens in its own window, with a sidebar for its sections. ⌘1 and ⌘2 switch the
+  main window between Hosts and the Library.
 - A live **stats overlay** (resolution, fps, bitrate, latency) and a built-in **network speed test**
-  to pick a bitrate for your link.
+  on the host page, which charts your link's throughput as it measures and suggests a bitrate.
 - **Widgets, Live Activities and Shortcuts** — a hosts widget and a game-library widget for the
   home screen (the library one opens a picked host's library), a Live Activity while a session
   runs, and App Intents so Siri and the Shortcuts app can start a stream or jump into a host's game
