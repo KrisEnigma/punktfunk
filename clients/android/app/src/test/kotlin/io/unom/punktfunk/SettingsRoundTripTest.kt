@@ -10,7 +10,7 @@ import org.robolectric.annotation.Config
 
 /**
  * One client setting is spelled out in fifteen places — the data class, its prefs key, `load`,
- * `save`, the profile overlay's eight members, both halves of the console bridge, and its settings
+ * `save`, the preset overlay's eight members, both halves of the console bridge, and its settings
  * row. Two of those fifteen fail to compile when a field is missed. The other thirteen are named
  * arguments with defaults, `put` statements and `when` arms, all of which are perfectly legal one
  * field short — so the miss ships, and surfaces as a setting that saves but never loads, or an

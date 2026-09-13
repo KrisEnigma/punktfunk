@@ -13,7 +13,7 @@ The Linux, Windows, Mac, iPhone/iPad and Android apps group settings the same wa
 **Display**, **Input**, **Audio**, **Controllers** — under *Preferences* on Linux and *Settings*
 elsewhere. The Apple TV app and any settings screen reached with a controller show one steppable
 list instead — **Stream**, **Video**, **Presentation**, **Audio**, **Controller**, **Touchscreen**,
-**Interface**, **Profiles** — the client's **console home** (not the host's
+**Interface**, **Presets** — the client's **console home** (not the host's
 [web console](/docs/web-console)). On a Steam Deck that list *is* the settings surface: the
 [Decky plugin](/docs/steam-deck) is a launcher with no settings of its own, and its **Open
 Punktfunk** button opens the console home from the Quick Access Menu.
@@ -89,7 +89,7 @@ HDR it asks nothing of your display.
 display can take it — a network hiccup becomes an occasional repeated or skipped frame.
 **Smoothness** holds a small buffer that evens hiccups out, at that buffer's worth of added delay.
 Linux, Windows, the console home, Apple and Android — stored under the same name everywhere, so a
-[profile](/docs/profiles-and-links) means the same thing on every device.
+[preset](/docs/presets-and-links) means the same thing on every device.
 
 **Smoothness buffer** — *default: Automatic (two frames).* Frames held back before showing. Each
 absorbs roughly one screen refresh of jitter and costs one refresh of delay — on a 120 Hz screen,
@@ -122,8 +122,8 @@ a stereo endpoint is an upmix. Offered everywhere.
 silent endpoint so sound comes out of the client only, and the host PC goes quiet. On, the session
 asks the host to capture whatever its default playback device already is instead — the speakers or
 headphones plugged into the host keep playing, and both ends hear the same audio (Moonlight's
-"Mute host PC speakers" box, unchecked). Per profile, so a laptop-in-the-house profile can keep the
-host's headphones live while the TV profile mutes them. Best-effort: it needs a host on 0.32 or
+"Mute host PC speakers" box, unchecked). Per preset, so a laptop-in-the-house preset can keep the
+host's headphones live while the TV preset mutes them. Best-effort: it needs a host on 0.32 or
 newer, and with several clients streaming at once, any one asking wins for all of them. The
 host-wide equivalent is
 [`PUNKTFUNK_AUDIO_OUTPUT_MODE=follow_default`](/docs/configuration). Offered everywhere.
@@ -248,7 +248,7 @@ buttons of the in-stream dial hold, and the custom shortcut chords they can send
 itself on every client — tap or click a button to change it, drag one onto another to swap; with a
 controller, the stick walks the buttons, A changes one, Y lifts it and A drops it on another. A
 shortcut is a name, the modifiers, and a key picked on a keyboard. The console keeps the global
-dial only (it never edits profiles). See [the quick-action dial](/docs/input#the-quick-action-dial).
+dial only (it never edits presets). See [the quick-action dial](/docs/input#the-quick-action-dial).
 
 **Virtual controller** — *Android and iPhone/iPad only*, under Quick actions. **Layout**
 (*default: Full*) picks which controls the on-screen controller shows: Full, Sticks and shoulders,
@@ -256,8 +256,8 @@ or D-pad and face buttons. **Opacity** (*default: 45 %*) and **Scale** (*default
 strongly and how large it draws over the picture. **Edit layout** opens the controller itself over
 a stand-in backdrop: drag a control to move it, tap one to size it (50–200 %) or hide it, and reset
 one control or the whole layout. Wide and upright screens keep separate layouts, so a phone tuned
-in landscape keeps its portrait preset untouched; the overrides ride the same profile-scoped
-setting as the dial, so a Game profile can carry its own arrangement. The controller itself is
+in landscape keeps its portrait preset untouched; the overrides ride the same preset-scoped
+setting as the dial, so a Game preset can carry its own arrangement. The controller itself is
 shown and hidden from the dial's Virtual controller button, per session. Not on Apple TV (no touch
 screen), a Steam Deck (real sticks) or the desktop clients (a keyboard).
 
@@ -286,7 +286,7 @@ a Gaming-Mode launch is fullscreen regardless. Not on iPhone, iPad, Apple TV or 
 ## Interface
 
 How the client itself looks. None touches a stream, so none can live in a
-[profile](/docs/profiles-and-links).
+[preset](/docs/presets-and-links).
 
 **Gamepad-optimized browsing** — *default: on.* Swaps the touch/desktop home for the
 controller-optimized one: host carousel, larger focus targets, a swipeable cover browser, steppable
@@ -332,12 +332,12 @@ home has the tier picker under **Interface**. Shortcuts and every number:
 
 **Advanced statistics** — *default: off.* Off shows the figures Moonlight's overlay also shows, as
 averages. On shows Punktfunk's own view: capture to screen as a median and a slow-frame figure, and
-every stage between. It belongs to the device, so a settings profile never changes it.
+every stage between. It belongs to the device, so a settings preset never changes it.
 
 ## Settings that are facts about your device
 
 These describe the machine you're sitting at, stay global, and **cannot be put in a settings
-profile**:
+preset**:
 
 - **Video decoder** and **GPU** — the decode path and adapter this device uses. Automatic is
   vendor-ordered and falls back on its own; change only when debugging; `PUNKTFUNK_DECODER`
@@ -346,7 +346,7 @@ profile**:
   and Android have neither.
 - **Speaker** and **Microphone** device pickers — this device's audio endpoints.
 - **Forwarded controller** — which physical pad is in your hands. (The *type* the host creates is a
-  preference and can live in a profile, as can **Forward controllers**.)
+  preference and can live in a preset, as can **Forward controllers**.)
 - **Auto-wake on connect**.
 - Everything under **Interface**.
 
@@ -354,8 +354,8 @@ One switch you might expect here isn't in Settings at all: **Share clipboard** l
 host's own edit sheet, because handing a machine your clipboard is a decision about that one host —
 see [Shared clipboard](/docs/clipboard).
 
-Everything else on this page can be overridden per profile and bound to a host; the rows above are
-exactly [what a profile can't change](/docs/profiles-and-links#what-a-profile-cant-change).
+Everything else on this page can be overridden per preset and bound to a host; the rows above are
+exactly [what a preset can't change](/docs/presets-and-links#what-a-preset-cant-change).
 
 ## When the client and the host disagree
 

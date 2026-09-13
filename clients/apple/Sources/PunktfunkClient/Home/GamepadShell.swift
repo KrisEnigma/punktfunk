@@ -30,7 +30,7 @@ enum GamepadScreen: Identifiable {
         switch self {
         case .settings: return "settings"
         case .addHost: return "addHost"
-        // Keyed on the CARD (host + pinned profile), for the same reason the library is keyed on
+        // Keyed on the CARD (host + pinned preset), for the same reason the library is keyed on
         // the shelf — see `HostOptionsTarget.id`.
         case .hostOptions(let target): return "hostOptions-\(target.id)"
         case .editHost(let host): return "editHost-\(host.id.uuidString)"

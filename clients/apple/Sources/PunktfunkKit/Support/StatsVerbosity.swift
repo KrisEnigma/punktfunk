@@ -46,9 +46,9 @@ public enum StatsVerbosity: String, CaseIterable, Sendable {
         UserDefaults.standard.set(tier.rawValue, forKey: DefaultsKey.statsVerbosity)
     }
 
-    /// The tier the LIVE session is showing — its profile's, if one overrode it — falling back to
+    /// The tier the LIVE session is showing — its preset's, if one overrode it — falling back to
     /// the persisted global while idle. What the in-stream cycle advances FROM: cycling in a
-    /// session a profile put on Detailed must go to Off, not to whatever the global happens to be.
+    /// session a preset put on Detailed must go to Off, not to whatever the global happens to be.
     public static var session: StatsVerbosity {
         StatsVerbosity(rawValue: SessionSettings.current.statsVerbosity) ?? .normal
     }

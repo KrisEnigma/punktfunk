@@ -60,7 +60,7 @@ public struct HostFormDraft: Equatable, Sendable {
     public var canSave: Bool { problem == nil }
 
     /// Apply the draft to a record, leaving every field the form does not show — the pinned
-    /// fingerprint, the wake MACs, profile bindings, `addedAt` — exactly as it was.
+    /// fingerprint, the wake MACs, preset bindings, `addedAt` — exactly as it was.
     public func apply(to host: inout StoredHost) {
         host.name = trimmedName
         host.address = trimmedAddress

@@ -112,11 +112,11 @@ pub(crate) struct Target {
     /// on the target for the same reason as `mac`: the library screen has no `KnownHost` in hand,
     /// and assuming 47990 there is what made a moved mgmt port work on the LAN but not over a VPN.
     pub(crate) mgmt_port: Option<u16>,
-    /// A ONE-OFF settings profile for this connect ("Connect with"): `Some(id)` overrides the
+    /// A ONE-OFF settings preset for this connect ("Connect with"): `Some(id)` overrides the
     /// host's binding for this launch, `Some("")` forces the global defaults on a bound host,
     /// `None` honors the binding. It never rebinds anything — the default changes only through
     /// the picker in the host editor (design/client-settings-profiles.md §5.2).
-    pub(crate) profile: Option<String>,
+    pub(crate) preset: Option<String>,
     /// A library title id (`steam:570`, …) to launch on connect — carried on the target so it
     /// survives a detour through the PIN ceremony (a deep link's `launch=` toward an unpaired
     /// host must still launch the game once pairing succeeds).
@@ -308,19 +308,19 @@ fn root(cx: &mut RenderCx, ctx: &Arc<AppCtx>) -> Element {
     // Which Settings section the NavigationView shows (persists across visits this run).
     // Opens on General — the first sidebar item, matching the Apple client's landing category.
     let (settings_nav, set_settings_nav) = cx.use_async_state("general".to_string());
-    // Which LAYER the settings screen edits: "" = the global defaults, else a profile id
+    // Which LAYER the settings screen edits: "" = the global defaults, else a preset id
     // (design/client-settings-profiles.md §5.1). Root state for the same reason as the section
     // above — the ComboBox's change handler is wired in the reactor backend.
     let (settings_scope, set_settings_scope) = cx.use_async_state(String::new());
-    // The profile a Delete… click is asking about; `Some` renders the confirmation. Root state
+    // The preset a Delete… click is asking about; `Some` renders the confirmation. Root state
     // because this page stays hook-free (its handlers are wired in the reactor backend).
     let (settings_delete, set_settings_delete) = cx.use_async_state(Option::<String>::None);
-    // Whether the Edit-profile modal is up. Root state for the reactor-backend-handler reason
-    // above; guarded in the page so it only renders while a profile is actually in scope.
+    // Whether the Edit-preset modal is up. Root state for the reactor-backend-handler reason
+    // above; guarded in the page so it only renders while a preset is actually in scope.
     let (settings_edit, set_settings_edit) = cx.use_async_state(false);
     // Bumped when a settings edit changes what the page should SHOW without changing any state
     // it already reads — ANY edit through `settings::commit` (creating an override must surface
-    // its marker as immediately as resetting one clears it), a reset, a profile colour change.
+    // its marker as immediately as resetting one clears it), a reset, a preset colour change.
     // Root state comparison makes same-value calls free, so a counter is what forces the pass.
     let (settings_rev, set_settings_rev) = cx.use_async_state(0u64);
     // The hosts page's mirror of the same idea: pin/unpin from a tile's menu rewrites the
@@ -411,12 +411,9 @@ fn root(cx: &mut RenderCx, ctx: &Arc<AppCtx>) -> Element {
         }
     });
 
-    // Continuous LAN discovery (spawned once).
-    // Route an arriving link. Parsing, host and profile resolution and every refusal rule —
-    // including "only a stable record id may dial unattended" — live in the shared brain
-    // (`plan_from_link`); this is only the WinUI end — turn the outcome into the same call a tile
-    // click makes, so a link gets the identical wake, trust and error surfaces rather than a
-    // second connect path of its own.
+    // Route an arriving link. Parsing, preset resolution and every refusal rule (only a stable
+    // record id dials unattended) live in `plan_from_link`. This end turns the outcome into the
+    // call a tile click makes, so a link gets the tile's wake, trust and error handling.
     cx.use_effect(deep_link.clone(), {
         let (ctx, set_screen, set_status, set_deep_link, set_link_confirm) = (
             ctx.clone(),
@@ -449,7 +446,7 @@ fn root(cx: &mut RenderCx, ctx: &Arc<AppCtx>) -> Element {
             let plan = pf_client_core::orchestrate::plan_from_link(
                 &link,
                 &known,
-                &pf_client_core::profiles::ProfilesFile::load(),
+                &pf_client_core::presets::PresetsFile::load(),
                 &ctx.settings.lock().unwrap().clone(),
             );
             use pf_client_core::orchestrate::PlanOutcome;
@@ -464,12 +461,10 @@ fn root(cx: &mut RenderCx, ctx: &Arc<AppCtx>) -> Element {
                 // path. Deliberately NOT the PIN ceremony below: this host is already pinned,
                 // and re-pairing it would throw that pin away.
                 Ok(PlanOutcome::ConfirmConnect(p)) => set_link_confirm.call(Some(p)),
-                // Known but never pinned, or not known at all: a link may not pair and may not
-                // trust on its own, so it opens the ordinary PIN ceremony seeded with what the
-                // link CLAIMED — name shown as claimed, the fingerprint pre-filling the pin so
-                // the first connect is verified against it rather than blind TOFU, and the
-                // launch/profile surviving the detour (§3.1; GTK-shell parity — this used to
-                // refuse outright and make shared links a dead end on Windows).
+                // Known but never pinned, or unknown: a link may not pair or trust on its own,
+                // so it opens the PIN ceremony seeded with what it CLAIMED: the name as claimed,
+                // the fingerprint pre-filling the pin (verified, not blind TOFU), and the launch
+                // and preset kept through the detour (§3.1, as in the GTK shell).
                 Ok(PlanOutcome::ConfirmUnknown(u)) => {
                     let name = u.name.clone().unwrap_or_else(|| u.addr.clone());
                     *ctx.shared.target.lock().unwrap() = Target {
@@ -482,7 +477,7 @@ fn root(cx: &mut RenderCx, ctx: &Arc<AppCtx>) -> Element {
                         // A link carries no mgmt port (nor a MAC), so this stays unknown until
                         // an advert teaches it — same fallback as the hand-added case.
                         mgmt_port: None,
-                        profile: u.profile.clone(),
+                        preset: u.preset.clone(),
                         launch: u.launch.clone(),
                     };
                     set_status.call(format!(
@@ -847,7 +842,7 @@ fn dial_link(
         pair_optional: false,
         mac: plan.host.mac.clone(),
         mgmt_port: plan.host.mgmt_port,
-        profile: plan.profile_override.clone(),
+        preset: plan.preset_override.clone(),
         launch: None, // routed explicitly below (initiate_launch*)
     };
     // With a MAC it takes the dial first wake path, so a sleeping host wakes instead of

@@ -18,9 +18,9 @@ struct HomeView: View {
     @ObservedObject var store: HostStore
     @ObservedObject var model: SessionModel
     @ObservedObject var discovery: HostDiscovery
-    /// The profile catalog — the source of the card chips, the "Connect with ▸" menu, and the
-    /// pinned host+profile cards the grid renders alongside their host (design §5.2a).
-    @ObservedObject private var profiles = ProfileStore.shared
+    /// The preset catalog — the source of the card chips, the "Connect with ▸" menu, and the
+    /// pinned host+preset cards the grid renders alongside their host (design §5.2a).
+    @ObservedObject private var presets = PresetStore.shared
     @Binding var showAddHost: Bool
     @Binding var pairingTarget: StoredHost?
     @Binding var speedTestTarget: StoredHost?
@@ -28,14 +28,14 @@ struct HomeView: View {
     #if !os(macOS)
     @Binding var showSettings: Bool
     #endif
-    /// Start a session with this host, using the given profile selection — `.inherit` for a plain
+    /// Start a session with this host, using the given preset selection — `.inherit` for a plain
     /// card tap (the host's binding), an explicit pick from "Connect with ▸" or a pinned card.
-    let connect: (StoredHost, ProfileSelection) -> Void
+    let connect: (StoredHost, PresetSelection) -> Void
     let connectDiscovered: (DiscoveredHost) -> Void
     /// Pairing succeeded (tvOS PairSheet route) — pin + connect (ContentView guards staleness).
     let onPaired: (StoredHost, Data) -> Void
     /// Picked a title in the (experimental) library — start a session that launches it, with the
-    /// shelf's profile (a pinned card's own; the host's binding on its primary card).
+    /// shelf's preset (a pinned card's own; the host's binding on its primary card).
     let onLaunchTitle: (LibraryTarget, String) -> Void
     /// Stream a shelf's host without launching anything (its menu's Connect / Resume row).
     let onConnectShelf: (LibraryTarget) -> Void
@@ -46,6 +46,21 @@ struct HomeView: View {
     /// "Browse Library…" action.
     /// The host being edited (name / address / port / Wake-on-LAN MAC) — drives the edit sheet.
     @State private var editTarget: StoredHost?
+    #if os(macOS)
+    @Environment(\.openWindow) private var openWindow
+    #else
+    /// The host whose page is pushed.
+    @State private var detailTarget: StoredHost.ID?
+    #endif
+    #if os(iOS)
+    @Environment(\.horizontalSizeClass) private var sizeClass
+    /// The host whose page is up as the iPad's sheet of sections.
+    @State private var sectionsHost: StoredHost?
+    /// An act that sheet handed back, run once the sheet is gone.
+    @State private var pendingHandOff: HostPageRequest?
+    #endif
+    /// The start-screen pointer; the default host's card carries the accent bar.
+    @AppStorage(DefaultsKey.defaultHost) private var defaultHostID = ""
     /// The outcome of the last "Send Logs to Host" — drives its alert.
     @State private var sendLogsResult: (ok: Bool, message: String)?
     /// What each paired host says this device may do to it (`design/host-actions.md` §7).
@@ -160,6 +175,21 @@ struct HomeView: View {
                     try? await Task.sleep(for: .seconds(10))
                 }
             }
+            // The host page, from a card's ⓘ or its menu (design §2.4), and the speed test pushed
+            // from it. The Mac opens both in the host's own window (`MacHostWindow`).
+            #if !os(macOS)
+            .navigationDestination(item: $detailTarget) { id in
+                HostDetailView(
+                    store: store, hostID: id, actions: { hostActions(for: $0, pinned: nil) })
+            }
+            .navigationDestination(item: $speedTestTarget) { host in
+                SpeedTestView(host: host)
+                    .navigationTitle("Speed Test")
+                    #if os(iOS)
+                    .navigationBarTitleDisplayMode(.inline)
+                    #endif
+            }
+            #endif
             #if os(tvOS)
             // Pushed routes — the Settings-app navigation feel (push animation, Menu
             // pops) instead of modal overlays.
@@ -172,8 +202,11 @@ struct HomeView: View {
             .navigationDestination(item: $pairingTarget) { host in
                 PairSheet(host: host) { fingerprint in onPaired(host, fingerprint) }
             }
-            .navigationDestination(item: $speedTestTarget) { host in
-                SpeedTestSheet(host: host)
+            .navigationDestination(item: $editTarget) { host in
+                AddHostSheet(
+                    existing: host,
+                    suggestedMacs: discovery.hosts.first { host.matches($0) }?.macAddresses ?? [],
+                    onSave: { store.update($0) })
             }
             .navigationDestination(item: $editTarget) { host in
                 AddHostSheet(
@@ -296,6 +329,14 @@ struct HomeView: View {
             SettingsView()
                 .settingsSheetSizing()
         }
+        // The iPad's host page, laid out like the Mac's host window.
+        .sheet(item: $sectionsHost, onDismiss: runHandOff) { host in
+            HostSectionsView(hostID: host.id, store: store) { request in
+                pendingHandOff = request
+                sectionsHost = nil
+            }
+            .settingsSheetSizing()
+        }
         #endif
         #endif
     }
@@ -303,11 +344,11 @@ struct HomeView: View {
     // MARK: - Cards
 
     /// The grid's bands, ordered and divided per this device's preference — cards and all, so a
-    /// pinned card can be filed under the profile it connects with rather than under its host's
+    /// pinned card can be filed under the preset it connects with rather than under its host's
     /// binding (`HostArrangement`).
     private var hostGroups: [HostGroup] {
         HostArrangement.groups(
-            hosts: store.hosts, catalog: profiles.catalog,
+            hosts: store.hosts, catalog: presets.catalog,
             online: Set(store.hosts.filter(isOnline).map(\.id)),
             sort: HostSort(rawValue: sortRaw) ?? .added,
             grouping: HostGrouping(rawValue: groupingRaw) ?? .none)
@@ -335,46 +376,62 @@ struct HomeView: View {
         .padding(.top, 4)
     }
 
-    private func hostCard(_ host: StoredHost, pinned: StreamProfile?) -> some View {
-        // A pinned card connects with ITS profile; the primary card follows the binding.
-        let selection: ProfileSelection = pinned.map { .profile($0.id) } ?? .inherit
-        // …and browsing is that same connect with a title picked first, so a pinned card opens its
-        // OWN shelf: every launch off it carries the card's profile rather than the host's binding.
-        // Gated on a pinned identity, not just the feature toggle: the library plane's
-        // MgmtTransport trust-on-first-use accepts ANY cert for a pin-less host (self-signed, no
-        // SAN — system trust is bypassed), so browsing an unpinned host lets a LAN MITM serve a
-        // forged catalog and harvest the device's pairing identity. Pair first, exactly as the
-        // stream path already refuses an unpinned connect. security-review 2026-08-15 finding 8.
-        let onBrowseLibrary: (() -> Void)? = host.pinnedSHA256 != nil
-            ? { libraryTarget = LibraryTarget(host: host, profile: selection) }
-            : nil
-        return HostCardView(
+    private func hostCard(_ host: StoredHost, pinned: StreamPreset?) -> some View {
+        HostCardView(
             host: host,
             isOnline: isOnline(host),
             isConnecting: model.phase == .connecting && model.activeHost?.id == host.id,
-            // The accent ring marks the most recent HOST; pinned cards stay quiet so the grid
-            // doesn't grow several "most recent" bars for one machine.
-            isMostRecent: pinned == nil && host.id == mostRecentHostID,
+            // The bar marks the default HOST; pinned cards stay quiet.
+            isDefaultHost: pinned == nil && host.id == defaultHost,
             isBusy: model.isBusy,
-            onConnect: { connect(host, selection) },
-            onPair: { if !model.isBusy { pairingTarget = host } },
-            onSpeedTest: host.pinnedSHA256 != nil
-                ? { if !model.isBusy { speedTestTarget = host } } : nil,
-            onForget: { store.forgetIdentity(host) },
-            onRemove: { store.remove(host) },
-            onBrowseLibrary: onBrowseLibrary,
-            onWake: { wake(host) },
-            onEdit: { editTarget = host },
-            onSendLogs: host.pinnedSHA256 != nil
-                ? { Task { sendLogsResult = await SendLogs.toHost(host) } } : nil,
-            // A pinned card is a shortcut to one profile, not a second host, so it carries no
-            // host actions — the same rule the console's menu applies.
-            hostActions: pinned == nil ? hostPower.actions(for: host) : [],
-            onHostAction: { action in hostAction(action, on: host) },
-            profileMenu: profileMenu(for: host),
-            pinnedProfile: pinned,
+            actions: hostActions(for: host, pinned: pinned),
+            pinnedPreset: pinned,
             nowPlaying: nowPlaying.title(for: host))
     }
+
+    /// Everything a card and the host page can do for `host`, run on this grid's sheets.
+    private func hostActions(for host: StoredHost, pinned: StreamPreset?) -> HostActions {
+        HostActions(
+            host: host, pinned: pinned, online: isOnline(host), store: store,
+            presets: presets.presets, power: hostPower.actions(for: host),
+            surface: HostActionSurface(
+                connect: { connect(host, $0) },
+                pair: { if !model.isBusy { pairingTarget = host } },
+                edit: { editTarget = host },
+                browse: { libraryTarget = LibraryTarget(host: host, preset: $0) },
+                speedTest: { if !model.isBusy { speedTestTarget = host } },
+                sendLogs: { Task { sendLogsResult = await SendLogs.toHost(host) } },
+                wake: { wake(host) },
+                showDetails: { showDetails(host) },
+                runPower: { hostAction($0, on: host) }))
+    }
+
+    /// The host page: its own window on the Mac, a sheet of sections on the iPad, pushed on the
+    /// iPhone and Apple TV.
+    private func showDetails(_ host: StoredHost) {
+        #if os(macOS)
+        openWindow(id: MacHostWindow.sceneID, value: host.id)
+        #elseif os(iOS)
+        if sizeClass == .regular { sectionsHost = host } else { detailTarget = host.id }
+        #else
+        detailTarget = host.id
+        #endif
+    }
+
+    #if os(iOS)
+    /// The iPad's host sheet closed on an act that belongs to the grid: run it now it is gone.
+    private func runHandOff() {
+        guard let request = pendingHandOff else { return }
+        pendingHandOff = nil
+        guard let host = store.hosts.first(where: { $0.id == request.hostID }) else { return }
+        switch request {
+        case .connect(_, let selection): connect(host, selection)
+        case .browse: libraryTarget = LibraryTarget(host: host)
+        case .wake: wake(host)
+        case .pair: if !model.isBusy { pairingTarget = host }
+        }
+    }
+    #endif
 
     /// A host action picked from a card's menu: explain an unavailable one, confirm a
     /// destructive one, run the rest.
@@ -394,23 +451,6 @@ struct HomeView: View {
 
     private func runHostAction(_ action: HostAction, on host: StoredHost) {
         Task { hostActionResult = await hostPower.invoke(action, on: host) }
-    }
-
-    /// The profile affordances every host card carries (§5.2/§5.2a).
-    private func profileMenu(for host: StoredHost) -> HostProfileMenu {
-        HostProfileMenu(
-            profiles: profiles.profiles,
-            boundID: host.profileID,
-            pinnedIDs: host.pinnedProfileIDs ?? [],
-            connectWith: { selection in connect(host, selection) },
-            setDefault: { store.setProfile(host.id, profileID: $0) },
-            togglePin: { id in
-                let pinned = (host.pinnedProfileIDs ?? []).contains(id)
-                store.setPinned(host.id, profileID: id, pinned: !pinned)
-            },
-            copyLink: { profileID in
-                LinkClipboard.copy(DeepLink.forHost(host, profile: profileID).urlString)
-            })
     }
 
     private var discoveredSection: some View {
@@ -441,11 +481,9 @@ struct HomeView: View {
         discovery.unsaved(among: store.hosts)
     }
 
-    /// The host of the most recent session — its card carries the accent ring.
-    private var mostRecentHostID: UUID? {
-        store.hosts
-            .compactMap { host in host.lastConnected.map { (host.id, $0) } }
-            .max { $0.1 < $1.1 }?.0
+    /// The host Start in opens on: explicit, or the only paired one.
+    private var defaultHost: StoredHost.ID? {
+        StartScreen.defaultHost(id: defaultHostID, hosts: store.hosts).host?.id
     }
 
     // MARK: - Chrome
@@ -539,14 +577,12 @@ struct HomeView: View {
     }
     #endif
 
-    /// macOS caps card width (a huge window shouldn't yield huge cards); on iOS the columns FILL
-    /// the width so the cards stay edge-aligned with the title and bars — sized touch-first: one
-    /// column on iPhone portrait, 3–4 generous cards on iPad.
+    /// The columns fill the width everywhere, so no window width leaves a gutter beside the cards:
+    /// adaptive packs as many as fit and widens them to close the gap, which keeps a card under
+    /// twice the minimum. Touch-first on iOS: one column on iPhone portrait, 3–4 on iPad.
     private var gridColumns: [GridItem] {
-        // Wider than before: the monogram card is a horizontal module (tile + address line), so
-        // it needs room for a monospaced "IP:port" without truncating.
         #if os(macOS)
-        [GridItem(.adaptive(minimum: 250, maximum: 320), spacing: 16)]
+        [GridItem(.adaptive(minimum: 250), spacing: 16)]
         #elseif os(tvOS)
         // Tracks CardMetrics' 10-foot sizes — at the 30pt name a 320pt column truncates
         // every hostname longer than ~10 characters.

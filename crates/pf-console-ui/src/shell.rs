@@ -228,7 +228,7 @@ pub struct ConsoleOptions {
     /// client's `CODEC_PYROWAVE` advertisement: a row that offers what the Hello never
     /// asks for is a setting that silently does nothing.
     pub pyrowave_ok: bool,
-    /// Settings and profile catalog. `None` uses the desktop file store
+    /// Settings and preset catalog. `None` uses the desktop file store
     /// (`pf_client_core::trust`); every other host must supply one.
     pub store: Option<Arc<dyn SettingsStore>>,
     /// Which settings rows exist and which platform-native screens may open.
@@ -942,13 +942,13 @@ impl Shell {
                             port: h.port,
                             fp_hex: h.fp_hex.clone(),
                             launch: None,
-                            // Pinned-card wake carries the pin's profile.
+                            // Pinned-card wake carries the pin's preset.
                             title: match &h.pin {
                                 Some(p) => format!("{} · {}", h.name, p.name),
                                 None => h.name.clone(),
                             },
                             request_access: false,
-                            profile: h.pin.as_ref().map(|p| p.id.clone()),
+                            preset: h.pin.as_ref().map(|p| p.id.clone()),
                         })
                 });
                 self.bus.send(ConsoleCmd::CancelWake);
@@ -1059,7 +1059,7 @@ impl Shell {
             launch: intent.launch,
             title: intent.title,
             request_access: intent.request_access,
-            profile: intent.profile,
+            preset: intent.preset,
         });
     }
 
@@ -1330,7 +1330,7 @@ impl Shell {
     }
 
     /// The bitrate Confirm would write, or `None` when there is nothing to write: no answer
-    /// yet, or a bound profile that pins bitrate — see [`Self::speed_pinned_by`].
+    /// yet, or a bound preset that pins bitrate — see [`Self::speed_pinned_by`].
     fn speed_recommendation(&self) -> Option<u32> {
         let sp = self.speed.as_ref()?;
         let SpeedPhase::Done {
@@ -1344,17 +1344,17 @@ impl Shell {
             .then_some(recommended_kbps)
     }
 
-    /// Name of the profile this host resolves bitrate from, when that profile PINS one.
+    /// Name of the preset this host resolves bitrate from, when that preset PINS one.
     ///
-    /// The console writes the global default and has no profile editor, so a pinned
+    /// The console writes the global default and has no preset editor, so a pinned
     /// bitrate makes the measurement read-only here: applying the default would leave the
-    /// tested host streaming at the profile's number and quietly retune every other host.
-    /// A profile that inherits bitrate is not pinned, and the default is the right layer.
+    /// tested host streaming at the preset's number and quietly retune every other host.
+    /// A preset that inherits bitrate is not pinned, and the default is the right layer.
     fn speed_pinned_by(&self, key: &str) -> Option<&str> {
         self.hosts
             .iter()
             .find(|h| h.key == key)
-            .and_then(|h| h.bound_profile.as_ref())
+            .and_then(|h| h.bound_preset.as_ref())
             .filter(|p| p.bitrate_kbps.is_some())
             .map(|p| p.name.as_str())
     }

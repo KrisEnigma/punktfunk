@@ -272,14 +272,14 @@ impl QuickActions {
         self.shared.blob.clone()
     }
 
-    /// Put another blob in place (a profile's reset back to the inherited ring). The next
+    /// Put another blob in place (a preset's reset back to the inherited ring). The next
     /// open of the editor shows it; the row says so at once.
     pub fn set_blob(&self, blob: &str) {
         *self.shared.blob.borrow_mut() = blob.to_string();
         self.shared.row.set_subtitle(&summary(&self.shared.cfg()));
     }
 
-    /// Fires on every edit the user makes — the profile scope's "now overridden" hook.
+    /// Fires on every edit the user makes — the preset scope's "now overridden" hook.
     pub fn connect_changed(&self, f: impl Fn() + 'static) {
         self.shared.changed.borrow_mut().push(Box::new(f));
     }

@@ -14,7 +14,7 @@ import SwiftUI
 
 struct PadLayoutEditor: View {
     /// The pad of the blob being edited; `commit` writes the whole pad back through the same
-    /// scoped binding the quick-actions editor uses, so profile rules hold.
+    /// scoped binding the quick-actions editor uses, so preset rules hold.
     let pad: PadConfig
     let commit: (PadConfig) -> Void
     @Environment(\.dismiss) private var dismiss

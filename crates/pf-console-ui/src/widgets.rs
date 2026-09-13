@@ -1619,7 +1619,7 @@ mod tests {
         "Controller",
         "Input",
         "Interface",
-        "Profiles",
+        "Presets",
     ];
 
     /// A velocity-carrying spring can overshoot: pin that a burst never leaves

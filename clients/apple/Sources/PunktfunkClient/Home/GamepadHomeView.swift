@@ -26,9 +26,9 @@ import GameController
 /// One navigable tile: a saved host, a discovered-but-unsaved one, or one of the trailing
 /// actions. Hashable so it can be the carousel's scroll-position identity.
 private enum GamepadHomeTarget: Hashable {
-    /// A saved host's own tile, or one of its pinned host+profile cards (§5.2a) — which on a
-    /// controller-first surface are THE profile affordance: focus and press, no menus.
-    case saved(UUID, profile: String?)
+    /// A saved host's own tile, or one of its pinned host+preset cards (§5.2a) — which on a
+    /// controller-first surface are THE preset affordance: focus and press, no menus.
+    case saved(UUID, preset: String?)
     case discovered(String)
     case addHost
     case rescan
@@ -40,10 +40,10 @@ private struct HomeTile: Identifiable {
     let id: GamepadHomeTarget
     let title: String
     let subtitle: String
-    /// The profile this tile connects with — shown as a tinted chip. Set on a pinned card; nil on
+    /// The preset this tile connects with — shown as a tinted chip. Set on a pinned card; nil on
     /// a plain host tile unless the host is bound to one (then it answers "what will A do?").
-    var profile: StreamProfile?
-    /// This tile IS a pinned host+profile card, not a host wearing its binding's chip — the chip
+    var preset: StreamPreset?
+    /// This tile IS a pinned host+preset card, not a host wearing its binding's chip — the chip
     /// reads loud on the former (it is the reason the tile exists) and quiet on the latter.
     var isPinnedCard = false
     var isOnline = false
@@ -92,7 +92,7 @@ struct GamepadHomeView: View {
     /// Wake-and-wait driver — gates the carousel while its overlay is up, and the carousel's
     /// activate routes an offline+wakeable host through it (see ContentView.startSession).
     @ObservedObject var waker: HostWaker
-    let connect: (StoredHost, ProfileSelection) -> Void
+    let connect: (StoredHost, PresetSelection) -> Void
     let connectDiscovered: (DiscoveredHost) -> Void
     /// Launch a library title on a host — the in-place library layer's activate path (iOS; the
     /// cover/sheet presentations wire ContentView's `launchTitle` into LibraryView themselves).
@@ -110,9 +110,9 @@ struct GamepadHomeView: View {
     /// modal and a single A press reaches both.
     var promptActive = false
 
-    /// The profile catalog — pinned host+profile combos render as their own tiles here, which is
-    /// how a controller picks a profile: one focus-and-press instead of a menu (design §5.4).
-    @ObservedObject private var profiles = ProfileStore.shared
+    /// The preset catalog — pinned host+preset combos render as their own tiles here, which is
+    /// how a controller picks a preset: one focus-and-press instead of a menu (design §5.4).
+    @ObservedObject private var presets = PresetStore.shared
     /// What each paired host says this device may do TO it (`design/host-actions.md` §7) —
     /// shared with the touch grid, so the two menus cannot disagree about what a host offers.
     @ObservedObject private var hostPower = HostPowerStore.shared
@@ -602,17 +602,17 @@ struct GamepadHomeView: View {
             // Online = proven reachable by the probe; a live advert is a cache a sleeping host
             // keeps warm for up to 75 minutes. The wake item is offered only when this is false.
             let online = store.probedOnline.contains(host.id)
-            let bound = profiles.binding(for: host)
+            let bound = presets.binding(for: host)
             let connecting = model.phase == .connecting && model.activeHost?.id == host.id
-            // The host's own tile, then one per pinned profile — the same order the touch grid
+            // The host's own tile, then one per pinned preset — the same order the touch grid
             // uses, so a pin reads as belonging to its host on both surfaces.
-            for profile in [StreamProfile?.none] + profiles.pinned(for: host).map(Optional.some) {
+            for preset in [StreamPreset?.none] + presets.pinned(for: host).map(Optional.some) {
                 saved.append(HomeTile(
-                    id: .saved(host.id, profile: profile?.id),
+                    id: .saved(host.id, preset: preset?.id),
                     title: host.displayName,
                     subtitle: "\(host.address):\(String(host.port))",
-                    profile: profile ?? bound,
-                    isPinnedCard: profile != nil,
+                    preset: preset ?? bound,
+                    isPinnedCard: preset != nil,
                     isOnline: online,
                     isPaired: host.pinnedSHA256 != nil,
                     isConnecting: connecting,
@@ -628,7 +628,7 @@ struct GamepadHomeView: View {
                         && !online && !host.wakeMacs.isEmpty,
                     nowPlaying: nowPlaying.title(for: host),
                     activate: {
-                        connect(host, profile.map { .profile($0.id) } ?? .inherit)
+                        connect(host, preset.map { .preset($0.id) } ?? .inherit)
                     }))
             }
         }
@@ -660,7 +660,7 @@ struct GamepadHomeView: View {
 
     /// Only saved hosts have a library — matches the touch grid, where "Browse Library…" is a
     /// `HostCardView`-only action never offered on `DiscoveredCardView`. A pinned card opens its
-    /// own shelf: the selection already names which card Y was pressed on, and that card's profile
+    /// own shelf: the selection already names which card Y was pressed on, and that card's preset
     /// is what its launches run with.
     /// The host menu, built once for all three presentations (the iOS shell layer, the macOS
     /// sheet, the tvOS cover) so the actions can't drift between them.
@@ -673,7 +673,7 @@ struct GamepadHomeView: View {
         let host = target.host
         GamepadHostOptionsView(
             host: host,
-            pinnedProfile: target.profile,
+            pinnedPreset: target.preset,
             isOnline: store.probedOnline.contains(host.id),
             canWake: autoWakeEnabled && PunktfunkConnection.wakeOnLANAvailable
                 && !host.wakeMacs.isEmpty,
@@ -691,13 +691,13 @@ struct GamepadHomeView: View {
             onForgetPairing: { store.forgetIdentity(host) },
             onRemove: { store.remove(host) },
             onUnpin: {
-                guard let profile = target.profile else { return }
-                store.setPinned(host.id, profileID: profile.id, pinned: false)
+                guard let preset = target.preset else { return }
+                store.setPinned(host.id, presetID: preset.id, pinned: false)
             },
             onSendLogs: host.pinnedSHA256 != nil ? { await SendLogs.toHost(host) } : nil,
-            // A pinned card is a shortcut to one profile, not a second host, so it carries no
+            // A pinned card is a shortcut to one preset, not a second host, so it carries no
             // host actions — the same rule the touch grid and the console menu apply.
-            hostActions: target.profile == nil ? hostPower.actions(for: host) : [],
+            hostActions: target.preset == nil ? hostPower.actions(for: host) : [],
             onHostAction: { action in await hostPower.invoke(action, on: host) },
             close: { if !transitioning { hostOptionsTarget = nil } },
             controllerActive: active)
@@ -718,22 +718,22 @@ struct GamepadHomeView: View {
     /// unsaved host is not ours to rename or remove, and the two action tiles have nothing to
     /// offer — the same `HostOptionsScreen::available` gate the desktop console applies.
     private func openOptionsForSelected() {
-        guard case .saved(let id, let profileID) = selection,
+        guard case .saved(let id, let presetID) = selection,
               let host = store.hosts.first(where: { $0.id == id })
         else { return }
         hostOptionsTarget = HostOptionsTarget(
             host: host,
-            profile: profileID.flatMap { pid in profiles.profiles.first { $0.id == pid } })
+            preset: presetID.flatMap { pid in presets.presets.first { $0.id == pid } })
     }
 
     private func openLibraryForSelected() {
         // Pairing is the whole gate: the fetch authenticates with the pinned identity, so an
         // unpinned host could only ever be refused — and browsing one invites a forged catalog.
-        guard case .saved(let id, let profileID) = selection,
+        guard case .saved(let id, let presetID) = selection,
               let host = store.hosts.first(where: { $0.id == id }),
               host.pinnedSHA256 != nil
         else { return }
-        libraryTarget = LibraryTarget(host: host, profile: ProfileSelection(profileID: profileID))
+        libraryTarget = LibraryTarget(host: host, preset: PresetSelection(presetID: presetID))
     }
 }
 
@@ -812,9 +812,9 @@ private struct GamepadHostTile: View {
                 .foregroundStyle(ink.fg)
                 .lineLimit(1)
                 .minimumScaleFactor(0.7)
-            if let profile = tile.profile {
-                ProfileChip(
-                    profile: profile, size: Self.statusFont, prominent: tile.isPinnedCard)
+            if let preset = tile.preset {
+                PresetChip(
+                    preset: preset, size: Self.statusFont, prominent: tile.isPinnedCard)
                     .padding(.top, 4)
             }
             Text(tile.subtitle)

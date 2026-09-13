@@ -301,7 +301,7 @@ public final class StreamViewController: StreamViewControllerBase {
     /// Whether the user wants the mouse/trackpad pointer CAPTURED (pointer lock → relative
     /// movement, the gaming default) rather than forwarded as an absolute position (desktop
     /// use). Read from the session's resolved settings so it tracks the Settings toggle (it is
-    /// tier G — this device's input hardware — so no profile can move it); defaults to on when
+    /// tier G — this device's input hardware — so no preset can move it); defaults to on when
     /// unset. iPad-only — gated again in `prefersPointerLocked`.
     private var pointerCaptureEnabled: Bool {
         SessionSettings.current.pointerCapture

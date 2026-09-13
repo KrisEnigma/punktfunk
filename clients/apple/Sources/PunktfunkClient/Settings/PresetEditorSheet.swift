@@ -1,10 +1,10 @@
-// Creating, duplicating, renaming, recolouring and deleting a settings profile — one sheet for
+// Creating, duplicating, renaming, recolouring and deleting a settings preset — one sheet for
 // all five (design/client-settings-profiles.md §5.1).
 //
 // It replaced a menu of four separate actions, three of which raised their own bare text alert
-// and the fourth a submenu of colour NAMES with no colour anywhere on it. Making a profile then
+// and the fourth a submenu of colour NAMES with no colour anywhere on it. Making a preset then
 // meant: name it in an alert, find it again in the scope menu, open a submenu, and pick "Amber"
-// on faith. The two things a profile has — a name and a colour — are decided together here, with
+// on faith. The two things a preset has — a name and a colour — are decided together here, with
 // a live chip showing exactly what the host cards will render.
 
 import PunktfunkKit
@@ -12,12 +12,12 @@ import SwiftUI
 
 /// What the sheet was opened to do. Carrying the seed values rather than an id keeps the sheet
 /// free of "which store do I read to find out what I'm editing" — the caller already knows.
-struct ProfileDraft: Identifiable {
-    /// nil = creating (a blank profile, or a duplicate); set = editing that profile.
+struct PresetDraft: Identifiable {
+    /// nil = creating (a blank preset, or a duplicate); set = editing that preset.
     var editingID: String?
     var name: String
     var accent: String?
-    /// What a newly created profile starts with. Empty for a blank one; the source's overrides
+    /// What a newly created preset starts with. Empty for a blank one; the source's overrides
     /// for a duplicate, which is the whole point of duplicating.
     var overrides = SettingsOverlay()
     var title: String
@@ -25,36 +25,36 @@ struct ProfileDraft: Identifiable {
 
     var id: String { editingID ?? "new-\(title)" }
 
-    static func create() -> ProfileDraft {
-        ProfileDraft(name: "", accent: nil, title: "New Profile", accept: "Create")
+    static func create() -> PresetDraft {
+        PresetDraft(name: "", accent: nil, title: "New Preset", accept: "Create")
     }
 
-    static func edit(_ profile: StreamProfile) -> ProfileDraft {
-        ProfileDraft(
-            editingID: profile.id, name: profile.name, accent: profile.accent,
-            title: "Edit Profile", accept: "Save")
+    static func edit(_ preset: StreamPreset) -> PresetDraft {
+        PresetDraft(
+            editingID: preset.id, name: preset.name, accent: preset.accent,
+            title: "Edit Preset", accept: "Save")
     }
 
-    static func duplicate(_ profile: StreamProfile, name: String) -> ProfileDraft {
-        ProfileDraft(
-            name: name, accent: profile.accent, overrides: profile.overrides,
-            title: "Duplicate Profile", accept: "Duplicate")
+    static func duplicate(_ preset: StreamPreset, name: String) -> PresetDraft {
+        PresetDraft(
+            name: name, accent: preset.accent, overrides: preset.overrides,
+            title: "Duplicate Preset", accept: "Duplicate")
     }
 }
 
-struct ProfileEditorSheet: View {
+struct PresetEditorSheet: View {
     @Environment(\.dismiss) private var dismiss
-    @ObservedObject private var profiles = ProfileStore.shared
+    @ObservedObject private var presets = PresetStore.shared
 
-    let draft: ProfileDraft
-    /// Where the settings surface should be pointing afterwards — at the profile that was just
+    let draft: PresetDraft
+    /// Where the settings surface should be pointing afterwards — at the preset that was just
     /// created, so you land in the layer you made rather than back on the defaults.
     let onScope: (SettingsScope) -> Void
 
     @State private var name: String
     @State private var accent: String?
 
-    init(draft: ProfileDraft, onScope: @escaping (SettingsScope) -> Void) {
+    init(draft: PresetDraft, onScope: @escaping (SettingsScope) -> Void) {
         self.draft = draft
         self.onScope = onScope
         _name = State(initialValue: draft.name)
@@ -127,7 +127,7 @@ struct ProfileEditorSheet: View {
             } header: {
                 Text("Color")
             } footer: {
-                Text("Tints this profile's chip on host cards and in the stream overlay.")
+                Text("Tints this preset's chip on host cards and in the stream overlay.")
                     .font(.geist(12, relativeTo: .caption))
                     .foregroundStyle(.secondary)
             }
@@ -138,12 +138,12 @@ struct ProfileEditorSheet: View {
         #endif
     }
 
-    /// The profile exactly as a host card will show it — the answer to "what am I choosing?",
+    /// The preset exactly as a host card will show it — the answer to "what am I choosing?",
     /// which a list of colour names never gave.
     private var preview: some View {
         let shown = name.trimmingCharacters(in: .whitespaces)
-        return ProfileChip(
-            profile: StreamProfile(name: shown.isEmpty ? "Profile" : shown, accent: accent),
+        return PresetChip(
+            preset: StreamPreset(name: shown.isEmpty ? "Preset" : shown, accent: accent),
             size: 13, prominent: true)
             .opacity(shown.isEmpty ? 0.5 : 1)
             .animation(.easeOut(duration: 0.15), value: accent)
@@ -157,7 +157,7 @@ struct ProfileEditorSheet: View {
             spacing: 14
         ) {
             swatch(nil, label: "Default")
-            ForEach(ProfileAccent.palette) { option in
+            ForEach(PresetAccent.palette) { option in
                 swatch(option.hex, label: option.name)
             }
         }
@@ -202,30 +202,30 @@ struct ProfileEditorSheet: View {
     /// Case-insensitively unique — two "Work"s make every menu ambiguous, and the deep-link
     /// grammar has to refuse an ambiguous reference rather than guess which one was meant.
     private var duplicateName: Bool {
-        !trimmedName.isEmpty && profiles.nameTaken(trimmedName, except: draft.editingID)
+        !trimmedName.isEmpty && presets.nameTaken(trimmedName, except: draft.editingID)
     }
 
     private var isNameAcceptable: Bool { !trimmedName.isEmpty && !duplicateName }
 
     private var nameFootnote: String {
-        if duplicateName { return "Another profile is already called “\(trimmedName)”." }
+        if duplicateName { return "Another preset is already called “\(trimmedName)”." }
         return draft.editingID == nil
-            ? "A new profile inherits every setting. Change one here and only that one is overridden."
-            : "Hosts and pinned cards follow this profile by id, so renaming keeps them attached."
+            ? "A new preset inherits every setting. Change one here and only that one is overridden."
+            : "Hosts and pinned cards follow this preset by id, so renaming keeps them attached."
     }
 
     private func commit() {
         guard isNameAcceptable else { return }
         if let id = draft.editingID {
-            profiles.rename(id, to: trimmedName)
-            profiles.setAccent(id, to: accent)
+            presets.rename(id, to: trimmedName)
+            presets.setAccent(id, to: accent)
         } else {
-            var profile = StreamProfile(name: trimmedName, accent: accent)
-            profile.overrides = draft.overrides
-            profiles.add(profile)
-            // Land in the thing that was just made — creating a profile and being left on the
+            var preset = StreamPreset(name: trimmedName, accent: accent)
+            preset.overrides = draft.overrides
+            presets.add(preset)
+            // Land in the thing that was just made — creating a preset and being left on the
             // defaults is how you end up editing the wrong layer.
-            onScope(.profile(profile.id))
+            onScope(.preset(preset.id))
         }
         dismiss()
     }

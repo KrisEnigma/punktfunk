@@ -1,4 +1,4 @@
-import { createFileRoute, notFound } from '@tanstack/react-router'
+import { createFileRoute, notFound, redirect } from '@tanstack/react-router'
 import { DocsLayout } from 'fumadocs-ui/layouts/docs'
 import { createServerFn } from '@tanstack/react-start'
 import { source } from '@/lib/source'
@@ -9,9 +9,14 @@ import { useFumadocsLoader } from 'fumadocs-core/source/client'
 import { Suspense } from 'react'
 import { useMDXComponents } from '@/components/mdx'
 
+/** Pages that moved, old slug → new, so an old link or bookmark still lands. */
+const moved: Record<string, string> = { 'profiles-and-links': 'presets-and-links' }
+
 export const Route = createFileRoute('/docs/$')({
   component: Page,
   loader: async ({ params }) => {
+    const to = moved[params._splat ?? '']
+    if (to) throw redirect({ to: '/docs/$', params: { _splat: to }, statusCode: 301 })
     const slugs = params._splat?.split('/') ?? []
     const data = await serverLoader({ data: slugs })
     await clientLoader.preload(data.path)

@@ -26,10 +26,10 @@ import org.robolectric.annotation.Config
  *
  * The regression this pins: `update` reached the rows as `::update`, and two callable references
  * compare EQUAL however different the scope they captured, so Compose skipped the whole detail page
- * on a scope switch that moved nothing on screen (the ordinary case — a profile inherits the globals
+ * on a scope switch that moved nothing on screen (the ordinary case — a preset inherits the globals
  * until it overrides something). Each edit then wrote to the scope the user had just left: change a
- * default, switch to a profile, change the same row — the globals moved again and the profile
- * recorded nothing — and back on the defaults the next edit went into the profile, which reads as
+ * default, switch to a preset, change the same row — the globals moved again and the preset
+ * recorded nothing — and back on the defaults the next edit went into the preset, which reads as
  * "the default settings can't be changed any more". It needs the real Compose runtime to catch, so
  * this drives the actual screen rather than the model underneath it.
  *
@@ -46,7 +46,7 @@ class SettingsScopeTest {
     private val context: Context get() = ApplicationProvider.getApplicationContext()
 
     /**
-     * "Invert scroll direction" is the row under test: Input is profileable end to end, and that
+     * "Invert scroll direction" is the row under test: Input is presetable end to end, and that
      * toggle is the only toggleable node on the page, so a click needs no fragile lookup.
      */
     private fun toggleTheRow() {
@@ -61,8 +61,8 @@ class SettingsScopeTest {
 
     @Test
     fun editsFollowTheSelectedScope() {
-        val profiles = ProfileStore(context)
-        profiles.save(newProfile("Work", PROFILE_ACCENTS.first()))
+        val presets = PresetStore(context)
+        presets.save(newPreset("Work", PRESET_ACCENTS.first()))
 
         // Mirrors App.kt: the screen is fed from state the host recomposes it with.
         var saved = Settings()
@@ -76,35 +76,35 @@ class SettingsScopeTest {
             )
         }
 
-        // 1. On the defaults, the globals move and no profile records anything.
+        // 1. On the defaults, the globals move and no preset records anything.
         toggleTheRow()
         assertEquals(true, saved.invertScroll)
-        assertNull(profiles.all().single().overrides.invertScroll)
+        assertNull(presets.all().single().overrides.invertScroll)
 
-        // 2. In profile scope the SAME row — untouched by the profile, so it still shows the global
+        // 2. In preset scope the SAME row — untouched by the preset, so it still shows the global
         //    value and nothing on the page changed — must record an override and leave the globals
         //    alone. This is the step that used to write straight through to the globals.
         selectScope("Work")
         toggleTheRow()
-        assertEquals("the globals must not move while a profile is selected", true, saved.invertScroll)
-        assertEquals(false, profiles.all().single().overrides.invertScroll)
+        assertEquals("the globals must not move while a preset is selected", true, saved.invertScroll)
+        assertEquals(false, presets.all().single().overrides.invertScroll)
 
-        // 3. Back on the defaults the row is editable again, and the profile keeps its override.
+        // 3. Back on the defaults the row is editable again, and the preset keeps its override.
         selectScope("Default settings")
         toggleTheRow()
         assertEquals(false, saved.invertScroll)
         assertEquals(
-            "the profile's override must survive an edit made on the defaults",
+            "the preset's override must survive an edit made on the defaults",
             false,
-            profiles.all().single().overrides.invertScroll,
+            presets.all().single().overrides.invertScroll,
         )
     }
 
     /** A reset puts the row back to inheriting — and, like an edit, it must obey the live scope. */
     @Test
-    fun resetClearsTheSelectedProfilesOverride() {
-        val profiles = ProfileStore(context)
-        profiles.save(newProfile("Work", PROFILE_ACCENTS.first()))
+    fun resetClearsTheSelectedPresetsOverride() {
+        val presets = PresetStore(context)
+        presets.save(newPreset("Work", PRESET_ACCENTS.first()))
 
         compose.setContent {
             var settings by remember { mutableStateOf(Settings()) }
@@ -113,15 +113,15 @@ class SettingsScopeTest {
                 onChange = { settings = it },
                 onBack = {},
                 initialCategory = SettingsCategory.Input,
-                initialProfileId = profiles.all().single().id,
+                initialPresetId = presets.all().single().id,
             )
         }
 
         toggleTheRow()
-        assertEquals(true, profiles.all().single().overrides.invertScroll)
+        assertEquals(true, presets.all().single().overrides.invertScroll)
 
         compose.onNodeWithText("Reset").performClick()
         compose.waitForIdle()
-        assertNull(profiles.all().single().overrides.invertScroll)
+        assertNull(presets.all().single().overrides.invertScroll)
     }
 }

@@ -56,7 +56,7 @@ import kotlin.math.roundToInt
  * list and the reset sit under it. A shortcut is edited on its own screen: a name, the modifiers
  * as chips, the key on a keyboard you tap, and the disc as it will look. A deep sub-screen of
  * Settings like [ControllersScreen]; [blob] is the `overlay_actions` of the layer being edited
- * and [onChange] writes it back through the same `update` every row uses, so a profile that
+ * and [onChange] writes it back through the same `update` every row uses, so a preset that
  * touches it owns the whole ring (D10).
  */
 @Composable
@@ -147,7 +147,7 @@ internal fun QuickActionsScreen(
             }
             Text(
                 "Tap a button to change it, drag one onto another to swap." +
-                    if (overridden) " This profile has its own quick actions; the default dial no longer reaches it." else "",
+                    if (overridden) " This preset has its own quick actions; the default dial no longer reaches it." else "",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(start = 4.dp),
@@ -324,7 +324,7 @@ private val previewActions = RingActions(
 private data class SlotOption(val id: String, val label: String, val note: String? = null)
 private data class SlotGroup(val title: String, val options: List<SlotOption>)
 
-/** The catalogue by group (§3.3) with each entry's availability note; the profile's own
+/** The catalogue by group (§3.3) with each entry's availability note; the preset's own
  *  shortcuts and the empty slot are appended per config. */
 private fun slotGroups(cfg: OverlayConfig): List<SlotGroup> {
     val g = mutableListOf(

@@ -69,7 +69,7 @@ everything — that is the step people skip.
 
    Add `47990` only if the friend should browse your game library.
 3. The friend adds `100.x.y.z:9777` as a host, or opens a
-   [link](/docs/profiles-and-links#punktfunk-links) you send them: `punktfunk://connect/100.x.y.z:9777`.
+   [link](/docs/presets-and-links#punktfunk-links) you send them: `punktfunk://connect/100.x.y.z:9777`.
 4. [Admit them as a guest](#admit-them-as-a-guest).
 
 ## Admit them as a guest
@@ -94,7 +94,7 @@ this path only when neither fits, and take the rules below seriously.
 Forward UDP `9777` and `9779` to the host. **Never forward `47990`, `47992` or `9778`** — the
 management API, the web console and the browser plane.
 
-Send a [link](/docs/profiles-and-links), not a bare address, so your friend's first connect is
+Send a [link](/docs/presets-and-links), not a bare address, so your friend's first connect is
 verified rather than blind. The **Connect** card on the Host page writes one; swap its address for
 your public one:
 

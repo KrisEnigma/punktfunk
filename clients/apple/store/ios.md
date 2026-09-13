@@ -15,7 +15,7 @@ build or a review, so it is the right place for "what landed most recently".
 ### Primary (160)
 
 ```
-Neu: Profile pro Host – Auflösung, Bitrate und Ton einmal einstellen, dann mit einem Tipp verbinden. Dazu Live Activity, Sperrbildschirm-Widget und Wake-on-LAN.
+Neu: Presets pro Host – Auflösung, Bitrate und Ton einmal einstellen, dann mit einem Tipp verbinden. Dazu Live Activity, Sperrbildschirm-Widget und Wake-on-LAN.
 ```
 
 ### Alternate A — evergreen hook, no "new" claim (156)
@@ -27,7 +27,7 @@ Dein Gaming-PC auf dem iPhone, in dessen exakter Auflösung – ohne Konto, ohne
 ### Alternate B — leads on the DualSense (161)
 
 ```
-Dein DualSense, vollständig: Rumble, adaptive Trigger, Lightbar, Touchpad und Gyro gehen bis ins Spiel durch. Dazu Profile pro Host und Wake-on-LAN vom Sofa aus.
+Dein DualSense, vollständig: Rumble, adaptive Trigger, Lightbar, Touchpad und Gyro gehen bis ins Spiel durch. Dazu Presets pro Host und Wake-on-LAN vom Sofa aus.
 ```
 
 ### Alternate C — leads on latency (153)
@@ -43,7 +43,7 @@ Kein Konto, keine Cloud, kein Umweg: punktfunk/1 fährt über QUIC direkt zu dei
 ### Primary (152)
 
 ```
-New: per-host profiles — set resolution, bitrate and audio once, then connect with one tap. Plus Live Activities, a Lock Screen widget, and Wake-on-LAN.
+New: per-host presets — set resolution, bitrate and audio once, then connect with one tap. Plus Live Activities, a Lock Screen widget, and Wake-on-LAN.
 ```
 
 ### Alternate A — evergreen hook (159)
@@ -55,7 +55,7 @@ Your gaming PC on your iPhone, at your iPhone's exact resolution — no account,
 ### Alternate B — leads on the DualSense (160)
 
 ```
-Your DualSense, in full: rumble, adaptive triggers, lightbar, touchpad and gyro all reach the game. Plus per-host profiles and Wake-on-LAN from across the room.
+Your DualSense, in full: rumble, adaptive triggers, lightbar, touchpad and gyro all reach the game. Plus per-host presets and Wake-on-LAN from across the room.
 ```
 
 ---

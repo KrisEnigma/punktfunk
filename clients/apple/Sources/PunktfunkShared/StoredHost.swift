@@ -1,12 +1,7 @@
-// The saved-host model + its on-disk JSON wire format — the widget/extension depends on BOTH, so
-// they live in the dependency-free shared module. The `ObservableObject` store that wraps them
-// (`HostStore`, with add/remove/pin/reachability) stays in the app target; discovery-join helpers
-// (`matches`, `advertises`) stay there too because they reference PunktfunkKit's `DiscoveredHost`.
-//
-// Wire-format stability: the JSON encoding of `StoredHost` is now a shared contract between the app
-// (writer) and the widget (reader). The `PunktfunkSharedTests` codec round-trip pins it — do not
-// rename the coding keys or make a stored `Optional` non-optional (older saved JSON must still
-// decode; synthesized Decodable treats a missing Optional as nil).
+// The saved-host model and its JSON, shared with the widget, so both live in the dependency-free
+// module; `HostStore` and the discovery-join helpers stay in the app. The JSON is a contract the
+// `PunktfunkSharedTests` round trip pins: rename a `CodingKeys` case only while still reading
+// its old key; never make a stored `Optional` non-optional, or older saved JSON stops decoding.
 
 import Foundation
 
@@ -26,8 +21,8 @@ public struct StoredHost: Identifiable, Codable, Hashable, Sendable {
     public var lastConnected: Date?
     /// Management-API port for the library browser (distinct from the data-plane `port`). Optional
     /// (NOT a defaulted non-optional) so older saved hosts — whose JSON lacks this key — still
-    /// decode: synthesized Decodable ignores property defaults but treats a missing Optional as
-    /// nil. Resolve via `effectiveMgmtPort`. (Auth is mTLS by the pinned identity — no token.)
+    /// decode: `init(from:)` reads each Optional with `decodeIfPresent`. Resolve via
+    /// `effectiveMgmtPort`. (Auth is mTLS by the pinned identity — no token.)
     public var mgmtPort: UInt16?
     /// Wake-on-LAN MAC address(es) of the host's wake-capable NIC(s), each `aa:bb:cc:dd:ee:ff`.
     /// Learned from the host's mDNS `mac` TXT record while it's awake and persisted here, so the
@@ -39,16 +34,16 @@ public struct StoredHost: Identifiable, Codable, Hashable, Sendable {
     /// keeps older saved JSON decoding — same forward-compat reason as `mgmtPort`). Honored only
     /// when the host advertises `HOST_CAP_CLIPBOARD`.
     public var clipboardSync: Bool?
-    /// This host's default settings profile (`StreamProfile.id`) — what a plain click/tap uses.
-    /// nil, or an id whose profile was deleted, resolves as "Default settings", i.e. exactly
+    /// This host's default settings preset (`StreamPreset.id`) — what a plain click/tap uses.
+    /// nil, or an id whose preset was deleted, resolves as "Default settings", i.e. exactly
     /// today's behaviour: a dangling binding is never an error and never blocks a connect
     /// (design/client-settings-profiles.md §4.4). Optional and appended last for the same
     /// widget-contract reason as `mgmtPort`.
-    public var profileID: String?
-    /// Profiles pinned as additional cards for this host (design §5.2a), in card order. NOT the
-    /// default — that is `profileID`; a pin is presentation only, and duplicates and dangling ids
+    public var presetID: String?
+    /// Presets pinned as additional cards for this host (design §5.2a), in card order. NOT the
+    /// default — that is `presetID`; a pin is presentation only, and duplicates and dangling ids
     /// are dropped when the cards are built. Optional for the same forward-compat reason.
-    public var pinnedProfileIDs: [String]?
+    public var pinnedPresetIDs: [String]?
     /// When this host was saved — what the grid's "Date Added" sort orders by. Optional and
     /// appended last for the same widget-contract reason as the rest; hosts saved before it
     /// existed have none, and keep their stored order, which IS the order they were added in.
@@ -70,7 +65,7 @@ public struct StoredHost: Identifiable, Codable, Hashable, Sendable {
         id: UUID = UUID(), name: String, address: String, port: UInt16 = 9777,
         pinnedSHA256: Data? = nil, lastConnected: Date? = nil, mgmtPort: UInt16? = nil,
         macAddresses: [String]? = nil, clipboardSync: Bool? = nil,
-        profileID: String? = nil, pinnedProfileIDs: [String]? = nil, addedAt: Date? = nil,
+        presetID: String? = nil, pinnedPresetIDs: [String]? = nil, addedAt: Date? = nil,
         osChain: String? = nil, previousAddresses: [String]? = nil
     ) {
         self.id = id
@@ -82,11 +77,59 @@ public struct StoredHost: Identifiable, Codable, Hashable, Sendable {
         self.mgmtPort = mgmtPort
         self.macAddresses = macAddresses
         self.clipboardSync = clipboardSync
-        self.profileID = profileID
-        self.pinnedProfileIDs = pinnedProfileIDs
+        self.presetID = presetID
+        self.pinnedPresetIDs = pinnedPresetIDs
         self.addedAt = addedAt
         self.osChain = osChain
         self.previousAddresses = previousAddresses
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, name, address, port, pinnedSHA256, lastConnected, mgmtPort, macAddresses
+        case clipboardSync, presetID, pinnedPresetIDs, addedAt, osChain, previousAddresses
+        /// Pre-rename keys (design/preset-rename.md): read when the new key is absent, and
+        /// written beside it so an older build keeps the bindings.
+        case profileID, pinnedProfileIDs
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        name = try c.decode(String.self, forKey: .name)
+        address = try c.decode(String.self, forKey: .address)
+        port = try c.decode(UInt16.self, forKey: .port)
+        pinnedSHA256 = try c.decodeIfPresent(Data.self, forKey: .pinnedSHA256)
+        lastConnected = try c.decodeIfPresent(Date.self, forKey: .lastConnected)
+        mgmtPort = try c.decodeIfPresent(UInt16.self, forKey: .mgmtPort)
+        macAddresses = try c.decodeIfPresent([String].self, forKey: .macAddresses)
+        clipboardSync = try c.decodeIfPresent(Bool.self, forKey: .clipboardSync)
+        presetID = try c.decodeIfPresent(String.self, forKey: .presetID)
+            ?? c.decodeIfPresent(String.self, forKey: .profileID)
+        pinnedPresetIDs = try c.decodeIfPresent([String].self, forKey: .pinnedPresetIDs)
+            ?? c.decodeIfPresent([String].self, forKey: .pinnedProfileIDs)
+        addedAt = try c.decodeIfPresent(Date.self, forKey: .addedAt)
+        osChain = try c.decodeIfPresent(String.self, forKey: .osChain)
+        previousAddresses = try c.decodeIfPresent([String].self, forKey: .previousAddresses)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(id, forKey: .id)
+        try c.encode(name, forKey: .name)
+        try c.encode(address, forKey: .address)
+        try c.encode(port, forKey: .port)
+        try c.encodeIfPresent(pinnedSHA256, forKey: .pinnedSHA256)
+        try c.encodeIfPresent(lastConnected, forKey: .lastConnected)
+        try c.encodeIfPresent(mgmtPort, forKey: .mgmtPort)
+        try c.encodeIfPresent(macAddresses, forKey: .macAddresses)
+        try c.encodeIfPresent(clipboardSync, forKey: .clipboardSync)
+        try c.encodeIfPresent(presetID, forKey: .presetID)
+        try c.encodeIfPresent(pinnedPresetIDs, forKey: .pinnedPresetIDs)
+        try c.encodeIfPresent(presetID, forKey: .profileID)
+        try c.encodeIfPresent(pinnedPresetIDs, forKey: .pinnedProfileIDs)
+        try c.encodeIfPresent(addedAt, forKey: .addedAt)
+        try c.encodeIfPresent(osChain, forKey: .osChain)
+        try c.encodeIfPresent(previousAddresses, forKey: .previousAddresses)
     }
 
     public var displayName: String { name.isEmpty ? address : name }
