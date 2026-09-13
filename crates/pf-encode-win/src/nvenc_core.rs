@@ -987,6 +987,12 @@ pub struct LowLatencyConfig {
 /// A periodic wave that never comes: only the forced one runs.
 const INTRA_REFRESH_NEVER: u32 = 1 << 30;
 
+/// `PUNKTFUNK_NVENC_IR_ALWAYS=1` answers every RFI with a wave, process environment only.
+/// A loopback never declines an RFI on its own, so the wave soak needs this to run waves.
+pub fn wave_always() -> bool {
+    std::env::var("PUNKTFUNK_NVENC_IR_ALWAYS").is_ok_and(|v| v == "1")
+}
+
 /// Rows the driver sweeps: 32-px blocks bound the cycle for every NVENC codec.
 pub fn wave_rows(height: u32) -> u32 {
     height.div_ceil(32)
@@ -1209,7 +1215,8 @@ pub unsafe fn apply_low_latency_config(cfg: &mut nv::NV_ENC_CONFIG, c: LowLatenc
     }
     // On-demand intra refresh: the mode on, the timer never, the recovery-point SEI where the
     // codec has one so a stock decoder heals in-band too. `intraRefreshCnt` is the forced
-    // count's ceiling.
+    // count's ceiling. Never `singleSliceIntraRefresh`: one slice per wave frame leaves the
+    // band with no isolation and nothing ever decodes exact again.
     if c.rfi_supported && c.intra_refresh_cnt > 0 {
         let cnt = c.intra_refresh_cnt;
         match c.codec {

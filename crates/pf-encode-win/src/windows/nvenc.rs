@@ -786,22 +786,24 @@ impl NvencD3d11Encoder {
         self.wave_queued = false;
     }
 
-    /// A real loss with no clean frame old enough left: a wave heals without an anchor.
-    /// The client re-armed at this loss, so a wave under way restarts to give it a fresh
-    /// start and close. Nonsense and a range past the head stay the caller's keyframe.
+    /// A real loss with no clean anchor: a wave heals without one. The client re-armed at
+    /// this loss, so a wave under way queues a fresh start and close behind it; its own
+    /// close still lifts unless a lost frame sits inside its sweep. Nonsense and a range
+    /// past the head stay the caller's keyframe.
     fn start_wave(&mut self, first: i64, last: i64) -> bool {
         let cycle = self.wave_cycle();
         if cycle == 0 || first < 0 || first > last || first >= self.frame_idx {
             return false;
         }
-        if self.wave.is_some() {
-            // The driver ignores a re-force mid-sweep (measured on the RTX box): let this
-            // one run out unmarked and queue a fresh wave behind it.
-            self.wave_spoiled = true;
+        if let Some(w) = self.wave {
+            // The driver ignores a re-force mid-sweep: this one runs out, the next queues.
+            let span_start = self.wave_span.map(|(start, _)| start);
+            self.wave_spoiled |= w.spoiled_by(span_start, self.frame_idx, last);
             self.wave_queued = true;
             tracing::debug!(
                 first,
                 last,
+                spoiled = self.wave_spoiled,
                 "nvenc RFI: loss mid-wave — wave queued behind it"
             );
             return true;
@@ -1886,6 +1888,12 @@ impl Encoder for NvencD3d11Encoder {
         if self.encoder.is_null() || !self.rfi_supported || self.distrusted {
             return false;
         }
+        // A sweep in flight answers every ask until it closes. The driver neither honours
+        // an invalidation mid-sweep nor keeps sweeping after one, and an anchor tagged
+        // there lifts the client onto damage that only the next IDR clears.
+        if self.wave.is_some() || super::nvenc_core::wave_always() {
+            return self.start_wave(first, last);
+        }
         match plan_range_recovery(first, last, self.frame_idx, self.last_rfi_range) {
             // Covering range already invalidated. Re-arm the anchor: the previous recovery AU
             // may itself have been lost, and the next frame is equally clean.
@@ -2654,15 +2662,47 @@ mod tests {
 
     /// BGRA rows scrolled down by `shift`, with a diagonal so no two rows match: the encoder
     /// must reach for rows above, which is what a stripe's clean region has to refuse.
-    fn scroll_pattern(w: usize, h: usize, shift: usize) -> Vec<u8> {
+    /// A texture that moves `dx` px right and `dy` px down per frame (negative = left/up):
+    /// the rows band by luma, the columns band the green so horizontal motion codes too.
+    /// `PF_WAVE_SCROLL=dx,dy` pins it; the default moves down, so motion vectors point up
+    /// into rows the sweep already refreshed. Down-pointing vectors are the hard case.
+    fn scroll_pattern(w: usize, h: usize, frame: usize) -> Vec<u8> {
+        let (dx, dy) = std::env::var("PF_WAVE_SCROLL")
+            .ok()
+            .and_then(|s| {
+                let (x, y) = s.split_once(',')?;
+                Some((x.trim().parse::<i64>().ok()?, y.trim().parse::<i64>().ok()?))
+            })
+            .unwrap_or((0, 6));
+        let (sx, sy) = (dx * frame as i64, dy * frame as i64);
+        // `PF_WAVE_NOISE=1` adds per-pixel noise that scrolls with the content, so the
+        // encoder is starved the way game content starves it and residual coding cannot
+        // paper over a prediction from a dirty row.
+        let noise = std::env::var("PF_WAVE_NOISE").is_ok_and(|v| v == "1");
         let mut px = vec![0u8; w * h * 4];
         for y in 0..h {
-            let band = ((y + h - shift % h) % h) as u8;
+            let cy = (y as i64 - sy).rem_euclid(h as i64);
+            let band = cy as u8;
             for x in 0..w {
+                let cx = (x as i64 - sx).rem_euclid(w as i64);
+                let col = cx as u8;
                 let o = (y * w + x) * 4;
-                px[o] = band.wrapping_mul(3);
-                px[o + 1] = band ^ (x as u8);
-                px[o + 2] = 255 - band;
+                let n = if noise {
+                    // xorshift of the content coordinate: white noise, ±32 per channel.
+                    let mut v = (cx as u32).wrapping_mul(0x9E37_79B9)
+                        ^ (cy as u32).wrapping_mul(0x85EB_CA6B)
+                        ^ 0x5bd1_e995;
+                    v ^= v << 13;
+                    v ^= v >> 17;
+                    v ^= v << 5;
+                    (v & 63) as i16 - 32
+                } else {
+                    0
+                };
+                let c = |b: u8| (i16::from(b) + n).clamp(0, 255) as u8;
+                px[o] = c(band.wrapping_mul(3));
+                px[o + 1] = c(band ^ col);
+                px[o + 2] = c(255 - band);
                 px[o + 3] = 255;
             }
         }
@@ -2676,8 +2716,8 @@ mod tests {
     /// four client views for the decode check: `-dropA` loses frames 1–2 ahead of A,
     /// `-dropL` the frame the anchor P answers, `-dropP` the anchor P ahead of B, `-dropC`
     /// the two frames ahead of the mid-B loss; the anchor P, B's close and C's close must
-    /// decode identical. `PF_WAVE_SMOKE=WxH[:bits[:fps]]` runs a production shape
-    /// (`3840x2160:10:120`); 10-bit feeds R10G10B10A2 textures.
+    /// decode identical. `PF_WAVE_SMOKE=WxH[:bits[:fps[:mbps]]]` runs a production shape
+    /// (`3840x2160:10:120:100`); 10-bit feeds R10G10B10A2 textures.
     ///
     /// `cargo test -p pf-encode-win --features nvenc nvenc_wave_smoke -- --ignored --nocapture`
     #[test]
@@ -2692,6 +2732,9 @@ mod tests {
             .expect("PF_WAVE_SMOKE=WxH[:bits[:fps]]");
         let ten_bit = parts.next().is_some_and(|b| b == "10");
         let fps: u32 = parts.next().map_or(60, |f| f.parse().unwrap());
+        let mbps: u64 = parts
+            .next()
+            .map_or(if w >= 1920 { 86 } else { 10 }, |m| m.parse().unwrap());
         #[allow(non_snake_case)]
         let (W, H) = (w, h);
         let (format, dxgi) = if ten_bit {
@@ -2709,7 +2752,7 @@ mod tests {
                 .expect("NVIDIA adapter");
             let (device, _ctx) = pf_frame::dxgi::make_device(&adapter).expect("make_device");
             let texture = |i: usize| {
-                let mut bytes = scroll_pattern(W as usize, H as usize, i * 6);
+                let mut bytes = scroll_pattern(W as usize, H as usize, i);
                 if ten_bit {
                     // BGRA8 -> R10G10B10A2 in place: each channel to its 10-bit lane.
                     for px in bytes.chunks_exact_mut(4) {
@@ -2750,7 +2793,7 @@ mod tests {
                 W,
                 H,
                 fps,
-                if W >= 1920 { 86_000_000 } else { 10_000_000 },
+                mbps * 1_000_000,
                 if ten_bit { 10 } else { 8 },
                 ChromaFormat::Yuv420,
                 1,
@@ -2766,7 +2809,7 @@ mod tests {
             let cycle = enc.wave_cycle() as usize;
             assert!(cycle >= 2, "the wave is on");
             println!(
-                "nvenc_wave_smoke: {W}x{H} {}-bit {fps} fps, cycle {cycle} frames",
+                "nvenc_wave_smoke: {W}x{H} {}-bit {fps} fps {mbps} Mbps, cycle {cycle} frames",
                 if ten_bit { 10 } else { 8 }
             );
             // Wave A at 3 (loss with no anchor), anchor P after it, wave B off a dirty
@@ -2779,7 +2822,13 @@ mod tests {
             let spoil_at = b_start + 3;
             let c_start = b_close + 1;
             let c_close = c_start + cycle - 1;
-            let last = c_close + 1;
+            // Plain P frames after C's close: `PF_WAVE_TAIL=<n>` lengthens the window that
+            // shows whether a residual left at the close drifts.
+            let tail: usize = std::env::var("PF_WAVE_TAIL")
+                .ok()
+                .and_then(|t| t.parse().ok())
+                .unwrap_or(1);
+            let last = c_close + tail;
             let mut aus = Vec::new();
             for i in 0..=last {
                 if i == a_start {
@@ -2799,6 +2848,17 @@ mod tests {
                     let lost = (a_close - 1) as i64;
                     assert!(enc.invalidate_ref_frames(lost, lost));
                     assert_eq!(enc.wave.map(|w| w.index), Some(0), "dirty anchor: wave B");
+                }
+                if i == b_start + 1 {
+                    // Asked while B runs, for a frame before its start: no invalidation
+                    // (the driver would drop the sweep), no anchor, B's close still lifts.
+                    let lost = anchor_p as i64;
+                    assert!(enc.invalidate_ref_frames(lost, lost));
+                    assert_eq!(enc.wave.map(|w| w.index), Some(1), "B runs on");
+                    assert!(
+                        !enc.wave_spoiled && enc.wave_queued,
+                        "B unspoiled, C queued"
+                    );
                 }
                 if i == spoil_at {
                     let lost = (spoil_at - 1) as i64;
@@ -2872,6 +2932,179 @@ mod tests {
                  {dir}/nvenc-wave{{,-dropA,-dropL,-dropP,-dropC}}.h265",
                 aus.len(),
                 full.len()
+            );
+        }
+    }
+
+    /// Many waves in a row, each answering a frame lost two ahead of its start
+    /// (`PUNKTFUNK_NVENC_IR_ALWAYS=1` turns the RFI into a wave), then `PF_WAVE_GAP` plain
+    /// P frames. The view loses every such frame, so `wave-soak.ps1` can map each close and
+    /// the drift after it. `PF_WAVE_SOAK=<waves>`; shape, scroll and noise as the smoke.
+    ///
+    /// `cargo test -p pf-encode-win --features nvenc nvenc_wave_soak -- --ignored --nocapture`
+    #[test]
+    #[ignore = "requires an NVIDIA GPU + driver — run manually on the RTX box (.173)"]
+    fn nvenc_wave_soak() {
+        let shape = std::env::var("PF_WAVE_SMOKE").unwrap_or_else(|_| "256x256:8:120:1".into());
+        let waves: usize = std::env::var("PF_WAVE_SOAK")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(12);
+        let gap: usize = std::env::var("PF_WAVE_GAP")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(12);
+        assert!(
+            std::env::var("PUNKTFUNK_NVENC_IR_ALWAYS").is_ok_and(|v| v == "1"),
+            "PUNKTFUNK_NVENC_IR_ALWAYS=1 makes every ask a wave"
+        );
+        let mut parts = shape.split(':');
+        let (w, h) = parts
+            .next()
+            .and_then(|s| s.split_once('x'))
+            .map(|(w, h)| (w.parse::<u32>().unwrap(), h.parse::<u32>().unwrap()))
+            .expect("PF_WAVE_SMOKE=WxH[:bits[:fps[:mbps]]]");
+        let ten_bit = parts.next().is_some_and(|b| b == "10");
+        let fps: u32 = parts.next().map_or(60, |f| f.parse().unwrap());
+        let mbps: u64 = parts
+            .next()
+            .map_or(if w >= 1920 { 86 } else { 10 }, |m| m.parse().unwrap());
+        #[allow(non_snake_case)]
+        let (W, H) = (w, h);
+        let (format, dxgi) = if ten_bit {
+            (PixelFormat::Rgb10a2Sdr, DXGI_FORMAT_R10G10B10A2_UNORM)
+        } else {
+            (PixelFormat::Bgra, DXGI_FORMAT_B8G8R8A8_UNORM)
+        };
+        // SAFETY: as `nvenc_wave_smoke`: test-only COM calls on one thread, out-pointers
+        // checked, every texture outlives the encoder call that reads it.
+        unsafe {
+            let factory: IDXGIFactory1 = CreateDXGIFactory1().expect("DXGI factory");
+            let adapter = (0..)
+                .map_while(|i| factory.EnumAdapters1(i).ok())
+                .find(|a| a.GetDesc1().is_ok_and(|d| d.VendorId == 0x10de))
+                .expect("NVIDIA adapter");
+            let (device, _ctx) = pf_frame::dxgi::make_device(&adapter).expect("make_device");
+            let texture = |i: usize| {
+                let mut bytes = scroll_pattern(W as usize, H as usize, i);
+                if ten_bit {
+                    for px in bytes.chunks_exact_mut(4) {
+                        let (b, g, r) = (px[0] as u32, px[1] as u32, px[2] as u32);
+                        let v = (r << 2) | ((g << 2) << 10) | ((b << 2) << 20) | (3 << 30);
+                        px.copy_from_slice(&v.to_le_bytes());
+                    }
+                }
+                let init = D3D11_SUBRESOURCE_DATA {
+                    pSysMem: bytes.as_ptr() as *const _,
+                    SysMemPitch: W * 4,
+                    SysMemSlicePitch: 0,
+                };
+                let desc = D3D11_TEXTURE2D_DESC {
+                    Width: W,
+                    Height: H,
+                    MipLevels: 1,
+                    ArraySize: 1,
+                    Format: dxgi,
+                    SampleDesc: DXGI_SAMPLE_DESC {
+                        Count: 1,
+                        Quality: 0,
+                    },
+                    Usage: D3D11_USAGE_DEFAULT,
+                    BindFlags: D3D11_BIND_RENDER_TARGET.0 as u32,
+                    CPUAccessFlags: 0,
+                    MiscFlags: 0,
+                };
+                let mut tex = None;
+                device
+                    .CreateTexture2D(&desc, Some(&init), Some(&mut tex))
+                    .expect("frame texture");
+                tex.expect("null frame texture")
+            };
+            let mut enc = NvencD3d11Encoder::open(
+                Codec::H265,
+                format,
+                W,
+                H,
+                fps,
+                mbps * 1_000_000,
+                if ten_bit { 10 } else { 8 },
+                ChromaFormat::Yuv420,
+                1,
+                None,
+            )
+            .expect("NVENC open");
+            enc.prepare_d3d11(&device, format, W, H).expect("prepare");
+            assert!(
+                enc.caps().supports_rfi,
+                "the RTX box invalidates references"
+            );
+            let cycle = enc.wave_cycle() as usize;
+            assert!(cycle >= 2, "the wave is on");
+            // Wave k starts at 3 + k * (cycle + gap); its lost frame is two before that.
+            let period = cycle + gap;
+            let last = 3 + waves * period;
+            let mut lost = Vec::new();
+            let mut closes = Vec::new();
+            let mut aus = Vec::new();
+            for i in 0..=last {
+                if i >= 3 && (i - 3) % period == 0 && (i - 3) / period < waves {
+                    let l = (i - 2) as i64;
+                    assert!(enc.invalidate_ref_frames(l, l), "the always-wave answers");
+                    assert_eq!(enc.wave.map(|w| w.index), Some(0), "a fresh wave");
+                    lost.push(i - 2);
+                    closes.push(i + cycle - 1);
+                }
+                let tex = texture(i);
+                let frame = CapturedFrame {
+                    provenance: Default::default(),
+                    width: W,
+                    height: H,
+                    pts_ns: i as u64 * 1_000_000_000 / u64::from(fps),
+                    format,
+                    payload: FramePayload::D3d11(D3d11Frame {
+                        texture: tex,
+                        device: device.clone(),
+                        pyro: None,
+                    }),
+                    cursor: None,
+                };
+                enc.submit_indexed(&frame, i as u32).expect("submit");
+                let au = enc.poll().expect("poll").expect("an AU per submit (sync)");
+                aus.push(au);
+            }
+            enc.flush().ok();
+            for (i, au) in aus.iter().enumerate() {
+                assert_eq!(au.keyframe, i == 0, "AU {i}: the only IDR is frame 0");
+                let start = i >= 3 && (i - 3) % period == 0 && (i - 3) / period < waves;
+                assert_eq!(
+                    au.recovery_point,
+                    start || closes.contains(&i),
+                    "AU {i}: marks on every start and close"
+                );
+            }
+            let full: Vec<u8> = aus.iter().flat_map(|a| a.data.iter().copied()).collect();
+            let view: Vec<u8> = aus
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| !lost.contains(i))
+                .flat_map(|(_, a)| a.data.iter().copied())
+                .collect();
+            let dir = std::env::var("PUNKTFUNK_SMOKE_DIR").unwrap_or_else(|_| ".".into());
+            std::fs::write(format!("{dir}/nvenc-wave.h265"), &full).expect("write");
+            std::fs::write(format!("{dir}/nvenc-wave-dropS.h265"), &view).expect("write");
+            let csv = |v: &[usize]| {
+                v.iter()
+                    .map(|n| n.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            };
+            println!(
+                "nvenc_wave_soak: {W}x{H} {}-bit {fps} fps {mbps} Mbps cycle={cycle} gap={gap} \
+                 waves={waves} aus={} lost={} closes={}",
+                if ten_bit { 10 } else { 8 },
+                aus.len(),
+                csv(&lost),
+                csv(&closes)
             );
         }
     }
