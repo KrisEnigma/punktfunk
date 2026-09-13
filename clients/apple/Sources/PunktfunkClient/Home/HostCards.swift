@@ -1,7 +1,7 @@
 // The host grid's cards: a saved host (tap to connect, ⓘ for its page, a short context menu) and
-// an mDNS-discovered host (tap to save + connect). Both share the "monogram module" look — a
-// squared brand-purple tile beside a bold Geist name and one line under it, in a hairline panel.
-// A saved card's second line is a plain status sentence; its address lives on the host page.
+// an mDNS-discovered host (tap to save + connect). Both share one look: the host's OS mark in a
+// glass orb beside a bold Geist name and one line under it, in a hairline panel. A saved card's
+// second line is its status and preset; its address lives on the host page.
 
 import PunktfunkKit
 import SwiftUI
@@ -38,52 +38,116 @@ func monogram(_ name: String) -> String {
     return String(first).uppercased()
 }
 
-/// The squared host tile. `filled` = a solid brand-purple chip (saved hosts); otherwise a tinted
-/// outline (discovered hosts). Shows a spinner in place of the glyph while connecting.
+/// The host's OS mark, or its initial when it advertises none, inside a glass orb whose lower
+/// edge reflects the mark faintly, as if the mark sat inside it. `filled` tints the glass brand
+/// purple (saved hosts); otherwise the glass stays clear and the mark purple (discovered hosts).
+/// A spinner replaces the mark while connecting.
 ///
-/// `mark` is the host's OS mark, and it REPLACES the monogram when we have one: it identifies the
-/// machine better than its initial ever did, and on a row of similarly-named boxes the initial says
-/// nothing the name beneath it doesn't already say. A host that advertises no OS chain — or one we
-/// ship no art for — keeps its letter, so a mixed row still reads as one set.
+/// The mark REPLACES the monogram when we have one: it identifies the machine better than its
+/// initial ever did, and on a row of similarly-named boxes the initial says nothing the name
+/// beside it doesn't already say.
 func monogramTile(
     _ letter: String, osChain: String?, m: CardMetrics, connecting: Bool, filled: Bool
 ) -> some View {
-    let shape = RoundedRectangle(cornerRadius: m.radius - 3, style: .continuous)
+    let ink = filled ? Color.white : Color.brand
+    let side = m.tile
     return ZStack {
-        shape.fill(filled
-            ? AnyShapeStyle(LinearGradient(
-                colors: [Color.brand, Color.brand.opacity(0.72)],
-                startPoint: .top, endPoint: .bottom))
-            : AnyShapeStyle(Color.brand.opacity(0.14)))
+        OrbGlass(filled: filled)
+        // Sphere shading: lit from the top left, falling off toward the bottom right.
+        RadialGradient(
+            colors: [.white.opacity(0.16), .clear, .black.opacity(0.22)],
+            center: UnitPoint(x: 0.32, y: 0.22), startRadius: 0, endRadius: side * 0.8)
         if connecting {
-            ProgressView().tint(filled ? .white : Color.brand)
-        } else if let mark = osIconImage(for: osChain) {
-            // Template asset — tints from foregroundStyle exactly like the letter it stands in for.
-            // Labelled, because this is where the OS is now announced: it used to ride the status
-            // row below, which no longer carries it.
-            mark
-                .resizable()
-                .scaledToFit()
-                .frame(width: m.monogram, height: m.monogram)
-                .foregroundStyle(filled ? Color.white : Color.brand)
-                .accessibilityLabel(osChain ?? "")
+            ProgressView().tint(ink)
         } else {
-            // Fixed size (not Dynamic Type): the glyph is pinned inside a fixed tile, so it must
-            // not scale up and spill out at large accessibility text sizes. minimumScaleFactor +
-            // the clip below are belt-and-suspenders for an unusually wide glyph.
-            Text(letter)
-                .font(.geistFixed(m.monogram, .bold))
-                .minimumScaleFactor(0.5)
-                .lineLimit(1)
-                .foregroundStyle(filled ? Color.white : Color.brand)
+            // The mark above its own mirror image; the orb clips the mirror to a glint.
+            VStack(spacing: m.monogram * 0.12) {
+                tileGlyph(letter, osChain: osChain, m: m)
+                    .foregroundStyle(ink)
+                    .shadow(color: .black.opacity(0.3), radius: 1.5, y: 1)
+                tileGlyph(letter, osChain: osChain, m: m)
+                    .foregroundStyle(ink.opacity(0.5))
+                    .scaleEffect(x: 1, y: -1)
+                    .blur(radius: 0.6)
+                    .mask(LinearGradient(colors: [.black, .clear], startPoint: .top, endPoint: .center))
+                    .accessibilityHidden(true)
+            }
+            .offset(y: m.monogram * 0.56)
+        }
+        // The glass surface's highlight, drawn over the mark so the mark sits inside the orb.
+        Ellipse()
+            .fill(LinearGradient(
+                colors: [.white.opacity(0.42), .white.opacity(0)], startPoint: .top, endPoint: .bottom))
+            .frame(width: side * 0.62, height: side * 0.36)
+            .offset(y: -side * 0.26)
+            .blur(radius: side * 0.015)
+            .allowsHitTesting(false)
+    }
+    .frame(width: side, height: side)
+    .clipShape(Circle())
+    .overlay {
+        Circle().strokeBorder(
+            LinearGradient(
+                colors: [.white.opacity(0.55), .white.opacity(0.06)],
+                startPoint: .top, endPoint: .bottom),
+            lineWidth: max(0.75, side * 0.018))
+    }
+}
+
+/// The OS mark as a template image, or the host's initial when it advertises none.
+@ViewBuilder private func tileGlyph(_ letter: String, osChain: String?, m: CardMetrics) -> some View {
+    if let mark = osIconImage(for: osChain) {
+        mark
+            .resizable()
+            .scaledToFit()
+            .frame(width: m.monogram, height: m.monogram)
+            .accessibilityLabel(osChain ?? "")
+    } else {
+        // Fixed size (not Dynamic Type): the glyph sits in a fixed orb, so it must not scale up
+        // and spill out at large accessibility text sizes.
+        Text(letter)
+            .font(.geistFixed(m.monogram, .bold))
+            .minimumScaleFactor(0.5)
+            .lineLimit(1)
+            .frame(width: m.monogram, height: m.monogram)
+    }
+}
+
+/// The orb's glass: Liquid Glass on OS 26, tinted brand purple for a saved host, and the flat
+/// gradient the tile had before on older systems.
+private struct OrbGlass: View {
+    let filled: Bool
+
+    var body: some View {
+        if #available(iOS 26, macOS 26, tvOS 26, *) {
+            Color.clear.glassEffect(
+                .regular.tint(Color.brand.opacity(filled ? 0.55 : 0.12)), in: Circle())
+        } else {
+            Circle().fill(filled
+                ? AnyShapeStyle(LinearGradient(
+                    colors: [Color.brand, Color.brand.opacity(0.72)],
+                    startPoint: .top, endPoint: .bottom))
+                : AnyShapeStyle(Color.brand.opacity(0.14)))
         }
     }
-    .frame(width: m.tile, height: m.tile)
-    .clipShape(shape)
-    .overlay {
-        if !filled {
-            shape.strokeBorder(Color.brand.opacity(0.45), lineWidth: 1)
-        }
+}
+
+/// The default host's mark: a star on the orb's corner.
+private struct DefaultHostBadge: View {
+    let size: CGFloat
+
+    var body: some View {
+        Image(systemName: "star.fill")
+            .font(.system(size: size * 0.2, weight: .bold))
+            .foregroundStyle(.white)
+            .frame(width: size * 0.38, height: size * 0.38)
+            .background(Circle().fill(Color.brand))
+            .overlay(Circle().strokeBorder(.background, lineWidth: max(1, size * 0.035)))
+            .offset(x: size * 0.06, y: size * 0.06)
+            .accessibilityLabel("Default host")
+            #if os(macOS)
+            .help("Default host: Start in opens here")
+            #endif
     }
 }
 
@@ -261,16 +325,16 @@ struct HostStatusLine: View {
     }
 }
 
-/// A saved host in two lines: the name with its preset chip, and one status sentence. A tap
-/// connects; ⓘ and the menu's Host Details… open the host page; a leading accent bar marks the
-/// default host. The same view renders a pinned host+preset card, a shortcut whose menu carries
-/// only its own acts (§5.2a).
+/// A saved host in two lines: the name, then its status with the preset chip. A tap connects; ⓘ
+/// and the menu's Host Details… open the host page; a star on the orb marks the default host.
+/// The same view renders a pinned host+preset card, a shortcut whose menu carries only its own
+/// acts (§5.2a).
 struct HostCardView: View {
     let host: StoredHost
     /// Answered the last reachability probe.
     let isOnline: Bool
     let isConnecting: Bool
-    /// The host Start in opens on, explicit or derived.
+    /// The host Start in opens on, explicit or derived. Its orb carries a star.
     let isDefaultHost: Bool
     let isBusy: Bool
     let actions: HostActions
@@ -298,23 +362,27 @@ struct HostCardView: View {
                     monogramTile(monogram(host.displayName), osChain: host.osChain,
                                  m: m, connecting: isConnecting, filled: host.pinnedSHA256 != nil)
                         .opacity(isOnline || isConnecting ? 1 : 0.55)
+                        .overlay(alignment: .bottomTrailing) {
+                            if isDefaultHost { DefaultHostBadge(size: m.tile) }
+                        }
                     VStack(alignment: .leading, spacing: 4) {
-                        // The chip rides the title line, trailing: on a line of its own it made
-                        // preset cards taller than their neighbours. The name truncates first.
-                        HStack(spacing: 6) {
-                            Text(host.displayName)
-                                .font(.geist(m.name, .bold, relativeTo: .title3))
-                                .foregroundStyle(.primary)
-                                .lineLimit(1)
-                            Spacer(minLength: 8)
+                        Text(host.displayName)
+                            .font(.geist(m.name, .bold, relativeTo: .title3))
+                            .foregroundStyle(.primary)
+                            .lineLimit(1)
+                        HStack(spacing: 8) {
+                            HostStatusLine(status: status, size: m.meta)
                             if let preset = shownPreset {
+                                // Whole even when the status has to shorten: the preset says what a
+                                // tap does, and the host page has the full status.
                                 PresetChip(
                                     preset: preset, size: m.status,
                                     prominent: pinnedPreset != nil)
-                                    .layoutPriority(1)
+                                    .fixedSize()
                             }
                         }
-                        HostStatusLine(status: status, size: m.meta)
+                        // One height with or without a chip, so preset cards line up with the rest.
+                        .frame(height: m.meta * 1.4, alignment: .leading)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
@@ -324,11 +392,6 @@ struct HostCardView: View {
                 #if !os(tvOS)
                 // tvOS: the .card button style owns platter + focus motion; extra chrome mutes it.
                 .background(.regularMaterial)
-                .overlay(alignment: .leading) {
-                    if isDefaultHost {
-                        Rectangle().fill(Color.brand).frame(width: 3)
-                    }
-                }
                 .clipShape(RoundedRectangle(cornerRadius: m.radius, style: .continuous))
                 .overlay {
                     RoundedRectangle(cornerRadius: m.radius, style: .continuous)
@@ -451,12 +514,12 @@ struct HostCardView: View {
     }
 }
 
-/// The preset a card connects with, as a tinted pill. Quiet on a bound primary card (it only
-/// answers "what will a click do?"); prominent on a pinned card, where the preset IS the reason
-/// the card exists — which is where the catalog's `accent` earns its keep.
+/// The preset a card connects with, as a tinted pill after the status. Quiet on a bound primary
+/// card (it only answers "what will a click do?"); prominent on a pinned card, where the preset
+/// IS the reason the card exists — which is where the catalog's `accent` earns its keep.
 ///
-/// Prominence is fill and weight only, never TYPE SIZE: the chip sits on the card's title line,
-/// and a chip taller than the name would make pinned cards taller than their host's.
+/// Prominence is fill and weight only, never TYPE SIZE: the card fixes its second line's height,
+/// and a chip taller than that would make pinned cards taller than their host's.
 struct PresetChip: View {
     let preset: StreamPreset
     let size: CGFloat
