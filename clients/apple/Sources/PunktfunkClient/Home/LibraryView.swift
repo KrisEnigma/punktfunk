@@ -182,7 +182,7 @@ struct LibraryView: View {
             // In the tab the host filter names the shelf, so the title names the place.
             .navigationTitle(inTab ? "Library" : "\(shelfTitle) — Library")
             #if os(iOS)
-            .navigationBarTitleDisplayMode(inTab ? .automatic : .inline)
+            .modifier(LibraryTitleMode(inTab: inTab))
             #endif
             .toolbar {
                 #if os(macOS)
@@ -1229,6 +1229,41 @@ private struct TitleSearch: ViewModifier {
             content.searchable(text: $text, prompt: "Search titles")
         } else {
             content
+        }
+    }
+}
+#endif
+
+#if os(iOS)
+/// The title's mode. On a phone the tab holds its title at the leading edge, scrolled or not,
+/// where the Hosts tab's collapsed title sits: iOS centers a collapsed title, which pressed
+/// "Library" against the toolbar. The iPad and iOS before 26 keep the system title.
+private struct LibraryTitleMode: ViewModifier {
+    let inTab: Bool
+    @Environment(\.horizontalSizeClass) private var sizeClass
+
+    func body(content: Content) -> some View {
+        let system = content.navigationBarTitleDisplayMode(inTab ? .automatic : .inline)
+        if #available(iOS 26, *) {
+            if inTab && sizeClass == .compact {
+                content
+                    .toolbarTitleDisplayMode(.inline)
+                    .toolbar(removing: .title)
+                    .toolbar {
+                        ToolbarItem(placement: .topBarLeading) {
+                            // The large title's face, at its own width: the bar clips it otherwise.
+                            Text("Library")
+                                .font(.geist(34, .bold, relativeTo: .largeTitle))
+                                .fixedSize()
+                                .accessibilityAddTraits(.isHeader)
+                        }
+                        .sharedBackgroundVisibility(.hidden)
+                    }
+            } else {
+                system
+            }
+        } else {
+            system
         }
     }
 }
