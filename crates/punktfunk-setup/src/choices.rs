@@ -84,7 +84,6 @@ pub struct Choices {
     pub web_password: Option<String>,
     /// Why the box chose these — shown next to the row when it is on.
     pub group_why: Option<String>,
-    pub gamestream_why: Option<String>,
     pub linger_why: Option<String>,
 }
 
@@ -121,7 +120,8 @@ impl Choices {
 
         let omarchy_setup = pins.omarchy_setup.unwrap_or(true);
         let punktfunk_group = steamos || pins.punktfunk_group.unwrap_or(true);
-        let gamestream = pins.gamestream.unwrap_or(facts.sunshine_active);
+        // Off next to Sunshine too: both hosts bind the Moonlight ports.
+        let gamestream = pins.gamestream.unwrap_or(false);
         let linger = steamos
             || pins
                 .linger
@@ -152,8 +152,6 @@ impl Choices {
             // Asked after the settings screen, so nothing derives it here.
             web_password: None,
             group_why: punktfunk_group.then_some(group_why).flatten(),
-            gamestream_why: (gamestream && facts.sunshine_active)
-                .then(|| "Sunshine/Apollo already on this box".to_string()),
             linger_why: linger.then_some(linger_why).flatten(),
         }
     }
@@ -264,8 +262,8 @@ mod tests {
         sunshine.sunshine_active = true;
         let sunshine = Choices::derive(&sunshine, &Pins::default());
         assert!(
-            sunshine.gamestream,
-            "an active Sunshine flips Moonlight compat on"
+            !sunshine.gamestream,
+            "Sunshine keeps the Moonlight ports, so compat stays off"
         );
         assert!(sunshine.move_mgmt_port);
     }

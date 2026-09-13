@@ -408,7 +408,7 @@ fn the_sunshine_demo_shows_the_coexistence_row_and_moves_the_mgmt_port() {
     wiz.wait_for_done();
     assert!(
         wiz.has_text("PUNKTFUNK_MGMT_BIND=0.0.0.0:47991"),
-        "the SetEnv step ran"
+        "the move is announced"
     );
 }
 

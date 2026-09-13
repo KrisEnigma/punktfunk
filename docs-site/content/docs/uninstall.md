@@ -73,7 +73,8 @@ sudo gpasswd -d "$USER" punktfunk; sudo groupdel punktfunk
 Your `input` group membership is harmless to keep (a stock Ubuntu group); drop it with
 `sudo gpasswd -d "$USER" input` if you'd rather not have it. If you opened the firewall, close it
 again: `sudo ufw delete allow punktfunk-native` (and `punktfunk-gamestream` / `punktfunk-web` if
-you allowed those too).
+you allowed those too). If the setup moved the management port next to Sunshine, also
+`sudo ufw delete allow 47991/tcp`.
 
 ### Fedora (dnf)
 
@@ -97,6 +98,7 @@ On firewalld, close the ports you opened:
 sudo firewall-cmd --permanent --remove-service=punktfunk-native
 sudo firewall-cmd --permanent --remove-service=punktfunk-gamestream   # if you opened it
 sudo firewall-cmd --permanent --remove-service=punktfunk-web          # if you opened it
+sudo firewall-cmd --permanent --remove-port=47991/tcp                 # if the setup moved the mgmt port
 sudo firewall-cmd --reload
 ```
 
@@ -158,7 +160,8 @@ sudo pacman-key --delete E0CA04465C99C936E0B0C6510A317015A34DDD69
 
 **Left behind:** `~/.config/punktfunk` and the two groups — `rm -rf ~/.config/punktfunk`,
 `sudo groupdel punktfunk-update`, and `sudo gpasswd -d "$USER" punktfunk; sudo groupdel punktfunk`
-clear them. On CachyOS, close the ufw rules you opened: `sudo ufw delete allow punktfunk-native`.
+clear them. On CachyOS, close the ufw rules you opened: `sudo ufw delete allow punktfunk-native`,
+plus `sudo ufw delete allow 47991/tcp` if the setup moved the management port.
 
 ### SteamOS / Steam Deck host (on-device build)
 

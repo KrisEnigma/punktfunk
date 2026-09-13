@@ -253,6 +253,29 @@ echo "lan_sources / ufw"
 lan_sources > "$WORK/actual-lan"
 check "lan_sources preinstalls the tailscale0 rule" "$WORK/expected-lan" "$WORK/actual-lan"
 
+echo "moved mgmt port"
+
+while IFS='|' read -r body want; do
+  printf '%b' "$body" > "$WORK/mgmt.env"
+  got=$(moved_mgmt_port "$WORK/mgmt.env")
+  if [[ "$got" == "$want" ]]; then
+    printf '  ok   %s -> %s\n' "$body" "${want:-none}"
+  else
+    printf '  FAIL %s -> %s, want %s\n' "$body" "${got:-none}" "${want:-none}"; fails=$((fails + 1))
+  fi
+done <<'EOF'
+PUNKTFUNK_MGMT_BIND=0.0.0.0:47991\n|47991
+PUNKTFUNK_MGMT_BIND="[::]:48123"\n|48123
+PUNKTFUNK_MGMT_BIND=0.0.0.0:47990\n|
+# PUNKTFUNK_MGMT_BIND=0.0.0.0:48123\n|
+PUNKTFUNK_MGMT_BIND=0.0.0.0:47991\nPUNKTFUNK_MGMT_BIND=\n|
+EOF
+if [[ -z "$(moved_mgmt_port "$WORK/absent.env")" ]]; then
+  printf '  ok   no host.env -> none\n'
+else
+  printf '  FAIL no host.env reported a port\n'; fails=$((fails + 1))
+fi
+
 echo "mode / gamestream env"
 
 mod="$WORK/mode"

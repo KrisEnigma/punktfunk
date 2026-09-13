@@ -231,16 +231,17 @@ when you change something or when the service needs a nudge. Run them from an **
 prompt.
 
 ```powershell
-punktfunk-host service install [--gamestream=on|off] [--allow-public-network]
+punktfunk-host service install [--gamestream=on|off] [--allow-public-network] [--mgmt-bind=IP:PORT]
 punktfunk-host service uninstall
 punktfunk-host service start | stop | restart | status
 ```
 
 | Subcommand | What it does |
 |---|---|
-| `install` | Registers the auto-start `PunktfunkHost` service, adds the firewall rules, and writes a default `%ProgramData%\punktfunk\host.env` if there isn't one. Safe to re-run: it's also how you change the two options below. |
+| `install` | Registers the auto-start `PunktfunkHost` service, adds the firewall rules, and writes a default `%ProgramData%\punktfunk\host.env` if there isn't one. Safe to re-run: it's also how you change the options below. |
 | `--gamestream=on\|off` | Sets `PUNKTFUNK_HOST_CMD` in `host.env` — `on` adds the GameStream/Moonlight planes, `off` goes back to the native-only host. A command line you edited by hand is left alone. |
 | `--allow-public-network` | Also opens the ports on networks Windows classifies **Public**. By default only Private and Domain are opened. |
+| `--mgmt-bind=IP:PORT` | Sets `PUNKTFUNK_MGMT_BIND` in `host.env` and opens the firewall for that port. The installer passes `0.0.0.0:47991` when Sunshine, Apollo or Vibeshine holds 47990. |
 | `uninstall` | Stops and deletes the service and removes its firewall rules. It does **not** remove the host itself — see [Uninstalling](/docs/uninstall) for that. |
 | `start` / `stop` / `restart` | Service control. `restart` waits for the old process to exit first — this is what picks up a `host.env` edit. |
 | `status` | Queries the service (the same thing `sc query PunktfunkHost` prints). |
