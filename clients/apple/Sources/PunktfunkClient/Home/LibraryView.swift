@@ -213,9 +213,6 @@ struct LibraryView: View {
             #if os(iOS) || os(macOS)
             .modifier(TitleSearch(active: inTab, text: $search))
             #endif
-            #if os(iOS)
-            .sheet(isPresented: $showCustomize) { LibrarySectionsPanel() }
-            #endif
             #if os(iOS) || os(macOS)
             .sheet(item: $detailGame, onDismiss: launchPendingTitle) { detailSheet($0) }
             #endif
@@ -616,6 +613,12 @@ struct LibraryView: View {
         Button { showCustomize = true } label: {
             Label("Customize", systemImage: "slider.horizontal.3")
         }
+        #if os(iOS)
+        // A popover on the iPad, as on the Mac; an iPhone shows it as a sheet.
+        .popover(isPresented: $showCustomize) {
+            LibrarySectionsPanel().frame(minWidth: 320, minHeight: 440)
+        }
+        #endif
         #if os(macOS)
         // A popover on the Mac (design §4): the panel is a short list, not a task.
         .popover(isPresented: $showCustomize) {
