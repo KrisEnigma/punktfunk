@@ -52,6 +52,13 @@ struct HomeView: View {
     /// The host whose page is pushed.
     @State private var detailTarget: StoredHost.ID?
     #endif
+    #if os(iOS)
+    @Environment(\.horizontalSizeClass) private var sizeClass
+    /// The host whose page is up as the iPad's sheet of sections.
+    @State private var sectionsHost: StoredHost?
+    /// An act that sheet handed back, run once the sheet is gone.
+    @State private var pendingHandOff: HostPageRequest?
+    #endif
     /// The start-screen pointer; the default host's card carries the accent bar.
     @AppStorage(DefaultsKey.defaultHost) private var defaultHostID = ""
     /// The outcome of the last "Send Logs to Host" — drives its alert.
@@ -316,6 +323,14 @@ struct HomeView: View {
             SettingsView()
                 .settingsSheetSizing()
         }
+        // The iPad's host page, laid out like the Mac's host window.
+        .sheet(item: $sectionsHost, onDismiss: runHandOff) { host in
+            HostSectionsView(hostID: host.id, store: store) { request in
+                pendingHandOff = request
+                sectionsHost = nil
+            }
+            .settingsSheetSizing()
+        }
         #endif
         #endif
     }
@@ -385,14 +400,32 @@ struct HomeView: View {
                 runPower: { hostAction($0, on: host) }))
     }
 
-    /// The host page: pushed on touch, its own window on the Mac.
+    /// The host page: its own window on the Mac, a sheet of sections on the iPad, pushed on the
+    /// iPhone and Apple TV.
     private func showDetails(_ host: StoredHost) {
         #if os(macOS)
         openWindow(id: MacHostWindow.sceneID, value: host.id)
+        #elseif os(iOS)
+        if sizeClass == .regular { sectionsHost = host } else { detailTarget = host.id }
         #else
         detailTarget = host.id
         #endif
     }
+
+    #if os(iOS)
+    /// The iPad's host sheet closed on an act that belongs to the grid: run it now it is gone.
+    private func runHandOff() {
+        guard let request = pendingHandOff else { return }
+        pendingHandOff = nil
+        guard let host = store.hosts.first(where: { $0.id == request.hostID }) else { return }
+        switch request {
+        case .connect(_, let selection): connect(host, selection)
+        case .browse: libraryTarget = LibraryTarget(host: host)
+        case .wake: wake(host)
+        case .pair: if !model.isBusy { pairingTarget = host }
+        }
+    }
+    #endif
 
     /// A host action picked from a card's menu: explain an unavailable one, confirm a
     /// destructive one, run the rest.

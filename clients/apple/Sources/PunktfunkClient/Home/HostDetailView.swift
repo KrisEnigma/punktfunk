@@ -103,7 +103,7 @@ struct HostDetailView: View {
         #if os(macOS)
         .formStyle(.grouped)
         #endif
-        .navigationTitle(host.displayName)
+        .navigationTitle(pageTitle(host))
         #if os(iOS)
         .navigationBarTitleDisplayMode(.inline)
         #endif
@@ -125,6 +125,15 @@ struct HostDetailView: View {
     }
 
     private func shows(_ section: HostSection) -> Bool { only == nil || only == section }
+
+    /// The host's name, except in the iPad's sheet of sections: its sidebar names the host, so the
+    /// pane names its section.
+    private func pageTitle(_ host: StoredHost) -> String {
+        #if os(iOS)
+        if let only { return only.title }
+        #endif
+        return host.displayName
+    }
 
     private func header(_ host: StoredHost, _ status: HostStatus) -> some View {
         let m = CardMetrics.current
