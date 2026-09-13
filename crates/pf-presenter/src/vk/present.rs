@@ -525,6 +525,12 @@ impl Presenter {
                     vk::Filter::LINEAR,
                 );
             }
+            // An HDR switch swaps in a fresh overlay pipe and leaves the swapchain to
+            // `recreate_swapchain`, which keeps the old one while the window has no
+            // extent (a display-topology flip). Until that recreate lands the pipe has
+            // no framebuffers: present the video alone rather than index past them.
+            let overlay =
+                overlay.filter(|_| (index as usize) < self.overlay_pipe.framebuffers.len());
             if let Some(o) = overlay {
                 // Skia flushed on this queue: same-layout barrier is execution
                 // + memory only (cross-submit visibility).
