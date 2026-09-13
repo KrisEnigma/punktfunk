@@ -7,8 +7,8 @@
 
 import { callable } from "@decky/api";
 
-/** A settings profile as the CLI resolves it — ids are dangling-checked and names attached. */
-export interface Profile {
+/** A preset as the CLI resolves it — ids are dangling-checked and names attached. */
+export interface Preset {
   id: string;
   name: string;
 }
@@ -40,9 +40,10 @@ export interface DiscoveredHost {
  * `online` comes from a mDNS-INDEPENDENT probe, so a host reached over Tailscale/VPN is not
  * shown offline merely because it never advertises; `null` means the probe was skipped.
  *
- * `profile` is the host's DEFAULT binding, which a plain connect applies silently. It is not
- * the same thing as `pinned_profiles`, which are the cards a user chose to surface. Both come
- * back already resolved against the profile catalog, so this plugin never opens it.
+ * `preset` is the host's DEFAULT binding, which a plain connect applies silently. It is not
+ * the same thing as `pinned_presets`, which are the cards a user chose to surface. Both come
+ * back already resolved against the preset catalog, so this plugin never opens it. A client
+ * older than the rename sends them only as `profile` / `pinned_profiles`.
  */
 export interface SavedHost {
   id: string | null; // the record's stable id — the reference a launch should use
@@ -55,8 +56,10 @@ export interface SavedHost {
   os: string;
   last_used: number | null;
   clipboard_sync: boolean;
-  profile: Profile | null;
-  pinned_profiles: Profile[];
+  preset?: Preset | null;
+  pinned_presets?: Preset[];
+  profile?: Preset | null;
+  pinned_profiles?: Preset[];
   online: boolean | null;
 }
 

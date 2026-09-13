@@ -178,7 +178,7 @@ fn toggle_extra(
     Some(())
 }
 
-// Tab names match Apple/Android (`console-vectors.json`). Profiles is empty here:
+// Tab names match Apple/Android (`console-vectors.json`). Presets is empty here:
 // its rows come from the catalog. Device pickers stay on the desktop dialogs.
 const TABS: [(&str, &[RowId]); 7] = [
     (
@@ -264,10 +264,10 @@ const TABS: [(&str, &[RowId]); 7] = [
             RowId::Licenses,
         ],
     ),
-    ("Profiles", &[]),
+    ("Presets", &[]),
 ];
 
-/// Trailing Profiles tab — catalog-built, not [`TABS`] rows.
+/// Trailing Presets tab — catalog-built, not [`TABS`] rows.
 const PROFILES_TAB: usize = TABS.len() - 1;
 
 /// Strip length for the shell's raster walk. `cfg(test)`: a shipping build
@@ -2935,7 +2935,7 @@ pub(crate) mod tests {
         assert!(seen.contains(&RowId::ReduceUiResolution));
         assert!(seen.contains(&RowId::AudioFormat));
         assert!(TABS[PROFILES_TAB].1.is_empty());
-        assert_eq!(TABS[PROFILES_TAB].0, "Profiles");
+        assert_eq!(TABS[PROFILES_TAB].0, "Presets");
     }
 
     /// Only test that touches the process-wide `os_theme` slot. A sibling races

@@ -215,7 +215,7 @@ mod tests {
         assert_eq!(plan.settings.bitrate_kbps, 200_000, "back to the globals");
         assert_eq!(plan.profile, None);
         let args = plan.session_args();
-        let i = args.iter().position(|a| a == "--profile").unwrap();
+        let i = args.iter().position(|a| a == "--preset").unwrap();
         assert_eq!(args[i + 1], "");
 
         let _ = std::fs::remove_dir_all(&home);

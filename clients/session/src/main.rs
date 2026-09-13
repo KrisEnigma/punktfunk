@@ -247,13 +247,16 @@ mod session_main {
         })
     }
 
-    /// `--profile <id|name>` — the settings profile this one session runs with, overriding the
-    /// host's own binding for this launch only (never rebinding it): the shells' "Connect
-    /// with ▸ X" and a `punktfunk://…&profile=` link both land here. Absent = honor the host's
-    /// binding; `--profile ""` (or a bare `--profile`) forces the global defaults, which is
-    /// how "Connect with ▸ Default settings" reaches a bound host.
-    fn profile_arg() -> Option<String> {
-        arg_flag("--profile").then(|| arg_value("--profile").unwrap_or_default())
+    /// `--preset <id|name>` — the preset this one session runs with, overriding the host's own
+    /// binding for this launch only (never rebinding it): the shells' "Connect with ▸ X" and a
+    /// `punktfunk://…&preset=` link both land here. Absent = honor the host's binding;
+    /// `--preset ""` (or a bare `--preset`) forces the global defaults, which is how "Connect
+    /// with ▸ Default settings" reaches a bound host. `--profile` is the pre-rename spelling.
+    fn preset_arg() -> Option<String> {
+        ["--preset", "--profile"]
+            .into_iter()
+            .find(|flag| arg_flag(flag))
+            .map(|flag| arg_value(flag).unwrap_or_default())
     }
 
     /// The connect budget: 15 s normally; `--connect-timeout SECS` overrides — the
@@ -989,15 +992,15 @@ mod session_main {
         }
         let Some(target) = arg_value("--connect") else {
             eprintln!(
-                "usage: punktfunk-session --connect host[:port] [--fp HEX] [--launch id] [--profile REF] [--fullscreen]\n\
+                "usage: punktfunk-session --connect host[:port] [--fp HEX] [--launch id] [--preset REF] [--fullscreen]\n\
                  \x20      punktfunk-session --browse [host[:port]] [--mgmt PORT] [--fullscreen] [--json-status]\n\
                  \x20      punktfunk-session --pair - --connect host[:port] [--name LABEL]\n\
                  \n\
                  Streams from a paired punktfunk host in a Vulkan window. --browse opens the\n\
                  gamepad console instead: bare --browse is the host list (discovery, PIN\n\
                  pairing, settings, wake-on-LAN); with a target it opens that host's game\n\
-                 library. --profile picks a settings profile by id or name for this session\n\
-                 only (\"\" = the global defaults); without it the host's own profile applies.\n\
+                 library. --preset picks a preset by id or name for this session\n\
+                 only (\"\" = the global defaults); without it the host's own preset applies.\n\
                  --connect never dials a host it has no pinned fingerprint for —\n\
                  enrol with --pair (no display needed), in the console, or from the desktop\n\
                  client."
@@ -1036,7 +1039,7 @@ mod session_main {
                 let (settings, profile) = trust::effective_settings(
                     &addr,
                     port,
-                    profile_arg().as_deref(),
+                    preset_arg().as_deref(),
                     arg_value("--launch").as_deref(),
                 );
                 (settings, profile.map(|p| p.name), None)

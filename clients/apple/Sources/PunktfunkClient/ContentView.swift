@@ -810,7 +810,7 @@ struct ContentView: View {
             break
         case .browse:
             // The reserved library route, now real: open the host's game library without starting
-            // a session. `launch=`/`profile=` are meaningless on a browse (nothing streams until a
+            // a session. `launch=`/`preset=` are meaningless on a browse (nothing streams until a
             // title is picked, and that connect resolves its own preset) — ignored, not refused,
             // per the unknown-parameter rule.
             openLibrary(from: link)
@@ -1409,7 +1409,7 @@ struct ContentView: View {
     // MARK: - Connect
 
     /// `profile` is this connect's one-off pick ("Connect with ▸", a pinned card, a link's
-    /// `profile=`). `.inherit` — the default, and what a plain card tap passes — falls through to
+    /// `preset=`). `.inherit` — the default, and what a plain card tap passes — falls through to
     /// the host's binding. A one-off NEVER rebinds the host: rebinding is always an explicit act
     /// in the edit sheet (design §5.2).
     private func connect(

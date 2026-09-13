@@ -183,7 +183,7 @@ impl ConnectPlan {
         // Only a one-off rides the flag. Without it the session resolves the host binding
         // through the same helper this plan used.
         if let Some(profile) = &self.profile_override {
-            args.push("--profile".into());
+            args.push("--preset".into());
             args.push(profile.clone());
         }
         if let Some(secs) = self.connect_timeout_secs {
@@ -280,9 +280,9 @@ pub fn plan_from_link(
     if link.route != Route::Connect {
         return Ok(PlanOutcome::Unsupported(link.route));
     }
-    // Profile first: a link that cannot honor its profile must refuse rather than
+    // Preset first: a link that cannot honor its preset must refuse rather than
     // stream with the wrong settings.
-    if let Some(reference) = &link.profile {
+    if let Some(reference) = &link.preset {
         match catalog.resolve(reference) {
             (Some(_), _) => {}
             (_, Resolution::Ambiguous) => {
@@ -304,7 +304,7 @@ pub fn plan_from_link(
             let mut plan = ConnectPlan::resolve(
                 host,
                 link.launch.as_deref(),
-                link.profile.as_deref(),
+                link.preset.as_deref(),
                 catalog,
                 base,
             );
@@ -317,7 +317,7 @@ pub fn plan_from_link(
                     name: Some(plan.host.name),
                     fp: link.fp.clone(),
                     launch: link.launch.clone(),
-                    profile: link.profile.clone(),
+                    profile: link.preset.clone(),
                 })));
             }
             if plan.host.name.is_empty() {
@@ -342,7 +342,7 @@ pub fn plan_from_link(
             name,
             fp,
             launch: link.launch.clone(),
-            profile: link.profile.clone(),
+            profile: link.preset.clone(),
         }))),
         HostResolution::Ambiguous => Err(PlanError::AmbiguousHost(link.host_ref.clone())),
         HostResolution::Unresolvable => Err(PlanError::UnresolvableHost(link.host_ref.clone())),
@@ -806,7 +806,7 @@ mod tests {
         plan.connect_timeout_secs = Some(185);
         plan.settings.fullscreen_on_stream = true;
         let args = plan.session_args();
-        assert!(args.windows(2).any(|w| w == ["--profile", "aaaaaaaaaaaa"]));
+        assert!(args.windows(2).any(|w| w == ["--preset", "aaaaaaaaaaaa"]));
         assert!(args.windows(2).any(|w| w == ["--connect-timeout", "185"]));
         assert!(args.contains(&"--fullscreen".to_string()));
 
@@ -814,7 +814,7 @@ mod tests {
         // the same as no override — it has to survive as a flag.
         plan.profile_override = Some(String::new());
         let args = plan.session_args();
-        let i = args.iter().position(|a| a == "--profile").unwrap();
+        let i = args.iter().position(|a| a == "--preset").unwrap();
         assert_eq!(args[i + 1], "");
     }
 

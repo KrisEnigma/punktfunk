@@ -850,7 +850,7 @@ impl AppModel {
                     pair_optional: false,
                     launch: plan.launch.clone().map(|id| (id.clone(), id)),
                     mac: plan.host.mac.clone(),
-                    // `profile=` in a URL is a one-off, exactly like "Connect with ▸": it
+                    // `preset=` in a URL is a one-off, exactly like "Connect with ▸": it
                     // shapes this session and leaves the host's binding alone.
                     profile: plan.profile_override.clone(),
                 };

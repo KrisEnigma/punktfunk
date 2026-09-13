@@ -151,7 +151,7 @@ data class StreamProfile(
     val extra: Map<String, Any> = emptyMap(),
 )
 
-/** What a `profile=` / one-off reference resolved to. Ambiguity is reported, never guessed. */
+/** What a `preset=` / one-off reference resolved to. Ambiguity is reported, never guessed. */
 enum class ProfileResolution { FOUND, NOT_FOUND, AMBIGUOUS }
 
 /**

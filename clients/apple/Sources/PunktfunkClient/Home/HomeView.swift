@@ -378,7 +378,7 @@ struct HomeView: View {
             sendLogs: paired ? { Task { sendLogsResult = await SendLogs.toHost(host) } } : nil,
             wake: wakeable ? { wake(host) } : nil,
             copyLink: LinkClipboard.isAvailable
-                ? { LinkClipboard.copy(DeepLink.forHost(host, profile: pinned?.id).urlString) }
+                ? { LinkClipboard.copy(DeepLink.forHost(host, preset: pinned?.id).urlString) }
                 : nil,
             showDetails: pinned == nil ? { detailTarget = host.id } : nil,
             power: pinned == nil ? hostPower.actions(for: host) : [],

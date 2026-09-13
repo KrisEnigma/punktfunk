@@ -279,7 +279,7 @@ struct GamepadSettingsView: View {
 
     private func pill(_ t: GpSettingsTab) -> some View {
         let selected = t == tab
-        return Text(t.title)
+        return Text(t.rawValue)
             .font(.geist(compact ? 12 : metrics.tabFont, .semibold, relativeTo: .footnote))
             // `onAccent`, not `fg` — the selected pill is FILLED with the palette accent, and
             // `onAccent` is the colour picked (by the accent's own luminance) to read on top of

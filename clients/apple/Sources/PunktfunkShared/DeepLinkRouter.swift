@@ -51,11 +51,11 @@ public enum DeepLinkRouter {
         // The preset FIRST: an unknown or ambiguous reference must refuse, never quietly degrade
         // to the host's own binding, which is a different preset wearing the same host's name.
         var selection = PresetSelection.inherit
-        if let reference = link.profile {
-            let (profile, resolution) = catalog.resolve(reference)
+        if let reference = link.preset {
+            let (preset, resolution) = catalog.resolve(reference)
             switch resolution {
             case .found:
-                selection = .preset(profile?.id ?? "")
+                selection = .preset(preset?.id ?? "")
             case .notFound:
                 return .notice("No settings preset called “\(reference)” on this device.")
             case .ambiguous:

@@ -354,7 +354,7 @@ public extension EffectiveSettings {
 /// Default settings" on a BOUND host has to force the globals, and "no pick at all" has to fall
 /// through to the binding. Collapsing the two would make the menu item that says "Default
 /// settings" silently connect with the host's preset. It is the same distinction the session
-/// binary's `--profile ""` reserves on the desktop clients.
+/// binary's `--preset ""` reserves on the desktop clients.
 public enum PresetSelection: Hashable, Sendable {
     /// No pick — the host's default binding applies (a plain click/tap).
     case inherit

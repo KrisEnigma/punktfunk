@@ -4,11 +4,11 @@
 // connect path). Keeping every side on one type means the wire format can't drift.
 //
 //   punktfunk://connect/<host-ref>[?fp=<64-hex>][&host=<addr[:port]>][&launch=<id>]
-//                                 [&profile=<ref>][&name=<label>]
+//                                 [&preset=<ref>][&name=<label>]
 //
 // The invariant the grammar exists to keep: **a URL may only ever do what a click on an existing
 // card could do, minus trust decisions.** So it carries *references* to things that already exist
-// on this device — a host record, a settings profile, a library id — and never values: no
+// on this device — a host record, a settings preset, a library id — and never values: no
 // resolution, no bitrate, no codec. A web page must not be able to shape a session beyond picking
 // among the user's own configurations. `pair` is deliberately not a route and never will be;
 // pairing stays an interactive ceremony.
@@ -29,7 +29,7 @@ public enum DeepLinkLimits {
     public static let url = 2048
     public static let hostRef = 128
     public static let launch = 128
-    public static let profile = 64
+    public static let preset = 64
     public static let name = 64
 }
 
@@ -130,7 +130,7 @@ public struct DeepLink: Equatable, Sendable {
     /// A store-qualified library id (`steam:570`) for the host to launch on arrival.
     public var launch: String?
     /// A settings-preset reference (id, or a unique name) — one-off, never rebinding.
-    public var profile: String?
+    public var preset: String?
     /// Display label for the unknown-host confirmation sheet (external emitters).
     public var name: String?
 
@@ -138,7 +138,7 @@ public struct DeepLink: Equatable, Sendable {
 
     public init(
         route: DeepLinkRoute = .connect, hostRef: String, fp: String? = nil,
-        host: DeepLinkAddress? = nil, launch: String? = nil, profile: String? = nil,
+        host: DeepLinkAddress? = nil, launch: String? = nil, preset: String? = nil,
         name: String? = nil
     ) {
         self.route = route
@@ -146,7 +146,7 @@ public struct DeepLink: Equatable, Sendable {
         self.fp = fp
         self.host = host
         self.launch = launch
-        self.profile = profile
+        self.preset = preset
         self.name = name
     }
 
@@ -173,7 +173,11 @@ public struct DeepLink: Equatable, Sendable {
             push("host", text)
         }
         if let launch { push("launch", launch) }
-        if let profile { push("profile", profile) }
+        // `profile=` as well, for clients that predate `preset=`.
+        if let preset {
+            push("preset", preset)
+            push("profile", preset)
+        }
         if let name { push("name", name) }
         return s
     }
@@ -183,12 +187,12 @@ public struct DeepLink: Equatable, Sendable {
     public var url: URL { URL(string: urlString)! }
 
     /// A plain connect link for a saved host — the shape the widget and the Connect intent emit.
-    public static func connect(host: UUID, launchID: String? = nil, profile: String? = nil)
+    public static func connect(host: UUID, launchID: String? = nil, preset: String? = nil)
         -> DeepLink {
         DeepLink(
             hostRef: host.uuidString,
             launch: (launchID?.isEmpty ?? true) ? nil : launchID,
-            profile: (profile?.isEmpty ?? true) ? nil : profile)
+            preset: (preset?.isEmpty ?? true) ? nil : preset)
     }
 
     /// A library link for a saved host — the shape the library widget and the Open Library intent
@@ -202,14 +206,14 @@ public struct DeepLink: Equatable, Sendable {
     /// and pin alongside so the link degrades to a confirmation sheet instead of a dead click when
     /// the record is gone ("Copy link", and any shortcut written from a card).
     public static func forHost(
-        _ host: StoredHost, launch: String? = nil, profile: String? = nil
+        _ host: StoredHost, launch: String? = nil, preset: String? = nil
     ) -> DeepLink {
         DeepLink(
             hostRef: host.id.uuidString,
             fp: host.pinnedSHA256.map(Self.hexLower),
             host: DeepLinkAddress(host.address, host.port),
             launch: (launch?.isEmpty ?? true) ? nil : launch,
-            profile: (profile?.isEmpty ?? true) ? nil : profile)
+            preset: (preset?.isEmpty ?? true) ? nil : preset)
     }
 
     // MARK: - Parsing
@@ -267,6 +271,7 @@ public struct DeepLink: Equatable, Sendable {
         }
 
         var link = DeepLink(route: route, hostRef: hostRef)
+        var legacyPreset: String?
         for pair in query.split(separator: "&", omittingEmptySubsequences: true) {
             let rawKey: Substring
             let rawValue: Substring
@@ -300,11 +305,17 @@ public struct DeepLink: Equatable, Sendable {
                 }
                 guard isSafeLaunchID(value) else { throw DeepLinkError.badLaunchID }
                 link.launch = value
-            case "profile" where link.profile == nil:
-                guard value.unicodeScalars.count <= DeepLinkLimits.profile else {
+            case "preset" where link.preset == nil:
+                guard value.unicodeScalars.count <= DeepLinkLimits.preset else {
+                    throw DeepLinkError.paramTooLong("preset")
+                }
+                link.preset = value
+            // The pre-rename spelling: `preset` wins wherever it sits.
+            case "profile" where legacyPreset == nil:
+                guard value.unicodeScalars.count <= DeepLinkLimits.preset else {
                     throw DeepLinkError.paramTooLong("profile")
                 }
-                link.profile = value
+                legacyPreset = value
             case "name" where link.name == nil:
                 guard value.unicodeScalars.count <= DeepLinkLimits.name else {
                     throw DeepLinkError.paramTooLong("name")
@@ -314,6 +325,7 @@ public struct DeepLink: Equatable, Sendable {
                 break
             }
         }
+        if link.preset == nil { link.preset = legacyPreset }
         return link
     }
 

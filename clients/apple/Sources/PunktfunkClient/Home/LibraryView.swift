@@ -699,7 +699,7 @@ struct LibraryView: View {
     private func copyLink(_ game: GameEntry) {
         let current = store.hosts.first { $0.id == host.id } ?? host
         LinkClipboard.copy(
-            DeepLink.forHost(current, launch: game.id, profile: target.pinnedProfileID).urlString)
+            DeepLink.forHost(current, launch: game.id, preset: target.pinnedProfileID).urlString)
     }
 
     /// Whether the keyboard cursor is on this tile (always false where there is no keyboard

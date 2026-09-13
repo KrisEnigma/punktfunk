@@ -1728,8 +1728,8 @@ typedef struct {
     uint32_t audio_buffer_ms;
     // Where that buffer puts audio against the picture, ms; positive = audio behind.
     int32_t av_offset_ms;
-    // NUL-terminated settings-profile name, or null.
-    const char *profile;
+    // NUL-terminated preset name, or null.
+    const char *preset;
     // Embedder-only Advanced Detailed lines, `<role>\t<text>\n` each, or null.
     const char *extras;
 } PunktfunkHudFacts;

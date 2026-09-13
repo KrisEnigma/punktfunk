@@ -57,12 +57,12 @@ punktfunk — the Punktfunk client, headless
   punktfunk default-host [<host-ref>] [--clear]
   punktfunk wake <host-ref> [--wait]
   punktfunk library [<host-ref>] [--json]
-  punktfunk launch [<host-ref>] [--game ID] [--profile REF] [--request-access]
+  punktfunk launch [<host-ref>] [--game ID] [--preset REF] [--request-access]
                                 [--exec] [--fullscreen]
   punktfunk open <punktfunk://…> [--yes]
   punktfunk reachable <host-ref>
   punktfunk speed-test <host-ref>
-  punktfunk profiles list [--json]
+  punktfunk presets list [--json]
   punktfunk reset
 
 A <host-ref> is a saved host's id, its name, or an address — the same reference a
@@ -115,7 +115,7 @@ punktfunk hosts — the saved-hosts store (shared with the desktop client)
   punktfunk hosts list [--probe] [--json]
       Every saved host, name TAB addr:port TAB paired/trusted TAB state.
       --probe asks each host directly (no mDNS, so routed/VPN hosts answer
-      too); --json emits one object with per-host detail, profiles included.
+      too); --json emits one object with per-host detail, presets included.
 
   punktfunk hosts add <host[:port]> [--name LABEL] [--fp HEX]
       Save a host by address — the door for a box mDNS never sees (Tailscale,
@@ -172,7 +172,7 @@ exits 5 when there is none."
             }
             "launch" => {
                 "\
-punktfunk launch [<host-ref>] [--game ID] [--profile REF] [--request-access]
+punktfunk launch [<host-ref>] [--game ID] [--preset REF] [--request-access]
                               [--exec] [--fullscreen]
 
 Start a stream — waking the host first if it is asleep and its MAC is known.
@@ -181,7 +181,7 @@ and relays its lifecycle to stderr. With no <host-ref> it streams the default
 host (`punktfunk default-host`), and exits 5 when there is none.
 
   --game ID      ask the host to launch this library title into the stream
-  --profile REF  use a settings profile (id or name) for this connect only;
+  --preset REF   use a preset (id or name) for this connect only;
                  without it the host's own binding applies
   --fullscreen   start the stream window fullscreen
   --exec         become the session process instead of supervising it — the
@@ -230,17 +230,18 @@ punktfunk speed-test <host-ref> [--json] — measure the real data plane
 
 Runs the host's bandwidth probe over an actual session connect and prints the
 measured throughput, loss, and the bitrate it recommends. Deliberately does
-NOT apply the result: which layer a bitrate belongs in (a bound profile, the
+NOT apply the result: which layer a bitrate belongs in (a bound preset, the
 global default) is a decision the GUI makes with the user, and a CLI silently
 rewriting settings would be exactly the surprise that rule exists to prevent."
             }
-            "profiles" => {
+            "presets" | "profiles" => {
                 "\
-punktfunk profiles list [--json] — the settings profiles on this device
+punktfunk presets list [--json] — the stream presets on this device
 
-One line per profile: id TAB name TAB how many settings it overrides.
-Profiles are created and edited in the desktop client; a connect uses one via
-`punktfunk launch --profile` or a punktfunk:// link that names it."
+One line per preset: id TAB name TAB how many settings it overrides.
+Presets are created and edited in the desktop client; a connect uses one via
+`punktfunk launch --preset` or a punktfunk:// link that names it.
+`punktfunk profiles` is the old spelling; its --json keeps the `profiles` key."
             }
             "reset" => {
                 "\
@@ -292,7 +293,14 @@ from the config directory for a true factory reset."
     fn flag_takes_value(flag: &str) -> bool {
         matches!(
             flag,
-            "--pin" | "--name" | "--fp" | "--game" | "--profile" | "--port" | "--timeout"
+            "--pin"
+                | "--name"
+                | "--fp"
+                | "--game"
+                | "--preset"
+                | "--profile"
+                | "--port"
+                | "--timeout"
         )
     }
 
@@ -416,7 +424,8 @@ from the config directory for a true factory reset."
             "open" => open(&rest),
             "reachable" => reachable(&rest),
             "speed-test" => speed_test(&rest),
-            "profiles" => profiles(&rest),
+            "presets" => presets(&rest, false),
+            "profiles" => presets(&rest, true),
             "reset" => reset(),
             "-h" | "--help" | "help" => match positional(&rest, 0) {
                 None => {
@@ -626,6 +635,18 @@ from the config directory for a true factory reset."
                         .iter()
                         .enumerate()
                         .map(|(i, h)| {
+                            let preset = h
+                                .profile_id
+                                .as_ref()
+                                .and_then(|id| catalog.find_by_id(id))
+                                .map(|p| serde_json::json!({"id": p.id, "name": p.name}));
+                            let pinned: Vec<_> = h
+                                .resolved_pins(&catalog)
+                                .iter()
+                                .map(|p| serde_json::json!({"id": p.id, "name": p.name}))
+                                .collect();
+                            // `profile` / `pinned_profiles` are the pre-rename keys, for a Decky
+                            // plugin older than the rename.
                             serde_json::json!({
                                 "id": h.id,
                                 "name": h.name,
@@ -637,13 +658,10 @@ from the config directory for a true factory reset."
                                 "os": h.os,
                                 "last_used": h.last_used,
                                 "clipboard_sync": h.clipboard_sync,
-                                "profile": h.profile_id.as_ref()
-                                    .and_then(|id| catalog.find_by_id(id))
-                                    .map(|p| serde_json::json!({"id": p.id, "name": p.name})),
-                                "pinned_profiles": h.resolved_pins(&catalog)
-                                    .iter()
-                                    .map(|p| serde_json::json!({"id": p.id, "name": p.name}))
-                                    .collect::<Vec<_>>(),
+                                "preset": preset,
+                                "pinned_presets": pinned,
+                                "profile": preset,
+                                "pinned_profiles": pinned,
                                 "online": online.as_ref().map(|v| v[i]),
                             })
                         })
@@ -933,7 +951,7 @@ from the config directory for a true factory reset."
         }
     }
 
-    /// `launch <host-ref> [--game ID] [--profile REF] [--exec]` — start a stream, wake included.
+    /// `launch <host-ref> [--game ID] [--preset REF] [--exec]` — start a stream, wake included.
     /// `--exec` becomes the session process instead of supervising it: under a gamescope wrapper
     /// the launched process must BE the streaming one for focus and lifecycle to work.
     fn launch(args: &[String]) -> u8 {
@@ -950,7 +968,7 @@ from the config directory for a true factory reset."
             );
             return UNRESOLVED;
         }
-        let usage = "punktfunk launch [<host-ref>] [--game ID] [--profile REF] [--exec]";
+        let usage = "punktfunk launch [<host-ref>] [--game ID] [--preset REF] [--exec]";
         let (known, i) = match resolve_or_default(args, usage) {
             Ok(v) => v,
             Err(code) => return code,
@@ -958,7 +976,9 @@ from the config directory for a true factory reset."
         let mut plan = ConnectPlan::for_host(
             &known.hosts[i],
             value(args, "--game").as_deref(),
-            value(args, "--profile").as_deref(),
+            value(args, "--preset")
+                .or_else(|| value(args, "--profile"))
+                .as_deref(),
         );
         if has(args, "--fullscreen") {
             plan.settings.fullscreen_on_stream = true;
@@ -1287,12 +1307,19 @@ from the config directory for a true factory reset."
         }
     }
 
-    /// `profiles list` — the settings profiles this device has, and what each overrides.
-    fn profiles(args: &[String]) -> u8 {
+    /// `presets list` — the presets this device has, and what each overrides. `legacy` is the
+    /// `profiles` spelling, whose `--json` keeps the pre-rename `profiles` key.
+    fn presets(args: &[String], legacy: bool) -> u8 {
         match positional(args, 0).as_deref() {
             Some("list") | None => {
                 let catalog = ProfilesFile::load();
-                if has(args, "--json") {
+                if has(args, "--json") && !legacy {
+                    let json = serde_json::json!({
+                        "version": catalog.version,
+                        "presets": catalog.profiles,
+                    });
+                    println!("{json}");
+                } else if has(args, "--json") {
                     println!(
                         "{}",
                         serde_json::to_string(&catalog).unwrap_or_else(|_| "{}".into())
@@ -1309,7 +1336,7 @@ from the config directory for a true factory reset."
                 OK
             }
             Some(other) => {
-                eprintln!("unknown profiles command \"{other}\" — list");
+                eprintln!("unknown presets command \"{other}\" — list");
                 UNRESOLVED
             }
         }
@@ -1372,17 +1399,19 @@ from the config directory for a true factory reset."
         }
 
         /// Flags and their values never masquerade as the verb's subject — the bug that makes
-        /// `launch --profile Work desk` reach for a host called "Work".
+        /// `launch --preset Work desk` reach for a host called "Work".
         #[test]
         fn positional_skips_flags_and_their_values() {
             assert_eq!(
                 positional(&argv(&["desk", "--game", "steam:570"]), 0),
                 Some("desk".into())
             );
-            assert_eq!(
-                positional(&argv(&["--profile", "Work", "desk"]), 0),
-                Some("desk".into())
-            );
+            for flag in ["--preset", "--profile"] {
+                assert_eq!(
+                    positional(&argv(&[flag, "Work", "desk"]), 0),
+                    Some("desk".into())
+                );
+            }
             assert_eq!(
                 positional(&argv(&["--exec", "desk"]), 0),
                 Some("desk".into()),
@@ -1428,7 +1457,7 @@ from the config directory for a true factory reset."
                 "open",
                 "reachable",
                 "speed-test",
-                "profiles",
+                "presets",
                 "reset",
             ] {
                 let h = verb_help(verb).unwrap_or_else(|| panic!("no help for {verb}"));
@@ -1569,9 +1598,9 @@ from the config directory for a true factory reset."
         fn value_reads_the_argument_after_its_flag() {
             let a = argv(&["--game", "steam:570", "--exec"]);
             assert_eq!(value(&a, "--game"), Some("steam:570".into()));
-            assert_eq!(value(&a, "--profile"), None);
+            assert_eq!(value(&a, "--preset"), None);
             // A flag followed by another flag has no value.
-            assert_eq!(value(&argv(&["--profile", "--exec"]), "--profile"), None);
+            assert_eq!(value(&argv(&["--preset", "--exec"]), "--preset"), None);
             assert!(has(&a, "--exec"));
         }
     }

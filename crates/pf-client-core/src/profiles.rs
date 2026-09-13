@@ -382,7 +382,7 @@ impl StreamProfile {
     }
 }
 
-/// Outcome of a `profile=` / `--profile` reference. Ambiguity refuses
+/// Outcome of a `preset=` / `--preset` reference. Ambiguity refuses
 /// rather than picking the first match (`design/client-deep-links.md`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Resolution {

@@ -480,7 +480,7 @@ object SkiaConsole {
             notice("Punktfunk on Android can't do “${link.route.word}” links yet.")
             return
         }
-        val profileRef = link.profile
+        val profileRef = link.preset
         if (profileRef != null) {
             val (_, resolution) = profileStore.resolve(profileRef)
             if (resolution != io.unom.punktfunk.ProfileResolution.FOUND) {

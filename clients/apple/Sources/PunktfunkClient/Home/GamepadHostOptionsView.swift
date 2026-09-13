@@ -391,7 +391,7 @@ struct GamepadHostOptionsView: View {
             performClose()
         case .copyLink:
             LinkClipboard.copy(
-                DeepLink.forHost(host, profile: pinnedPreset?.id).urlString)
+                DeepLink.forHost(host, preset: pinnedPreset?.id).urlString)
             // No toast machinery on this surface — the row says so itself, which is the same
             // acknowledgement in the place the user is already looking.
             withAnimation(.smooth(duration: 0.2)) { copied = true }

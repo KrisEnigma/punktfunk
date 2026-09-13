@@ -88,9 +88,10 @@ pub fn exec_session() -> glib::ExitCode {
         "--launch",
         "--mgmt",
         "--connect-timeout",
-        // A one-off profile pick, same grammar the session documents (`--profile ""` forces
-        // the global defaults). Without it here, `punktfunk --connect … --profile Work` from a
-        // script or a Decky wrapper streamed with the host's binding instead.
+        // A one-off preset pick, same grammar the session documents (`--preset ""` forces the
+        // global defaults). `--profile` is its pre-rename spelling, which scripts and Decky
+        // wrappers still pass.
+        "--preset",
         "--profile",
     ];
     let mut cmd = std::process::Command::new(crate::spawn::session_binary());

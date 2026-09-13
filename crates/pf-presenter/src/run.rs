@@ -3075,7 +3075,7 @@ fn close_window(
     snap.decoder = st.facts.decoder.to_string();
     snap.hdr = hdr_shown(st.hdr, presenter.hdr_active(), st.hdr_untonemapped);
     snap.asked_444 = st.params.video_caps & punktfunk_core::quic::VIDEO_CAP_444 != 0;
-    snap.profile = st.profile.clone();
+    snap.preset = st.profile.clone();
     snap.on_glass = presenter.present_timing_active();
     let prev = std::mem::replace(&mut st.health_seen, st.facts.health);
     snap.extras = desktop_extras(present, st.facts.health, prev, session::codec_fallbacks());

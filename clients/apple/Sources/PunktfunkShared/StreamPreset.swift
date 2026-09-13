@@ -452,7 +452,7 @@ public func newProfileID() -> String {
 
 // MARK: - The catalog
 
-/// What a `profile=` / `Connect with ▸` reference resolved to. Ambiguity is reported rather than
+/// What a `preset=` / `Connect with ▸` reference resolved to. Ambiguity is reported rather than
 /// guessed: a link naming two presets must refuse, not pick one.
 public enum PresetResolution: Equatable, Sendable {
     case found

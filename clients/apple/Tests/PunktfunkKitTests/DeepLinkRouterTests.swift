@@ -76,7 +76,7 @@ final class DeepLinkRouterTests: XCTestCase {
         // The quiet degrade is the dangerous one: it streams with settings nobody asked for.
         let saved = host()
         let out = DeepLinkRouter.resolve(
-            link: try link("punktfunk://connect/\(saved.id.uuidString)?profile=Nope"),
+            link: try link("punktfunk://connect/\(saved.id.uuidString)?preset=Nope"),
             hosts: [saved], catalog: PresetCatalog(profiles: []), session: idle, browse: false)
         guard case .notice(let text) = out else { return XCTFail("got \(out)") }
         XCTAssertTrue(text.contains("Nope"), text)
@@ -89,7 +89,7 @@ final class DeepLinkRouterTests: XCTestCase {
         // An UNSAVED host is the one deliberate difference (asserted below), so it is not here.
         let cases = [
             "punktfunk://connect/\(saved.id.uuidString)?fp=\(other)",
-            "punktfunk://connect/\(saved.id.uuidString)?profile=Nope",
+            "punktfunk://connect/\(saved.id.uuidString)?preset=Nope",
             "punktfunk://connect/Desk?fp=\(other)",
         ]
         for raw in cases {

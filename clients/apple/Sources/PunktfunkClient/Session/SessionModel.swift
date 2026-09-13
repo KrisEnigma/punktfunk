@@ -1275,7 +1275,7 @@ final class SessionModel: ObservableObject {
             f.audioBufferMs = UInt32(clamping: a.bufferMS)
             f.avOffsetMs = Int32(clamping: a.avOffsetMS)
         }
-        f.profile = settings.presetName
+        f.preset = settings.presetName
         // The deadline link's ask beside its readback: a readback that differs is the one clamp
         // signal the API gives, and on tvOS the screen is the only place to read it.
         if let l = PresentLinkInfo.shared.snapshot() {

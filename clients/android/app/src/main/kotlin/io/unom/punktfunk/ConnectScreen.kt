@@ -662,7 +662,7 @@ fun ConnectScreen(
     // is the thing being copied; a host card copies no profile at all and so keeps honouring the
     // host's binding, exactly like a tap on it does.
     fun copyLink(kh: KnownHost, pin: StreamProfile?) {
-        val url = DeepLinks.forHost(kh, profile = pin?.id).toUrl()
+        val url = DeepLinks.forHost(kh, preset = pin?.id).toUrl()
         val copied = putLinkOnClipboard(context, url)
         val message = linkCopyMessage(copied) ?: return
         // A success dressed as an error banner is a small lie: the notice line for a copy, the
@@ -748,7 +748,7 @@ fun ConnectScreen(
         }
         // A profile reference that can't be honoured refuses: a "Work" shortcut streaming with the
         // wrong settings is worse than an error naming what failed.
-        val profileRef = link.profile
+        val profileRef = link.preset
         if (profileRef != null) {
             val (_, resolution) = profileStore.resolve(profileRef)
             if (resolution != ProfileResolution.FOUND) {

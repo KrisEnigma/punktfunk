@@ -41,7 +41,7 @@ struct ConnectToHostIntent: AppIntent {
     var profile: ProfileEntity?
 
     func perform() async throws -> some IntentResult {
-        let url = DeepLink.connect(host: host.id, launchID: launchID, profile: profile?.id).url
+        let url = DeepLink.connect(host: host.id, launchID: launchID, preset: profile?.id).url
         await MainActor.run {
             NotificationCenter.default.post(name: .punktfunkOpenDeepLink, object: url)
         }

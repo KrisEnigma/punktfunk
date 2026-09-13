@@ -150,7 +150,7 @@ internal fun ProfileScopeChips(
  * pinned card's tint have to go on).
  *
  * Names must be unique case-insensitively: two "Work" chips in a menu are ambiguous, and a
- * `punktfunk://…?profile=Work` link would have to refuse rather than guess. [taken] is the live
+ * `punktfunk://…?preset=Work` link would have to refuse rather than guess. [taken] is the live
  * duplicate check, which lets an edit keep its own name (and change only its case).
  */
 @Composable

@@ -323,7 +323,7 @@ fun LibraryScreen(
     // or a Stream Deck macro boots straight into it. A shelf opened from a PINNED card copies that
     // card's profile with it, because that combination is the thing being copied.
     fun copyLink(game: GameEntry) {
-        val url = DeepLinks.forHost(host, launch = game.id, profile = pinnedProfileId).toUrl()
+        val url = DeepLinks.forHost(host, launch = game.id, preset = pinnedProfileId).toUrl()
         // A toast either way here: this screen renders neither the touch home's notice banner nor
         // the console's status line, and both of its presentations are full-bleed over artwork.
         linkCopyMessage(putLinkOnClipboard(context, url))?.let {

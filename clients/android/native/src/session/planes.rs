@@ -273,7 +273,7 @@ pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativeVideoStatsL
         s.decoder = h.stats.decoder_label();
         // SurfaceFlinger's latch is pipeline depth no client paces under: reported, not charged.
         s.shave_os_floor = true;
-        s.profile = (!profile.is_empty()).then_some(profile);
+        s.preset = (!profile.is_empty()).then_some(profile);
         let (judder, coalesced) = (h.stats.judder_permille(), h.stats.coalesced());
         let cadence: Vec<String> = [
             (judder > 0).then(|| format!("judder {judder}‰")),

@@ -114,7 +114,7 @@ final class SharedFoundationTests: XCTestCase {
             let host_ref: String
             let fp: String?
             let launch: String?
-            let profile: String?
+            let preset: String?
             let name: String?
             let host_addr: String?
             let host_port: Int?
@@ -162,7 +162,7 @@ final class SharedFoundationTests: XCTestCase {
             XCTAssertEqual(link.hostRef, want.host_ref, testCase.name)
             XCTAssertEqual(link.fp, want.fp, "\(testCase.name) fp")
             XCTAssertEqual(link.launch, want.launch, "\(testCase.name) launch")
-            XCTAssertEqual(link.profile, want.profile, "\(testCase.name) preset")
+            XCTAssertEqual(link.preset, want.preset, "\(testCase.name) preset")
             XCTAssertEqual(link.name, want.name, "\(testCase.name) name")
             XCTAssertEqual(link.host?.address, want.host_addr, "\(testCase.name) host_addr")
             XCTAssertEqual(
@@ -186,8 +186,8 @@ final class SharedFoundationTests: XCTestCase {
         let launched = DeepLink.connect(host: id, launchID: "steam:570")
         XCTAssertEqual(try DeepLink(url: launched.url).launch, "steam:570")
 
-        let profiled = DeepLink.connect(host: id, launchID: nil, profile: "a1b2c3d4e5f6")
-        XCTAssertEqual(try DeepLink(url: profiled.url).profile, "a1b2c3d4e5f6")
+        let withPreset = DeepLink.connect(host: id, launchID: nil, preset: "a1b2c3d4e5f6")
+        XCTAssertEqual(try DeepLink(url: withPreset.url).preset, "a1b2c3d4e5f6")
     }
 
     /// The library widget's and the Open Library intent's emitter — the reserved `browse` route
@@ -209,12 +209,13 @@ final class SharedFoundationTests: XCTestCase {
             id: UUID(uuidString: "11111111-2222-4333-8444-555555555555")!,
             name: "Desk", address: "192.168.1.50", port: 7777)
         host.pinnedSHA256 = Data(repeating: 0xCC, count: 32)
-        let link = DeepLink.forHost(host, launch: "steam:570", profile: "aaaaaaaaaaaa")
+        let link = DeepLink.forHost(host, launch: "steam:570", preset: "aaaaaaaaaaaa")
         XCTAssertEqual(
             link.urlString,
             "punktfunk://connect/11111111-2222-4333-8444-555555555555"
                 + "?fp=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
-                + "&host=192.168.1.50:7777&launch=steam:570&profile=aaaaaaaaaaaa")
+                + "&host=192.168.1.50:7777&launch=steam:570&preset=aaaaaaaaaaaa"
+                + "&profile=aaaaaaaaaaaa")
         XCTAssertEqual(try DeepLink.parse(link.urlString), link)
     }
 
