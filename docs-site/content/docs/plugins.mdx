@@ -1,6 +1,6 @@
 ---
 title: Plugins
-description: First-party plugins — bring each of your game launchers into the library, sync a ROM collection or Playnite library, or hand a real USB device on the couch to the host — and how to install them.
+description: First-party plugins bring each of your game launchers into the library, sync a ROM collection or Playnite library, or hand a real USB device on the couch to the host.
 ---
 
 Plugins extend the host through the **scripting runner** (see [Events & hooks](/docs/automation)). A
@@ -8,73 +8,67 @@ plugin runs alongside the host, reconciles titles into your [game library](/docs
 provider — so they appear in the grid on every client — and can add its own page to the
 [web console](/docs/web-console).
 
-**Your game library is built from plugins.** From v0.28.0 the host scans no launcher on its own;
-install the one for each launcher you use.
+**Your game library is built from plugins** — the host scans no launcher on its own; install the one
+for each launcher you use.
 
 | Plugin | Host | What it does |
 |---|---|---|
-| **Steam** | Linux, Windows | Your installed Steam titles and non-Steam shortcuts, with Steam's own art, plus a Big Picture tile. |
+| **Steam** | Linux, Windows | Installed Steam titles and non-Steam shortcuts, with Steam's own art, plus a Big Picture tile. |
 | **Lutris** | Linux | Your Lutris games, with art, and a tile that opens Lutris itself. |
 | **Heroic** | Linux | Everything Heroic manages — Epic, GOG and Amazon — plus a tile that opens Heroic. |
-| **Epic Games Store** | Windows | Your installed Epic titles, from the launcher's own manifests. |
-| **GOG** | Windows | Your installed GOG games, launched directly — Galaxy is never involved. |
-| **Playnite** | Windows | Mirrors your [Playnite](https://playnite.link) library — every store and emulator it manages — into the library, launched back through Playnite. |
-| **Ubisoft Connect** | Windows | Your installed Ubisoft titles, from the launcher's install registry, launched back through Ubisoft Connect. |
-| **Amazon Games** | Windows | Your installed Amazon Games titles, from the app's own database, launched back through Amazon Games. |
-| **Battle.net** | Windows | Your installed Blizzard titles, from the Battle.net agent's product database, launched through the Battle.net client, which must already be running. |
-| **Desktop entries** | Linux | Every application menu entry in the Game category, Flatpak included, that no other source already lists. |
+| **Epic Games Store** | Windows | Installed Epic titles, from the launcher's own manifests. |
+| **GOG** | Windows | Installed GOG games, launched directly — Galaxy is never involved. |
+| **Playnite** | Windows | Mirrors your [Playnite](https://playnite.link) library — every store and emulator it manages — launched back through Playnite. |
+| **Ubisoft Connect** | Windows | Installed Ubisoft titles, launched back through Ubisoft Connect. |
+| **Amazon Games** | Windows | Installed Amazon Games titles, launched back through Amazon Games. |
+| **Battle.net** | Windows | Installed Blizzard titles, launched through Battle.net (must already be running). |
+| **Desktop entries** | Linux | Every Game-category application menu entry, Flatpak included, that no other source lists. |
 | **Bottles** | Linux | The programs you added to each Bottle, launched through `bottles-cli`. |
-| **itch.io** | Linux, Windows | Games installed by the itch app, with their itch.io covers, launched directly. |
+| **itch.io** | Linux, Windows | Games installed by the itch app, with covers, launched directly. |
 | **ROM Manager** | Linux, Windows | Scans your ROM directories, matches each platform to an installed emulator, and syncs them into the library with box art. |
-| **VirtualHere** | Linux, Windows | Hands a real USB device on the couch — wheel, HOTAS, pad — to the host while you play, and gives it back after. Needs [VirtualHere](https://www.virtualhere.com/), sold separately. |
+| **VirtualHere** | Linux, Windows | Hands a real USB device on the couch — wheel, HOTAS, pad — to the host while you play. Needs [VirtualHere](https://www.virtualhere.com/), sold separately. |
 
 Amazon Games and the itch app keep their databases under your user profile, which the Windows
-plugin runner cannot read by default. Each plugin's README carries the one-line `icacls` grant.
+plugin runner can't read by default — each plugin's README carries the one-line `icacls` grant.
 
 ## Installing from the console
 
-Every plugin runs inside the **plugin runner**, a separate service. Installing a plugin while it's
-off succeeds and starts nothing, so check it first:
+Every plugin runs inside the **plugin runner**, a separate service — installing while it's off
+succeeds and starts nothing, so check it first:
 
-1. Open the [web console](/docs/web-console) → **Plugins** → **Installed** and look at the **Plugin
-   runner** card. *Not installed*: install the runner package first (see
-   [Troubleshooting](#troubleshooting)). *Disabled*: press **Enable runner** — once per host.
-   *Stopped*: the runner is enabled but not up, and its log says why.
-2. Go to **Browse**, pick a plugin from the catalog and confirm. The host installs it and restarts
-   the runner, and the plugin's own page appears in the console's nav.
+1. **Plugins → Installed → Plugin runner** card. *Not installed*: install the runner package
+   ([Troubleshooting](#troubleshooting)). *Disabled*: press **Enable runner** — once per host.
+   *Stopped*: the runner is enabled but not up; its log says why.
+2. **Browse** → pick a plugin → confirm. The host installs it, restarts the runner, and the
+   plugin's page appears in the console's nav.
 
 **Sources** is the third tab: where catalogs come from.
 
 ### What "Verified" means
 
-Every catalogued plugin pins **one exact version** and its package hash. **Verified** means somebody
-at unom reviewed *that exact package* — not the project in general; a new release keeps offering the
-reviewed version until the new one is reviewed too. Before anything is downloaded, the host
-re-checks the pinned hash against the registry, so a package quietly republished under the same
-version number is refused.
+Every catalogued plugin pins **one exact version** and its package hash. **Verified** means unom
+reviewed *that exact package* — a new release keeps offering the reviewed version until the new one
+is reviewed. Before downloading, the host re-checks the pinned hash against the registry, so a
+package republished under the same version is refused.
 
-A catalog can also **revoke** a version: the console shows the advisory and won't install it — a
-red-ringed panel on **Browse**, a warning on **Installed** if you already have it. It never removes
-running code for you.
-
-The three badges:
+A catalog can also **revoke** a version: the console shows the advisory and won't install it — or
+warns on **Installed** if you already have it. It never removes running code for you.
 
 | Badge | Where it came from |
 |---|---|
 | **Verified** | The built-in catalog. unom reviewed this exact package. |
-| **External source**, *from &lt;source&gt;* | A catalog **you** added. Still pinned and hash-checked, but curated by somebody else — unom has not looked at the code. Amber, not the red **Unverified** below. |
-| **Unverified** | Installed by hand from a package spec. Nobody reviewed it and nothing pins it; the console asks you to type the name to confirm, and the mark stays for as long as it is installed. |
+| **External source**, *from &lt;source&gt;* | A catalog **you** added. Still pinned and hash-checked, but curated by somebody else. |
+| **Unverified** | Installed by hand from a package spec. Nothing pins it; the console asks you to type the name to confirm. |
 
 ### Adding another catalog
 
 **Sources** → *Add a catalog source*: a name and the URL of its index. Optionally paste the source's
-`ed25519:…` public key — with a key set, the host refuses any index from that source that isn't
-correctly signed. Adding a source is a one-time trust decision: its plugins become installable,
-always attributed to it, never carrying **Verified**.
+`ed25519:…` public key — with a key set, the host refuses any unsigned index from that source.
+Adding a source is a one-time trust decision: its plugins become installable, always attributed to
+it, never **Verified**.
 
-To publish a plugin to the built-in catalog, open a pull request against
-[`punktfunk-plugin-index`](https://git.unom.io/unom/punktfunk-plugin-index) — its README covers the
-format and what review looks for.
+To publish to the built-in catalog, open a pull request against
+[`punktfunk-plugin-index`](https://git.unom.io/unom/punktfunk-plugin-index).
 
 ## Installing from the CLI
 
@@ -86,17 +80,14 @@ punktfunk-host plugins add playnite     # or: rom-manager
 punktfunk-host plugins enable           # turn the runner on (once)
 ```
 
-On **SteamOS** the [host installer](/docs/steamos-host) ships the runner automatically (user-scoped
-under `~/.local`). If the console reports the runner isn't installed on an older setup, re-run
-`scripts/steamdeck/update.sh` once.
+On **SteamOS** the [host installer](/docs/steamos-host) ships the runner automatically.
 
 </Tab>
 <Tab value="Windows">
 
-Run these from an **elevated** PowerShell — the plugins directory lives under
-`%ProgramData%\punktfunk`, which is admin-owned. The runner task itself runs as the low-privilege
-`NT AUTHORITY\LocalService` account; `plugins enable` sets that up (including read access to the
-runner's scoped API token).
+Run from an **elevated** PowerShell — the plugins directory is under admin-owned
+`%ProgramData%\punktfunk`. The runner task runs as the low-privilege `NT AUTHORITY\LocalService`
+account; `plugins enable` sets that up.
 
 ```powershell
 punktfunk-host plugins add playnite     # or: rom-manager
@@ -111,19 +102,17 @@ If `punktfunk-host` isn't found, open a **new** terminal, or use the full path:
 
 The plugin's page then appears in the [web console](/docs/web-console)'s nav automatically.
 
-The runner is **on by default** on a new install (a host that predates this stays however you left
-it — `punktfunk-host plugins enable`, once). The runner discovers plugins when it starts, so one
-installed later needs a runner restart — `systemctl --user restart punktfunk-scripting` on Linux,
-`Restart` the `PunktfunkScripting` task on Windows; the console does that restart for you as part
-of installing.
+The runner is **on by default** on a new install. It discovers plugins at start, so one installed
+later needs a runner restart — `systemctl --user restart punktfunk-scripting` on Linux,
+`Restart` the `PunktfunkScripting` task on Windows; the console does that restart as part of
+installing.
 
 Don't want it? `systemctl --user mask punktfunk-scripting` on Linux, or disable the
 `PunktfunkScripting` scheduled task on Windows. The host keeps streaming; you lose plugin-provided
 game sources and automation.
 
-A plugin installed from the CLI shows in the console as **Installed via CLI** — the console knows
-what is installed, not who vouched for it. Install the same plugin from **Browse** and it carries
-its catalog badge instead.
+A plugin installed from the CLI shows in the console as **Installed via CLI** — install the same
+plugin from **Browse** and it carries its catalog badge instead.
 
 ### The rest of the commands
 
@@ -137,21 +126,18 @@ its catalog badge instead.
 | `punktfunk-host plugins status` | Is the runner enabled and running? |
 | `punktfunk-host plugins grant <dir>` | Let the runner read one of your own directories (Windows). |
 
-A bare name resolves to the first-party package — `playnite` installs `@punktfunk/plugin-playnite`,
-always from Punktfunk's own package registry. Any other name (`punktfunk-plugin-*`, a foreign
-`@scope/pkg`) would install from the **public npm registry** and is refused unless you add
-`--allow-public-registry` — a guard against typos and look-alike packages.
+A bare name resolves to the first-party package — `playnite` installs `@punktfunk/plugin-playnite`
+from Punktfunk's own registry. Any other name installs from the **public npm registry** and is
+refused unless you add `--allow-public-registry` — a guard against typos and look-alike packages.
 
 > Plugins are operator-installed code with operator privileges — they can launch games and run
 > commands. Install only plugins you trust, from a registry you control.
 
 ## Windows: a plugin that says "not installed"
 
-The runner is a de-privileged account (`NT AUTHORITY\LocalService`), so a plugin defect costs a
-throwaway service account rather than the whole box. The trade is that the runner cannot read
-anything inside **your** user profile. A launcher, emulator or database installed under
-`%AppData%` or `%LocalAppData%` is invisible to it, and reads exactly like one that is not
-installed at all.
+The runner is a de-privileged account (`NT AUTHORITY\LocalService`), so it can't read anything
+inside **your** user profile — a launcher or database under `%AppData%` or `%LocalAppData%` is
+invisible to it and reads exactly like one that isn't installed.
 
 When a plugin reports a path it can see but not read, grant it that one directory:
 
@@ -159,38 +145,35 @@ When a plugin reports a path it can see but not read, grant it that one director
 punktfunk-host plugins grant "C:\Users\you\AppData\Roaming\Ryujinx"
 ```
 
-That adds read-only access for the runner to that folder and everything under it. The rest of your
-profile stays closed — Windows does not re-check the folders above the one you granted, so this is
-not a door into `%AppData%` generally. Nothing to do on Linux: the runner there is a systemd
-**user** unit, so it already runs as you.
+That adds read-only access to that folder and everything under it; the rest of your profile stays
+closed. Nothing to do on Linux: the runner there is a systemd **user** unit and already runs as
+you.
 
 ## Updating and removing a plugin
 
 **Update.** The **Installed** tab grows an **Update to &lt;version&gt;** button whenever the catalog
-pins a newer version; it installs through the same confirmation and restarts the runner for you.
-There is no `plugins update` command — from a terminal, re-run `punktfunk-host plugins add <name>`,
-which installs the newest version the *registry* has (not the catalog pin) and does **not** restart
-the runner: restart it yourself so the new code is picked up.
+pins a newer version; it installs and restarts the runner. From a terminal, re-run
+`punktfunk-host plugins add <name>` — it installs the newest version the *registry* has (not the
+catalog pin) and does **not** restart the runner: restart it yourself.
 
-**Remove.** The **Uninstall** (bin) button removes the package *and* restarts the runner.
-`punktfunk-host plugins remove <name>` removes the package only — restart the runner yourself to
-stop a plugin still running.
+**Remove.** The **Uninstall** button removes the package *and* restarts the runner.
+`punktfunk-host plugins remove <name>` removes the package only — restart the runner to stop a
+plugin still running.
 
-Uninstalling removes the package only; a plugin's own config and cache stay —
+A plugin's config and cache stay —
 `~/.config/punktfunk/plugin-state/<plugin>/` on Linux,
-`%ProgramData%\punktfunk\plugin-state\<plugin>\` on Windows — so re-installing later picks your
-settings back up.
+`%ProgramData%\punktfunk\plugin-state\<plugin>\` on Windows — so re-installing picks your settings
+back up.
 
-To stop *every* plugin without uninstalling anything: **Disable runner** on the Installed tab, or
+To stop *every* plugin without uninstalling: **Disable runner** on the Installed tab, or
 `punktfunk-host plugins disable`.
 
 ## ROM Manager
 
 `@punktfunk/plugin-rom-manager` — point it at your ROM directories and it scans them, matches each
 platform to an installed emulator, fetches box art (SteamGridDB, or the keyless libretro
-thumbnails), and reconciles the result into your library as the `rom-manager` provider. ~25
-built-in platforms (NES through Switch, PS1/2/PSP, Dreamcast, and more), per-game overrides, and a
-console page to configure it all.
+thumbnails), and reconciles the result into your library. ~25 built-in platforms, per-game
+overrides, and a console page to configure it all.
 
 ```sh
 punktfunk-host plugins add rom-manager
@@ -231,7 +214,7 @@ Then add a root or two — from the console's **ROM Manager** page, or in the co
 </Tab>
 </Tabs>
 
-`plugin-state` is where a plugin reads and writes its own files — on Windows it is the one
+`plugin-state` is where a plugin reads and writes its own files — on Windows it's the one
 directory `plugins enable` grants the low-privilege runner write access to; a config file placed
 anywhere else under `%ProgramData%\punktfunk` is not read.
 
@@ -240,9 +223,8 @@ Full options and the platform/emulator list:
 
 ## Playnite
 
-`@punktfunk/plugin-playnite` — mirrors your **[Playnite](https://playnite.link)** library (every
-store and emulator Playnite manages) into your library. Launching a title hands it back to
-Playnite, so there are no per-store launch commands to maintain; covers are served by the host.
+`@punktfunk/plugin-playnite` — mirrors your **[Playnite](https://playnite.link)** library into
+yours; launching a title hands it back to Playnite, and covers are served by the host.
 
 Playnite keeps its library locked while running, so there are **two parts**, both on the **Windows
 host**:
@@ -258,16 +240,16 @@ host**:
    [plugin's builds](https://git.unom.io/unom/punktfunk-plugin-playnite/actions), **double-click**
    to install it like any add-on, restart Playnite once.
 
-The console's **Playnite** page shows "Exporter connected", and your games sync within seconds of
-any library change. Filters (installed-only, per-store, hidden) live on that page or in
+The console's **Playnite** page shows "Exporter connected", and games sync within seconds of any
+library change. Filters live on that page or in
 `%ProgramData%\punktfunk\plugin-state\playnite\config.json`. Details:
 [the plugin's repo](https://git.unom.io/unom/punktfunk-plugin-playnite).
 
 ## VirtualHere (USB passthrough)
 
-`@punktfunk/plugin-virtualhere` — hands a **physical USB device** on your couch machine to the
-host while you play, and gives it back afterwards. The game sees the real device — the answer for a
-racing wheel, HOTAS, pedals or arcade stick.
+`@punktfunk/plugin-virtualhere` — hands a **physical USB device** on your couch machine to the host
+while you play: the game sees the real device — the answer for a racing wheel, HOTAS, pedals or
+arcade stick.
 
 <Callout type="warn">
 This plugin drives [VirtualHere](https://www.virtualhere.com/), a commercial USB-over-IP product
@@ -290,56 +272,48 @@ punktfunk-host plugins add virtualhere
 punktfunk-host plugins enable
 ```
 
-The console's **VirtualHere** page → **Devices** lists whatever the couch is sharing; pick one and
-it writes a rule matching the device *by name*, which survives reboots and port changes. By default
-the device is handed over when video starts and returned when it stops; you can widen that to the
-whole session, or to the entire time a client is connected.
+The console's **VirtualHere → Devices** page lists whatever the couch is sharing; pick one and it
+writes a rule matching the device *by name*, which survives reboots and port changes. By default the
+device is handed over when video starts and returned when it stops; you can widen that to the whole
+session, or to the entire time a client is connected.
 
 If nothing happens, the **Diagnostics** tab walks the two-sided setup and names the part to fix —
-the same checks as `punktfunk-plugin-virtualhere doctor`, the useful thing to paste into a support
-thread. Full configuration:
+the same checks as `punktfunk-plugin-virtualhere doctor`. Full configuration:
 [the plugin's repo](https://git.unom.io/unom/punktfunk-plugin-virtualhere).
 
 ## Troubleshooting
 
 **`punktfunk-host: command not found`** — on Windows, open a new terminal so it picks up the
-installer's `PATH` change, or call the exe by full path. On Linux the host package installs it to
+installer's `PATH` change, or call the exe by full path. On Linux the package installs it to
 `/usr/bin/punktfunk-host`.
 
-**"the plugin runner isn't installed"** — the runner ships as its own package. Ubuntu:
-`sudo apt install punktfunk-scripting`. Fedora: `sudo dnf install punktfunk-scripting` from the
-[same RPM repo as the host](/docs/fedora). Arch: `sudo pacman -Syu punktfunk-scripting` (a full
-`-Syu`). SteamOS: re-run `scripts/steamdeck/install.sh` (or `update.sh`). NixOS: comes with
-`services.punktfunk.scripting.enable` (on by default whenever the host is). Windows: re-run the
-installer and keep the scripting component.
+**"the plugin runner isn't installed"** — the runner is its own package: `sudo apt install
+punktfunk-scripting` (Ubuntu), `sudo dnf install punktfunk-scripting` (Fedora, from the
+[same RPM repo](/docs/fedora)), `sudo pacman -Syu punktfunk-scripting` (Arch — a full `-Syu`),
+re-run `scripts/steamdeck/install.sh` (SteamOS), `services.punktfunk.scripting.enable` (NixOS, on
+whenever the host is), re-run the installer keeping the scripting component (Windows).
 
-If the runner *is* installed and the host still says it isn't, the host could not find the
+If the runner *is* installed and the host still says it isn't, the host can't find the
 `punktfunk-scripting` executable — it looks beside its own binary, then on `PATH`, then in the
 packaged `/usr` and `~/.local` layouts. Point `PUNKTFUNK_SCRIPTING` at it (see
 [Configuration](/docs/configuration)). The console installs plugins from inside the host *service*,
 whose `PATH` is much shorter than your shell's — a runner that `plugins add` finds and the console
 doesn't is that difference, and the env var is the fix.
 
-**A plugin's interface won't load** — plugin UIs are served on their own port (47993 by default)
-so a plugin can never act as you on the console. Two things stop a browser talking to it:
+**A plugin's interface won't load** — see
+[Connection & discovery](/docs/troubleshooting-connect#a-plugins-interface-doesnt-load): plugin UIs
+are served on **TCP 47993**, so the port has to be open *and* its certificate accepted.
 
-- **The certificate isn't accepted for that port.** Certificates are trusted per origin, and a
-  frame cannot prompt for one, so the console offers an **Open in a tab** button. Accept the
-  warning there once, come back, and retry.
-- **The port is closed on the host.** Open TCP 47993 in the host's firewall. To move it, set
-  `PUNKTFUNK_UI_PLUGIN_PORT` to a free port and restart the console.
-
-**Where a plugin's log output goes** — the console's **Logs** page, under the **Plugins** filter.
-Plugin lines sit next to the host's, on one timeline, tagged `plugin:<name>` (`plugin:runner` for
-the supervisor). An empty Plugins view almost always means the runner isn't running — check with
-`punktfunk-host plugins status`.
+**Where a plugin's log output goes** — the console's **Troubleshooting** page, isolated by the
+**Sources** chips, tagged `plugin:<name>` (`plugin:runner` for the supervisor). An empty Plugins view almost always
+means the runner isn't running — check with `punktfunk-host plugins status`.
 
 <Callout>
 Nothing is lost if the host is down: the runner keeps buffering and sends the backlog when the host
-comes back, and says so in the log if the buffer overflowed.
+comes back.
 </Callout>
 
-**Reading the runner's log directly** — the ground truth if the runner can't reach the host at all:
+**Reading the runner's log directly** — the ground truth if the runner can't reach the host:
 
 <Tabs items={['Linux', 'Windows']}>
 <Tab value="Linux">
@@ -351,17 +325,16 @@ journalctl --user -u punktfunk-scripting -f
 </Tab>
 <Tab value="Windows">
 
-The runner task writes to `%ProgramData%\punktfunk\plugin-state\runner.log` (previous run:
-`runner.log.1`) — everything the runner and its plugins printed lands here even when they can't
-reach the host.
+The runner task writes `%ProgramData%\punktfunk\plugin-state\runner.log` (previous run:
+`runner.log.1`).
 
 ```powershell
 Get-Content "$env:ProgramData\punktfunk\plugin-state\runner.log" -Tail 100
 ```
 
 If the file doesn't exist, the task started before `punktfunk-host plugins enable` ever ran (which
-is what makes `plugin-state` writable for `LocalService`) — run it from an elevated prompt. To
-watch a start live, run the runner in the foreground (<kbd>Ctrl</kbd>+<kbd>C</kbd> stops it):
+makes `plugin-state` writable for `LocalService`) — run it from an elevated prompt. To watch a
+start live:
 
 ```powershell
 & "$env:ProgramFiles\punktfunk\bun\bun.exe" "$env:ProgramFiles\punktfunk\scripting\runner-cli.js"
@@ -371,10 +344,9 @@ watch a start live, run the runner in the foreground (<kbd>Ctrl</kbd>+<kbd>C</kb
 </Tabs>
 
 **A plugin can't reach a service running on the same box (Linux)** — plugins that drive a local
-daemon usually talk to it over a socket or FIFO in `/tmp`. The runner's unit shipped with
-`PrivateTmp=yes` in earlier releases, hiding the real `/tmp`: the plugin launches the vendor's
-binary and times out reaching the daemon, while the same command works in your shell. On an older
-host, or with a drop-in that reinstates it:
+daemon talk to it over a socket or FIFO in `/tmp`. A runner unit with `PrivateTmp=yes` (earlier
+releases, or a drop-in that reinstates it) hides the real `/tmp`: the plugin launches the vendor's
+binary and times out reaching the daemon. Fix:
 
 ```sh
 systemctl --user edit punktfunk-scripting
@@ -389,7 +361,6 @@ ReadWritePaths=/tmp
 
 A plugin is a TypeScript module built on **`@punktfunk/plugin-kit`** (`definePluginKit`), supervised
 by the runner. The kit owns lifecycle, config and state, the library sync engine, and serving the
-plugin's console page; `@punktfunk/host` (`definePlugin`) is the lower-level host client underneath
-it. Start from the
+plugin's console page. Start from the
 [plugin-kit README](https://git.unom.io/unom/punktfunk/src/branch/main/plugin-kit) and
 [ROM Manager](https://git.unom.io/unom/punktfunk-plugin-rom-manager), the reference implementation.
