@@ -302,7 +302,7 @@ fn a_desktopless_box_pins_gamescope_and_starts_the_console() {
 }
 
 #[test]
-fn a_sunshine_box_moves_the_management_port_and_opens_gamestream() {
+fn a_sunshine_box_moves_the_management_port_and_keeps_gamestream_off() {
     let mut facts = fresh("fedora", Family::Dnf);
     facts.sunshine_active = true;
     facts.firewall = Firewall::Firewalld;
