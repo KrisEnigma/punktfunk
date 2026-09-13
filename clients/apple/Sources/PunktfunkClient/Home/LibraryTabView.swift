@@ -26,12 +26,7 @@ struct LibraryTabView: View {
 
     /// Every shelf there is: each paired host, then each preset pinned to it.
     private var shelves: [LibraryTarget] {
-        store.hosts.filter { $0.pinnedSHA256 != nil }.flatMap { host in
-            [LibraryTarget(host: host)]
-                + presets.catalog.pinned(for: host).map {
-                    LibraryTarget(host: host, preset: .preset($0.id))
-                }
-        }
+        LibraryTarget.shelves(of: store.hosts, presets: presets)
     }
 
     /// The remembered shelf, else the default host's, else the first one.

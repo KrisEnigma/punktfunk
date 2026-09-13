@@ -53,6 +53,19 @@ struct LibraryTarget: Identifiable, Hashable {
     }
 }
 
+extension LibraryTarget {
+    /// Every shelf there is: each paired host, then each preset pinned to it. The Library tab's
+    /// title menu and the Mac's source list both list these.
+    @MainActor static func shelves(of hosts: [StoredHost], presets: PresetStore) -> [LibraryTarget] {
+        hosts.filter { $0.pinnedSHA256 != nil }.flatMap { host in
+            [LibraryTarget(host: host)]
+                + presets.catalog.pinned(for: host).map {
+                    LibraryTarget(host: host, preset: .preset($0.id))
+                }
+        }
+    }
+}
+
 struct LibraryView: View {
     @ObservedObject var store: HostStore
     /// The shelf being browsed — the host, plus the pinned preset when a pinned card opened it.
@@ -166,6 +179,7 @@ struct LibraryView: View {
                 #if os(macOS)
                 ToolbarItemGroup {
                     if !gamepadUIActive { sortMenu }
+                    if inTab { customizeButton }
                     reloadButton
                 }
                 #else
@@ -192,8 +206,10 @@ struct LibraryView: View {
                 }
                 #endif
             }
-            #if os(iOS)
+            #if os(iOS) || os(macOS)
             .modifier(TitleSearch(active: inTab, text: $search))
+            #endif
+            #if os(iOS)
             .sheet(isPresented: $showCustomize) { LibrarySectionsPanel() }
             #endif
             #if os(iOS) || os(macOS)
@@ -590,11 +606,17 @@ struct LibraryView: View {
             .filter { marked.contains($0.id) }
     }
 
-    #if os(iOS)
+    #if os(iOS) || os(macOS)
     private var customizeButton: some View {
         Button { showCustomize = true } label: {
             Label("Customize", systemImage: "slider.horizontal.3")
         }
+        #if os(macOS)
+        // A popover on the Mac (design §4): the panel is a short list, not a task.
+        .popover(isPresented: $showCustomize) {
+            LibrarySectionsPanel().frame(width: 320, height: 400)
+        }
+        #endif
     }
     #endif
 
@@ -1166,8 +1188,8 @@ struct GameCard: View {
     }
 }
 
-#if os(iOS)
-/// The Library tab's title search. The other presentations of this view have none.
+#if os(iOS) || os(macOS)
+/// The Library tab's and the Mac shelf's title search. The other presentations have none.
 private struct TitleSearch: ViewModifier {
     let active: Bool
     @Binding var text: String

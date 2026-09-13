@@ -164,11 +164,23 @@ struct HomeView: View {
                     try? await Task.sleep(for: .seconds(10))
                 }
             }
-            // The host page, from a card's ⓘ or its menu (design §2.4).
+            // The host page, from a card's ⓘ or its menu (design §2.4): pushed on touch, an
+            // inspector on the Mac, whose window has room beside the grid.
+            #if os(macOS)
+            .inspector(isPresented: hostPageShown) {
+                if let id = detailTarget {
+                    HostDetailView(
+                        store: store, hostID: id, actions: { hostActions(for: $0, pinned: nil) })
+                        .inspectorColumnWidth(min: 280, ideal: 320, max: 420)
+                }
+            }
+            .focusedSceneValue(\.hostPageToggle, toggleHostPage)
+            #else
             .navigationDestination(item: $detailTarget) { id in
                 HostDetailView(
                     store: store, hostID: id, actions: { hostActions(for: $0, pinned: nil) })
             }
+            #endif
             #if os(tvOS)
             // Pushed routes — the Settings-app navigation feel (push animation, Menu
             // pops) instead of modal overlays.
@@ -531,6 +543,22 @@ struct HomeView: View {
         // it the odd one out there instead.
         .tint(.primary)
         #endif
+    }
+    #endif
+
+    #if os(macOS)
+    private var hostPageShown: Binding<Bool> {
+        Binding(get: { detailTarget != nil }, set: { if !$0 { detailTarget = nil } })
+    }
+
+    /// ⌥⌘I: close the host page, or open it on the default host (else the first saved one).
+    private func toggleHostPage() {
+        if detailTarget != nil {
+            detailTarget = nil
+            return
+        }
+        let host = StartScreen.defaultHost(id: defaultHostID, hosts: store.hosts).host
+        detailTarget = (host ?? store.hosts.first)?.id
     }
     #endif
 

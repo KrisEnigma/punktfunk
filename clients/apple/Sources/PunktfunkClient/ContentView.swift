@@ -101,7 +101,13 @@ struct ContentView: View {
     #if os(iOS)
     /// The touch UI's tab. A written `libraryTarget` lands on the Library tab.
     @State private var touchTab: TouchTab = .hosts
+    #endif
+    #if os(iOS) || os(macOS)
     @AppStorage(DefaultsKey.libraryShelf) private var libraryShelfID = ""
+    #endif
+    #if os(macOS)
+    /// The Mac's source-list selection. A written `libraryTarget` selects its shelf.
+    @State private var macDestination: MacDestination = .hosts
     #endif
     /// Wakes a sleeping host and waits for it to come back online before connecting (drives the
     /// "Waking…" phase of the connect overlay). Available on every platform now that the iOS/tvOS
@@ -564,17 +570,15 @@ struct ContentView: View {
         // (the coverflow is a GeometryReader, ideal ≈ zero), so without a frame it collapses to a
         // tiny panel.
         #if os(macOS)
-        .sheet(item: $libraryTarget) { shelf in
+        .sheet(item: macLibrarySheet) { shelf in
             NavigationStack {
                 LibraryView(
                     store: store, target: shelf, onLaunch: { launchTitle(shelf, $0) },
                     onConnect: { connectFromShelf(shelf) })
             }
             .frame(minWidth: 940, minHeight: 620)
-            // The stack draws the title, and it sits outside LibraryView's own ink — see the tvOS
-            // cover. Gated, because this sheet is BOTH modes' library on macOS and the touch
-            // grid's title belongs to the system background.
-            .gamepadPaletteInk(gamepadUIActive)
+            // The stack draws the title, outside LibraryView's own ink (see the tvOS cover).
+            .gamepadPaletteInk()
         }
         #endif
         #endif
@@ -709,6 +713,21 @@ struct ContentView: View {
         libraryShelfID = shelf.id
         touchTab = .library
         libraryTarget = nil
+    }
+    #endif
+
+    #if os(macOS)
+    /// On the Mac a shelf is a source-list row, not a presentation: a written `libraryTarget`
+    /// selects it and clears. Gamepad mode keeps its sheet (`macLibrarySheet`).
+    private func showShelfInSidebar() {
+        guard !gamepadUIActive, let shelf = libraryTarget else { return }
+        libraryShelfID = shelf.id
+        macDestination = .shelf(shelf)
+        libraryTarget = nil
+    }
+
+    private var macLibrarySheet: Binding<LibraryTarget?> {
+        Binding(get: { gamepadUIActive ? libraryTarget : nil }, set: { libraryTarget = $0 })
     }
     #endif
 
@@ -920,13 +939,20 @@ struct ContentView: View {
                     wakeOnly: { wakeOnly($0) },
                     promptActive: consolePromptShowing)
             } else {
-                HomeView(
-                    store: store, model: model, discovery: discovery,
-                    showAddHost: $showAddHost, pairingTarget: $pairingTarget,
-                    speedTestTarget: $speedTestTarget, libraryTarget: $libraryTarget,
-                    connect: { connect($0, preset: $1) }, connectDiscovered: connectDiscovered,
-                    onPaired: handlePaired, onLaunchTitle: launchTitle,
-                    onConnectShelf: connectFromShelf, wake: { wakeOnly($0) })
+                MacShellView(
+                    store: store, selection: $macDestination,
+                    hosts: HomeView(
+                        store: store, model: model, discovery: discovery,
+                        showAddHost: $showAddHost, pairingTarget: $pairingTarget,
+                        speedTestTarget: $speedTestTarget, libraryTarget: $libraryTarget,
+                        connect: { connect($0, preset: $1) }, connectDiscovered: connectDiscovered,
+                        onPaired: handlePaired, onLaunchTitle: launchTitle,
+                        onConnectShelf: connectFromShelf, wake: { wakeOnly($0) }),
+                    onLaunch: launchTitle, onConnectShelf: connectFromShelf,
+                    onConnectHost: { connect($0, preset: .inherit, fromLibrary: true) })
+                // On appear too: `returnToLibrary` writes the shelf while the stream is still up.
+                .onAppear(perform: showShelfInSidebar)
+                .onChange(of: libraryTarget) { _, _ in showShelfInSidebar() }
             }
         }
         #else

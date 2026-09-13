@@ -66,7 +66,12 @@ struct PunktfunkClientApp: App {
         // The Stream menu (Release Mouse ⌃⌥⇧Q, Disconnect ⌃⌥⇧D, Show/Hide Statistics ⌃⌥⇧S —
         // the cross-client Ctrl+Alt+Shift set) — a real menu bar on macOS, hardware-keyboard
         // shortcuts on iPad. tvOS has neither.
-        #if !os(tvOS)
+        #if os(macOS)
+        .commands {
+            StreamCommands()
+            MacNavigationCommands()
+        }
+        #elseif !os(tvOS)
         .commands { StreamCommands() }
         #endif
         #if os(macOS)
