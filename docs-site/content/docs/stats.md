@@ -206,7 +206,8 @@ An older Windows recording shows one **driver** span in place of pool, encode an
 
 The other graphs show new against repeated frames per second next to the stream's rate, the video
 bitrate next to the encoder's target, frame and send drops, and the round trip to the client. A
-counter the host cannot see is left out. The header names the **encoder backend and the GPU**:
+native stream adds what sealing each frame costs: error correction, encryption and the socket
+sends, in microseconds. A counter the host cannot see is left out. The header names the **encoder backend and the GPU**:
 without them a stage split can't be read.
 
 **Download** saves a recording as a `.json` file you can attach to a report; **Delete** removes it.

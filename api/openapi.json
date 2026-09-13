@@ -9433,6 +9433,11 @@
             "description": "FEC shards the receiver recovered. Only a client measures it.",
             "minimum": 0
           },
+          "fec_us": {
+            "type": "number",
+            "format": "float",
+            "description": "Sealing one frame, mean µs over the window: FEC parity, AES-GCM, the socket sends.\nNative only; timed while a capture runs."
+          },
           "fps": {
             "type": "number",
             "format": "float",
@@ -9475,6 +9480,10 @@
             "description": "Smoothed QUIC round trip to the client, µs.",
             "minimum": 0
           },
+          "seal_us": {
+            "type": "number",
+            "format": "float"
+          },
           "send_dropped": {
             "type": "integer",
             "format": "int32",
@@ -9486,6 +9495,10 @@
             "format": "int32",
             "description": "Distinguishes concurrent sessions (usually constant for one loop).",
             "minimum": 0
+          },
+          "sock_us": {
+            "type": "number",
+            "format": "float"
           },
           "stages": {
             "type": "array",

@@ -13,8 +13,10 @@ import { m } from "@/paraglide/messages";
 import {
 	HealthChart,
 	hasRtt,
+	hasSendSplit,
 	LatencyChart,
 	RttChart,
+	SendSplitChart,
 	ThroughputChart,
 } from "./charts";
 import { ChartBlock } from "./helpers";
@@ -44,7 +46,7 @@ export const LiveSection: FC = () => {
  */
 const LIVE_WINDOW = 600;
 
-/** Live graphs while a capture is armed: latency stack + throughput. */
+/** Live graphs while a capture is armed: the set a saved recording shows, over the last window. */
 export const LiveCard: FC<{ live: Loadable<Capture> }> = ({ live }) => {
 	const all = live.data?.samples;
 	// Memoised on the array identity: React Query keeps it stable when a poll changed nothing, so
@@ -95,6 +97,11 @@ export const LiveCard: FC<{ live: Loadable<Capture> }> = ({ live }) => {
 							{hasRtt(samples) && (
 								<ChartBlock title={m.stats_rtt_title()}>
 									<RttChart samples={samples} />
+								</ChartBlock>
+							)}
+							{hasSendSplit(samples) && (
+								<ChartBlock title={m.stats_send_title()}>
+									<SendSplitChart samples={samples} />
 								</ChartBlock>
 							)}
 							{(live.data?.samples?.length ?? 0) > LIVE_WINDOW && (

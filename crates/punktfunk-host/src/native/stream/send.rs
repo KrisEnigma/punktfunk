@@ -452,8 +452,12 @@ pub(super) fn send_loop(
             let s = session.stats();
             let secs = last_perf.elapsed().as_secs_f64();
             let tx_mbps = (s.bytes_sent - last_bytes) as f64 * 8.0 / secs / 1_000_000.0;
+            // One window of seal timing feeds both the perf line and the recorder. It runs only
+            // while one of them reads it.
+            let seal_perf = session.take_seal_perf();
+            session.set_seal_perf(perf || stats.rec.is_armed());
             if perf {
-                let sp = session.take_seal_perf().unwrap_or_default();
+                let sp = seal_perf.unwrap_or_default();
                 tracing::info!(
                     tx_mbps = format!("{tx_mbps:.0}"),
                     send_dropped = s.packets_send_dropped - last_send_dropped,
@@ -529,10 +533,24 @@ pub(super) fn send_loop(
                         percentile(&mut host_v, 0.99) as f32,
                     )
                 });
+                let (fec_us, seal_us, sock_us) = match seal_perf.filter(|p| p.frames > 0) {
+                    Some(p) => {
+                        let per_frame = |ns: u64| Some(ns as f32 / p.frames as f32 / 1000.0);
+                        (
+                            per_frame(p.fec_ns),
+                            per_frame(p.seal_ns),
+                            per_frame(p.sock_ns),
+                        )
+                    }
+                    None => (None, None, None),
+                };
                 let sample = crate::stats_recorder::StatsSample {
                     t_ms: 0,
                     session_id,
                     stages,
+                    fec_us,
+                    seal_us,
+                    sock_us,
                     fps: (new_frames as f64 / secs) as f32,
                     repeat_fps: (repeat_frames as f64 / secs) as f32,
                     mbps: tx_mbps as f32,
