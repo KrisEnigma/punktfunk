@@ -207,14 +207,13 @@ struct ContentView: View {
     // macOS builds never reveal. Keep new modifiers on whichever half is shorter.
     var body: some View {
         driven
-            // Fresh pair=required / unknown host: offer the two ways in. An action sheet (not an
-            // alert) so it never collides with the wait alert below. "Request Access" is the
-            // no-PIN delegated-approval path; "Pair with PIN…" runs the SPAKE2 ceremony. The
-            // follow-on presentation is deferred a tick so this dialog is fully dismissed first.
-            .confirmationDialog(
+            // Fresh pair=required / unknown host: the two ways in. An alert, since iOS 26 draws a
+            // confirmation dialog as a narrow popover that squeezes this message. "Request Access"
+            // is the no-PIN approval path, "Pair with PIN…" the SPAKE2 ceremony. The follow-on
+            // presentation waits a tick so this alert is fully dismissed first.
+            .alert(
                 "Pairing required",
                 isPresented: approvalChoicePresented,
-                titleVisibility: .visible,
                 presenting: approvalChoice
             ) { req in
                 Button("Request Access") {
