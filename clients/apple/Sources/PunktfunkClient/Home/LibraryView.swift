@@ -53,6 +53,19 @@ struct LibraryTarget: Identifiable, Hashable {
     }
 }
 
+extension LibraryTarget {
+    /// Every shelf there is: each paired host, then each preset pinned to it. The Library's title
+    /// menu lists these, on the touch UI and the Mac alike.
+    @MainActor static func shelves(of hosts: [StoredHost], presets: PresetStore) -> [LibraryTarget] {
+        hosts.filter { $0.pinnedSHA256 != nil }.flatMap { host in
+            [LibraryTarget(host: host)]
+                + presets.catalog.pinned(for: host).map {
+                    LibraryTarget(host: host, preset: .preset($0.id))
+                }
+        }
+    }
+}
+
 struct LibraryView: View {
     @ObservedObject var store: HostStore
     /// The shelf being browsed — the host, plus the pinned preset when a pinned card opened it.
@@ -78,6 +91,9 @@ struct LibraryView: View {
     var inTab = false
     /// Stream a saved host's desktop, launching nothing: the tab's Desktops section.
     var onConnectHost: ((StoredHost) -> Void)?
+    /// Drawn above the tab's sections, inside the scroll, so it moves with the title: the host
+    /// filter.
+    var tabHeader: AnyView?
     #if DEBUG
     /// Shot harness: a canned phase in place of the fetch (`ShotGallery.swift`).
     var shotPhase: ShotLibraryPhase?
@@ -114,6 +130,11 @@ struct LibraryView: View {
 
     @State private var games: [GameEntry] = []
     @State private var loading = false
+    /// Held back a moment, so a cache that answers at once never flashes a spinner.
+    @State private var spinnerDue = false
+    /// The catalogs this run has shown, by host: a shelf the filter switches back to opens on its
+    /// titles rather than on an empty frame and a spinner.
+    @MainActor private static var shown: [String: [GameEntry]] = [:]
     @State private var errorText: String?
     /// What the host has launched right now, keyed by library id — the `Resume` affordance. Empty
     /// on an older host, an unreachable one, or while the catalog is being served from cache.
@@ -158,14 +179,16 @@ struct LibraryView: View {
 
     var body: some View {
         content
-            .navigationTitle(inTab ? shelfTitle : "\(shelfTitle) — Library")
+            // In the tab the host filter names the shelf, so the title names the place.
+            .navigationTitle(inTab ? "Library" : "\(shelfTitle) — Library")
             #if os(iOS)
-            .navigationBarTitleDisplayMode(inTab ? .large : .inline)
+            .modifier(LibraryTitleMode(inTab: inTab))
             #endif
             .toolbar {
                 #if os(macOS)
                 ToolbarItemGroup {
                     if !gamepadUIActive { sortMenu }
+                    if inTab { customizeButton }
                     reloadButton
                 }
                 #else
@@ -192,14 +215,25 @@ struct LibraryView: View {
                 }
                 #endif
             }
-            #if os(iOS)
+            #if os(iOS) || os(macOS)
             .modifier(TitleSearch(active: inTab, text: $search))
-            .sheet(isPresented: $showCustomize) { LibrarySectionsPanel() }
             #endif
             #if os(iOS) || os(macOS)
             .sheet(item: $detailGame, onDismiss: launchPendingTitle) { detailSheet($0) }
             #endif
+            // Before the first frame: a shelf seen this run opens on its titles, any other one on
+            // the (held back) spinner rather than a flash of the empty state.
+            .onAppear {
+                guard games.isEmpty else { return }
+                if let seen = Self.shown[host.id.uuidString] { games = seen } else { loading = true }
+            }
             .task { await load() }
+            .task(id: loading) {
+                spinnerDue = false
+                guard loading else { return }
+                try? await Task.sleep(for: .milliseconds(300))
+                spinnerDue = loading
+            }
             .onDisappear {
                 // Hand the loader off before clearing it, so its pooled connections are closed
                 // rather than left open on a screen the user has left.
@@ -445,6 +479,7 @@ struct LibraryView: View {
             keyNavigation(sections: groups, proxy: proxy) {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 26) {
+                        tabHeader
                         staleNote
                         ForEach(sectionLayout.visible) { section in
                             tabSection(section, groups: groups, proxy: proxy)
@@ -530,7 +565,7 @@ struct LibraryView: View {
         if games.isEmpty {
             Group {
                 if loading {
-                    ProgressView("Loading library…")
+                    if spinnerDue { ProgressView("Loading library…") }
                 } else if let errorText {
                     errorState(errorText)
                 } else {
@@ -590,11 +625,23 @@ struct LibraryView: View {
             .filter { marked.contains($0.id) }
     }
 
-    #if os(iOS)
+    #if os(iOS) || os(macOS)
     private var customizeButton: some View {
         Button { showCustomize = true } label: {
             Label("Customize", systemImage: "slider.horizontal.3")
         }
+        #if os(iOS)
+        // A popover on the iPad, as on the Mac; an iPhone shows it as a sheet.
+        .popover(isPresented: $showCustomize) {
+            LibrarySectionsPanel().frame(minWidth: 320, minHeight: 440)
+        }
+        #endif
+        #if os(macOS)
+        // A popover on the Mac (design §4): the panel is a short list, not a task.
+        .popover(isPresented: $showCustomize) {
+            LibrarySectionsPanel().frame(width: 320, height: 250)
+        }
+        #endif
     }
     #endif
 
@@ -711,8 +758,9 @@ struct LibraryView: View {
     /// played under Recent, how long under Most played, nothing otherwise.
     private func sortCaption(_ game: GameEntry) -> String? {
         switch LibrarySortKey(stored: sortRaw) {
-        case .recent: return PlayStatsText.lastPlayed(game.stats)
-        case .playTime: return PlayStatsText.playTime(game.stats)
+        // Blank, not nil, for a title with nothing recorded: its tile keeps the caption line.
+        case .recent: return PlayStatsText.lastPlayed(game.stats) ?? ""
+        case .playTime: return PlayStatsText.playTime(game.stats) ?? ""
         default: return nil
         }
     }
@@ -753,7 +801,8 @@ struct LibraryView: View {
         #else
         let minW: CGFloat = 130
         #endif
-        return [GridItem(.adaptive(minimum: minW), spacing: 18)]
+        // Top-aligned like the shelves: a two-line title must not lift its poster above the row.
+        return [GridItem(.adaptive(minimum: minW), spacing: 18, alignment: .top)]
     }
 
     private func errorState(_ text: String) -> some View {
@@ -856,6 +905,7 @@ struct LibraryView: View {
         if let cached = await LibraryCache.shared?.load(hostID: current.id.uuidString) {
             games = cached.games.launchersFirst
             servedFromCacheAt = cached.fetchedAt
+            Self.shown[current.id.uuidString] = games
         }
         // ...and wake the box while the player is still choosing. Waking has always been bound to
         // CONNECTING, which is too late to help: by then they have picked a title and are waiting
@@ -900,6 +950,7 @@ struct LibraryView: View {
                 servedFromCacheAt = nil
                 errorText = nil
                 await LibraryCache.shared?.store(fetched, hostID: current.id.uuidString)
+                Self.shown[current.id.uuidString] = games
                 break
             } catch {
                 // Anything other than "can't reach it" is settled — a rejected certificate does not
@@ -1154,20 +1205,21 @@ struct GameCard: View {
                 }
             Text(game.title)
                 .font(.geist(12, relativeTo: .caption))
-                .lineLimit(2)
+                // Two lines held for every title, so every tile in a row stands the same height.
+                .lineLimit(2, reservesSpace: true)
                 .foregroundStyle(.secondary)
             if let caption {
                 Text(caption)
                     .font(.geist(11, relativeTo: .caption2))
                     .foregroundStyle(.tertiary)
-                    .lineLimit(1)
+                    .lineLimit(1, reservesSpace: true)
             }
         }
     }
 }
 
-#if os(iOS)
-/// The Library tab's title search. The other presentations of this view have none.
+#if os(iOS) || os(macOS)
+/// The Library tab's and the Mac shelf's title search. The other presentations have none.
 private struct TitleSearch: ViewModifier {
     let active: Bool
     @Binding var text: String
@@ -1177,6 +1229,41 @@ private struct TitleSearch: ViewModifier {
             content.searchable(text: $text, prompt: "Search titles")
         } else {
             content
+        }
+    }
+}
+#endif
+
+#if os(iOS)
+/// The title's mode. On a phone the tab holds its title at the leading edge, scrolled or not,
+/// where the Hosts tab's collapsed title sits: iOS centers a collapsed title, which pressed
+/// "Library" against the toolbar. The iPad and iOS before 26 keep the system title.
+private struct LibraryTitleMode: ViewModifier {
+    let inTab: Bool
+    @Environment(\.horizontalSizeClass) private var sizeClass
+
+    func body(content: Content) -> some View {
+        let system = content.navigationBarTitleDisplayMode(inTab ? .automatic : .inline)
+        if #available(iOS 26, *) {
+            if inTab && sizeClass == .compact {
+                content
+                    .toolbarTitleDisplayMode(.inline)
+                    .toolbar(removing: .title)
+                    .toolbar {
+                        ToolbarItem(placement: .topBarLeading) {
+                            // The large title's face, at its own width: the bar clips it otherwise.
+                            Text("Library")
+                                .font(.geist(34, .bold, relativeTo: .largeTitle))
+                                .fixedSize()
+                                .accessibilityAddTraits(.isHeader)
+                        }
+                        .sharedBackgroundVisibility(.hidden)
+                    }
+            } else {
+                system
+            }
+        } else {
+            system
         }
     }
 }
