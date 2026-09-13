@@ -1,6 +1,6 @@
 {
-  "$comment": "Cross-language contract for the punktfunk:// grammar (design/client-deep-links.md §2). The Rust (crates/pf-client-core/src/deeplink.rs), Swift (PunktfunkShared/DeepLink.swift) and Kotlin parsers each run every case in their own test suite, so the three cannot drift into three different security postures. `expect` fields absent from a case must parse as absent; `emit` is the canonical URL the parsed link must serialise back to (note that pf:// never round-trips — it is an accepted input alias, never an output). `error` is the stable refusal code, not a message.",
-  "version": 1,
+  "$comment": "Cross-language contract for the punktfunk:// grammar (design/client-deep-links.md §2). The Rust (crates/pf-client-core/src/deeplink.rs), Swift (PunktfunkShared/DeepLink.swift) and Kotlin parsers each run every case in their own test suite, so the three cannot drift into three different security postures. `expect` fields absent from a case must parse as absent; `emit` is the canonical URL the parsed link must serialise back to (note that pf:// never round-trips — it is an accepted input alias, never an output). `error` is the stable refusal code, not a message. `profile` is the pre-rename spelling of `preset`: it still parses (`preset` wins wherever it sits), and emitters write both so an older parser keeps the preset.",
+  "version": 2,
   "cases": [
     {
       "name": "apple-shipped-uuid",
@@ -73,7 +73,7 @@
     },
     {
       "name": "self-emitted-full-form",
-      "url": "punktfunk://connect/11111111-2222-4333-8444-555555555555?fp=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc&host=192.168.1.50:7777&launch=steam:570&profile=aaaaaaaaaaaa",
+      "url": "punktfunk://connect/11111111-2222-4333-8444-555555555555?fp=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc&host=192.168.1.50:7777&launch=steam:570&preset=aaaaaaaaaaaa&profile=aaaaaaaaaaaa",
       "expect": {
         "route": "connect",
         "host_ref": "11111111-2222-4333-8444-555555555555",
@@ -81,9 +81,9 @@
         "host_addr": "192.168.1.50",
         "host_port": 7777,
         "launch": "steam:570",
-        "profile": "aaaaaaaaaaaa"
+        "preset": "aaaaaaaaaaaa"
       },
-      "emit": "punktfunk://connect/11111111-2222-4333-8444-555555555555?fp=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc&host=192.168.1.50:7777&launch=steam:570&profile=aaaaaaaaaaaa"
+      "emit": "punktfunk://connect/11111111-2222-4333-8444-555555555555?fp=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc&host=192.168.1.50:7777&launch=steam:570&preset=aaaaaaaaaaaa&profile=aaaaaaaaaaaa"
     },
     {
       "name": "fingerprint-is-normalised-to-lowercase",
@@ -131,12 +131,50 @@
       }
     },
     {
-      "name": "profile-by-name",
+      "name": "legacy-profile-parameter-is-a-preset",
       "url": "punktfunk://connect/Desk?profile=Work",
       "expect": {
         "route": "connect",
         "host_ref": "Desk",
-        "profile": "Work"
+        "preset": "Work"
+      },
+      "emit": "punktfunk://connect/Desk?preset=Work&profile=Work"
+    },
+    {
+      "name": "preset-by-name",
+      "url": "punktfunk://connect/Desk?preset=Work",
+      "expect": {
+        "route": "connect",
+        "host_ref": "Desk",
+        "preset": "Work"
+      },
+      "emit": "punktfunk://connect/Desk?preset=Work&profile=Work"
+    },
+    {
+      "name": "preset-wins-over-the-legacy-spelling",
+      "url": "punktfunk://connect/Desk?profile=Old&preset=New",
+      "expect": {
+        "route": "connect",
+        "host_ref": "Desk",
+        "preset": "New"
+      }
+    },
+    {
+      "name": "preset-wins-even-when-it-comes-first",
+      "url": "punktfunk://connect/Desk?preset=New&profile=Old",
+      "expect": {
+        "route": "connect",
+        "host_ref": "Desk",
+        "preset": "New"
+      }
+    },
+    {
+      "name": "an-empty-preset-falls-back-to-the-legacy-spelling",
+      "url": "punktfunk://connect/Desk?preset=&profile=Work",
+      "expect": {
+        "route": "connect",
+        "host_ref": "Desk",
+        "preset": "Work"
       }
     },
     {
@@ -154,7 +192,7 @@
       "expect": {
         "route": "connect",
         "host_ref": "Desk",
-        "profile": "Work"
+        "preset": "Work"
       }
     },
     {
@@ -285,6 +323,11 @@
     {
       "name": "launch-id-over-the-cap",
       "url": "punktfunk://connect/Desk?launch=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "error": "param-too-long"
+    },
+    {
+      "name": "preset-reference-over-the-cap",
+      "url": "punktfunk://connect/Desk?preset=ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp",
       "error": "param-too-long"
     },
     {

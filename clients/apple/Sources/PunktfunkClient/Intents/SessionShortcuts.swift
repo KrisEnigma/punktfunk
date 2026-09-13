@@ -1,6 +1,6 @@
 // Siri / Shortcuts / Spotlight surface (design §M4, extended by client-deep-links.md §6).
 // Deliberately thin: every action already has an internal entry point — the deep-link router
-// (connect / connect-and-launch / connect-with-a-profile, and the `browse` route into a host's
+// (connect / connect-and-launch / connect-with-a-preset, and the `browse` route into a host's
 // library), the in-process end-session hook, and the existing Wake-on-LAN path — so these
 // intents only wrap them.
 //
@@ -41,7 +41,7 @@ struct ConnectToHostIntent: AppIntent {
     var profile: ProfileEntity?
 
     func perform() async throws -> some IntentResult {
-        let url = DeepLink.connect(host: host.id, launchID: launchID, profile: profile?.id).url
+        let url = DeepLink.connect(host: host.id, launchID: launchID, preset: profile?.id).url
         await MainActor.run {
             NotificationCenter.default.post(name: .punktfunkOpenDeepLink, object: url)
         }

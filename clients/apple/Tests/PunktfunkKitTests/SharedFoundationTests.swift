@@ -1,12 +1,12 @@
 // PunktfunkShared is a wire contract between the app (writer) and the widget extension +
 // deep-link senders (readers). These pin the formats that cross that boundary:
 //   • the `StoredHost` JSON codec — the widget decodes the exact bytes the app persisted, and
-//     older saved JSON (missing `mgmtPort` / `macAddresses` / `profileID`) must still decode;
+//     older saved JSON (missing `mgmtPort` / `macAddresses` / `presetID`) must still decode;
 //   • the `punktfunk://` deep-link grammar — driven by `clients/shared/deeplink-vectors.json`,
 //     the SAME file the Rust suite runs, so the two parsers cannot drift into two security
 //     postures;
-//   • the settings-profile catalog — including the don't-clobber rule that keeps an older build
-//     from erasing a newer one's overlay fields just by opening a profile.
+//   • the settings-preset catalog — including the don't-clobber rule that keeps an older build
+//     from erasing a newer one's overlay fields just by opening a preset.
 
 import SwiftUI
 import XCTest
@@ -24,7 +24,7 @@ final class SharedFoundationTests: XCTestCase {
             pinnedSHA256: Data([0xDE, 0xAD, 0xBE, 0xEF]),
             lastConnected: Date(timeIntervalSince1970: 1_700_000_000),
             mgmtPort: 47990, macAddresses: ["aa:bb:cc:dd:ee:ff"], clipboardSync: true,
-            profileID: "a1b2c3d4e5f6", pinnedProfileIDs: ["0f0f0f0f0f0f"],
+            presetID: "a1b2c3d4e5f6", pinnedPresetIDs: ["0f0f0f0f0f0f"],
             addedAt: Date(timeIntervalSince1970: 1_600_000_000),
             osChain: "linux/fedora/bazzite", previousAddresses: ["100.64.0.7"])
 
@@ -34,9 +34,9 @@ final class SharedFoundationTests: XCTestCase {
         XCTAssertEqual(decoded.osChain, "linux/fedora/bazzite")
     }
 
-    /// Older saved hosts predate `mgmtPort`/`macAddresses` — and now `profileID`/
-    /// `pinnedProfileIDs` too. A missing key must decode to nil, not throw (synthesized Decodable
-    /// treats a missing Optional as nil). This is the forward-compat guarantee the widget depends
+    /// Older saved hosts predate `mgmtPort`/`macAddresses` — and now `presetID`/
+    /// `pinnedPresetIDs` too. A missing key must decode to nil, not throw (`init(from:)` reads
+    /// every Optional with `decodeIfPresent`). This is the forward-compat guarantee the widget depends
     /// on when reading a store written by any prior build.
     func testStoredHostDecodesLegacyJSONWithoutOptionalKeys() throws {
         let json = """
@@ -50,8 +50,8 @@ final class SharedFoundationTests: XCTestCase {
         XCTAssertNil(decoded.pinnedSHA256)
         XCTAssertNil(decoded.lastConnected)
         XCTAssertNil(decoded.clipboardSync)
-        XCTAssertNil(decoded.profileID)
-        XCTAssertNil(decoded.pinnedProfileIDs)
+        XCTAssertNil(decoded.presetID)
+        XCTAssertNil(decoded.pinnedPresetIDs)
         XCTAssertNil(decoded.addedAt)
         XCTAssertNil(decoded.osChain)
         XCTAssertNil(decoded.previousAddresses)
@@ -114,7 +114,7 @@ final class SharedFoundationTests: XCTestCase {
             let host_ref: String
             let fp: String?
             let launch: String?
-            let profile: String?
+            let preset: String?
             let name: String?
             let host_addr: String?
             let host_port: Int?
@@ -162,7 +162,7 @@ final class SharedFoundationTests: XCTestCase {
             XCTAssertEqual(link.hostRef, want.host_ref, testCase.name)
             XCTAssertEqual(link.fp, want.fp, "\(testCase.name) fp")
             XCTAssertEqual(link.launch, want.launch, "\(testCase.name) launch")
-            XCTAssertEqual(link.profile, want.profile, "\(testCase.name) preset")
+            XCTAssertEqual(link.preset, want.preset, "\(testCase.name) preset")
             XCTAssertEqual(link.name, want.name, "\(testCase.name) name")
             XCTAssertEqual(link.host?.address, want.host_addr, "\(testCase.name) host_addr")
             XCTAssertEqual(
@@ -186,8 +186,8 @@ final class SharedFoundationTests: XCTestCase {
         let launched = DeepLink.connect(host: id, launchID: "steam:570")
         XCTAssertEqual(try DeepLink(url: launched.url).launch, "steam:570")
 
-        let profiled = DeepLink.connect(host: id, launchID: nil, profile: "a1b2c3d4e5f6")
-        XCTAssertEqual(try DeepLink(url: profiled.url).profile, "a1b2c3d4e5f6")
+        let withPreset = DeepLink.connect(host: id, launchID: nil, preset: "a1b2c3d4e5f6")
+        XCTAssertEqual(try DeepLink(url: withPreset.url).preset, "a1b2c3d4e5f6")
     }
 
     /// The library widget's and the Open Library intent's emitter — the reserved `browse` route
@@ -209,12 +209,13 @@ final class SharedFoundationTests: XCTestCase {
             id: UUID(uuidString: "11111111-2222-4333-8444-555555555555")!,
             name: "Desk", address: "192.168.1.50", port: 7777)
         host.pinnedSHA256 = Data(repeating: 0xCC, count: 32)
-        let link = DeepLink.forHost(host, launch: "steam:570", profile: "aaaaaaaaaaaa")
+        let link = DeepLink.forHost(host, launch: "steam:570", preset: "aaaaaaaaaaaa")
         XCTAssertEqual(
             link.urlString,
             "punktfunk://connect/11111111-2222-4333-8444-555555555555"
                 + "?fp=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
-                + "&host=192.168.1.50:7777&launch=steam:570&profile=aaaaaaaaaaaa")
+                + "&host=192.168.1.50:7777&launch=steam:570&preset=aaaaaaaaaaaa"
+                + "&profile=aaaaaaaaaaaa")
         XCTAssertEqual(try DeepLink.parse(link.urlString), link)
     }
 
@@ -272,7 +273,7 @@ final class SharedFoundationTests: XCTestCase {
     // MARK: - Host grid arrangement
 
     private func arrangementFixture() -> (hosts: [StoredHost], catalog: PresetCatalog) {
-        let catalog = PresetCatalog(profiles: [
+        let catalog = PresetCatalog(presets: [
             StreamPreset(name: "Game", id: "111111111111", accent: "#ff8800"),
             StreamPreset(name: "Work", id: "222222222222"),
         ])
@@ -282,16 +283,16 @@ final class SharedFoundationTests: XCTestCase {
         let basement = StoredHost(name: "Basement", address: "10.0.0.3")
         var desk = StoredHost(name: "Desk", address: "10.0.0.1",
                               addedAt: Date(timeIntervalSince1970: 100))
-        desk.profileID = "111111111111"
+        desk.presetID = "111111111111"
         desk.lastConnected = Date(timeIntervalSince1970: 5_000)
         var attic = StoredHost(name: "attic", address: "10.0.0.2",
                                addedAt: Date(timeIntervalSince1970: 200))
-        attic.profileID = "222222222222"
+        attic.presetID = "222222222222"
         var couch = StoredHost(name: "Couch", address: "10.0.0.4",
                                addedAt: Date(timeIntervalSince1970: 300))
         couch.lastConnected = Date(timeIntervalSince1970: 9_000)
         // Couch is bound to nothing but has PINNED both presets as their own cards.
-        couch.pinnedProfileIDs = ["111111111111", "222222222222"]
+        couch.pinnedPresetIDs = ["111111111111", "222222222222"]
         return ([basement, desk, attic, couch], catalog)
     }
 
@@ -358,7 +359,7 @@ final class SharedFoundationTests: XCTestCase {
     /// A preset nobody uses gets no band at all.
     func testHostGroupingSkipsEmptyBands() {
         let (hosts, _) = arrangementFixture()
-        let unused = PresetCatalog(profiles: [StreamPreset(name: "Travel", id: "333333333333")])
+        let unused = PresetCatalog(presets: [StreamPreset(name: "Travel", id: "333333333333")])
         let groups = HostArrangement.groups(
             hosts: hosts, catalog: unused, online: [], sort: .name, grouping: .preset)
         XCTAssertEqual(groups.map(\.title), ["No Preset"])
@@ -370,7 +371,7 @@ final class SharedFoundationTests: XCTestCase {
     /// than in one named after a preset that no longer exists.
     func testHostGroupingDropsDanglingBindings() {
         var host = StoredHost(name: "Desk", address: "10.0.0.1")
-        host.profileID = "deadbeefdead"
+        host.presetID = "deadbeefdead"
         let groups = HostArrangement.groups(
             hosts: [host], catalog: PresetCatalog(), online: [], sort: .name, grouping: .preset)
         XCTAssertEqual(groups.map(\.title), ["No Preset"])
@@ -469,7 +470,7 @@ final class SharedFoundationTests: XCTestCase {
         let stored = """
         {
           "version": 1,
-          "profiles": [
+          "presets": [
             {
               "id": "a1b2c3d4e5f6", "name": "Game", "accent": "#ff8800",
               "overrides": {
@@ -477,7 +478,7 @@ final class SharedFoundationTests: XCTestCase {
                 "codec": "vvc-from-the-future", "stats_verbosity": "compact",
                 "some_new_axis": {"nested": true}
               },
-              "future_profile_key": 7
+              "future_preset_key": 7
             },
             { "id": "0f0f0f0f0f0f", "name": "Work" }
           ]
@@ -485,7 +486,7 @@ final class SharedFoundationTests: XCTestCase {
         """.data(using: .utf8)!
 
         let catalog = try JSONDecoder().decode(PresetCatalog.self, from: stored)
-        XCTAssertEqual(catalog.profiles.count, 2)
+        XCTAssertEqual(catalog.presets.count, 2)
         let game = try XCTUnwrap(catalog.preset(id: "a1b2c3d4e5f6"))
         XCTAssertEqual(game.accent, "#ff8800")
         XCTAssertEqual(game.overrides.codec, "vvc-from-the-future")
@@ -495,7 +496,7 @@ final class SharedFoundationTests: XCTestCase {
 
         let text = try XCTUnwrap(String(data: JSONEncoder().encode(catalog), encoding: .utf8))
         XCTAssertTrue(text.contains("some_new_axis"))
-        XCTAssertTrue(text.contains("future_profile_key"))
+        XCTAssertTrue(text.contains("future_preset_key"))
         // Absent overrides serialize away entirely — "not overridden" has one representation.
         XCTAssertFalse(text.contains("null"))
         let round = try JSONDecoder().decode(PresetCatalog.self, from: Data(text.utf8))
@@ -504,10 +505,48 @@ final class SharedFoundationTests: XCTestCase {
         XCTAssertEqual(round.preset(id: "a1b2c3d4e5f6")?.extra.count, 1)
     }
 
+    /// A host saved before the rename keeps its bindings, and encoding writes both spellings so an
+    /// older build reads them too. Both present: the new one wins, since only this build writes it.
+    func testStoredHostReadsAndMirrorsPreRenameKeys() throws {
+        let json = """
+        {"id":"11111111-2222-3333-4444-555555555555","name":"Old","address":"10.0.0.5",
+         "port":9777,"profileID":"a1b2c3d4e5f6","pinnedProfileIDs":["0f0f0f0f0f0f"]}
+        """.data(using: .utf8)!
+        let host = try JSONDecoder().decode(StoredHost.self, from: json)
+        XCTAssertEqual(host.presetID, "a1b2c3d4e5f6")
+        XCTAssertEqual(host.pinnedPresetIDs, ["0f0f0f0f0f0f"])
+        let saved = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: JSONEncoder().encode(host)) as? [String: Any])
+        XCTAssertEqual(saved["presetID"] as? String, "a1b2c3d4e5f6")
+        XCTAssertEqual(saved["profileID"] as? String, "a1b2c3d4e5f6")
+        XCTAssertEqual(saved["pinnedProfileIDs"] as? [String], ["0f0f0f0f0f0f"])
+
+        let both = """
+        {"id":"11111111-2222-3333-4444-555555555555","name":"Old","address":"10.0.0.5",
+         "port":9777,"presetID":"111111111111","profileID":"222222222222"}
+        """.data(using: .utf8)!
+        XCTAssertEqual(try JSONDecoder().decode(StoredHost.self, from: both).presetID, "111111111111")
+    }
+
+    /// A catalog saved before the rename loads from its old key and its old defaults entry, an
+    /// emptied catalog does not fall back to it, and a stored `profile` grouping still groups.
+    func testPreRenameCatalogAndGroupingStillLoad() throws {
+        let suite = "preset-rename-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let old = #"{"version": 1, "profiles": [{"id": "a1b2c3d4e5f6", "name": "Game"}]}"#
+        defaults.set(Data(old.utf8), forKey: DefaultsKey.legacyPresets)
+        XCTAssertEqual(PresetCatalog.load(from: defaults).presets.map(\.name), ["Game"])
+        PresetCatalog(presets: []).save(to: defaults)
+        XCTAssertTrue(PresetCatalog.load(from: defaults).presets.isEmpty)
+        XCTAssertEqual(HostGrouping(rawValue: "profile"), .preset)
+        XCTAssertEqual(HostGrouping.preset.rawValue, "preset")
+    }
+
     /// Reference resolution: id first, then a unique case-insensitive name; two presets sharing a
     /// name resolve to `.ambiguous` (the caller refuses) rather than to whichever came first.
     func testCatalogResolvesIDsFirstAndRefusesAmbiguity() {
-        let catalog = PresetCatalog(profiles: [
+        let catalog = PresetCatalog(presets: [
             StreamPreset(name: "Work", id: "111111111111"),
             StreamPreset(name: "work", id: "222222222222"),
             StreamPreset(name: "Game", id: "333333333333"),
@@ -527,19 +566,19 @@ final class SharedFoundationTests: XCTestCase {
     /// Bindings and pins live ON the host record, and both degrade rather than error: a deleted
     /// preset means "Default settings" for a binding and a vanished card for a pin.
     func testBindingsAndPinsDropDanglingIDs() {
-        let catalog = PresetCatalog(profiles: [
+        let catalog = PresetCatalog(presets: [
             StreamPreset(name: "Game", id: "111111111111"),
             StreamPreset(name: "Work", id: "222222222222"),
         ])
         var host = StoredHost(name: "Desk", address: "10.0.0.1")
         XCTAssertNil(catalog.binding(for: host))
 
-        host.profileID = "111111111111"
+        host.presetID = "111111111111"
         XCTAssertEqual(catalog.binding(for: host)?.name, "Game")
-        host.profileID = "deadbeefdead"
+        host.presetID = "deadbeefdead"
         XCTAssertNil(catalog.binding(for: host), "a deleted preset is Default settings, not an error")
 
-        host.pinnedProfileIDs = ["222222222222", "deadbeefdead", "222222222222", "111111111111"]
+        host.pinnedPresetIDs = ["222222222222", "deadbeefdead", "222222222222", "111111111111"]
         XCTAssertEqual(catalog.pinned(for: host).map(\.id), ["222222222222", "111111111111"])
     }
 
@@ -575,19 +614,19 @@ final class SharedFoundationTests: XCTestCase {
         gameOverrides.bitrateKbps = 80_000
         var workOverrides = SettingsOverlay()
         workOverrides.bitrateKbps = 8_000
-        let catalog = PresetCatalog(profiles: [
+        let catalog = PresetCatalog(presets: [
             StreamPreset(
                 name: "Game", id: "111111111111", accent: "#ff8800", overrides: gameOverrides),
             StreamPreset(name: "Work", id: "222222222222", overrides: workOverrides),
         ])
         var host = StoredHost(name: "Desk", address: "10.0.0.1")
-        host.profileID = "111111111111"
+        host.presetID = "111111111111"
 
         let unbound = EffectiveSettings.resolve(
             host: StoredHost(name: "Plain", address: "10.0.0.2"),
             catalog: catalog, defaults: defaults)
         XCTAssertEqual(unbound.bitrateKbps, 30_000)
-        XCTAssertNil(unbound.profileID)
+        XCTAssertNil(unbound.presetID)
         XCTAssertEqual(unbound.width, 2_560, "globals still flow through in every case")
 
         let bound = EffectiveSettings.resolve(host: host, catalog: catalog, defaults: defaults)
@@ -602,7 +641,7 @@ final class SharedFoundationTests: XCTestCase {
             host: host, selection: .preset("222222222222"),
             catalog: catalog, defaults: defaults)
         XCTAssertEqual(oneOff.bitrateKbps, 8_000)
-        XCTAssertEqual(host.profileID, "111111111111")
+        XCTAssertEqual(host.presetID, "111111111111")
 
         // "Connect with ▸ Default settings" on a BOUND host forces the globals — the case that
         // makes this a three-way selection rather than an optional preset.

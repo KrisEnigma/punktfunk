@@ -292,9 +292,9 @@ mod tests {
             os: String::new(),
             mgmt_port: None,
             clipboard_sync: false,
-            profile_id: None,
-            pinned_profiles: vec![],
-            game_profiles: Default::default(),
+            preset_id: None,
+            pinned_presets: vec![],
+            game_presets: Default::default(),
             id: None,
             prev_addrs: vec![],
         }

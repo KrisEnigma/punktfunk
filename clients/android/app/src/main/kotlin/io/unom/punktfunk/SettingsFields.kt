@@ -5,7 +5,7 @@ import org.json.JSONObject
 
 /**
  * The one list of [Settings] fields. Every place that walks the fields — the prefs store, the
- * profile overlay's apply/absorb/clear/JSON, the console document both ways — loops over this,
+ * preset overlay's apply/absorb/clear/JSON, the console document both ways — loops over this,
  * so a new field is one row here plus its two data-class properties. `SettingsFieldsTest`
  * checks by reflection that no property is missing from the table.
  */
@@ -108,11 +108,11 @@ internal object SettingsFields {
         field("defaultHost", "default_host", NullableStrKind, { it.defaultHost }, { s, v -> s.copy(defaultHost = v) }),
     )
 
-    /** The profileable (tier-P) rows, in table order. */
-    val PROFILE: List<Field<*>> = ALL.filter { it.overlay != null }
+    /** The presetable (tier-P) rows, in table order. */
+    val PRESET: List<Field<*>> = ALL.filter { it.overlay != null }
 
     /** The overlay's JSON keys — everything else in a stored overlay is carried through. */
-    val PROFILE_KEYS: Set<String> = PROFILE.map { it.key }.toSet()
+    val PRESET_KEYS: Set<String> = PRESET.map { it.key }.toSet()
 
     /** Legacy prefs keys, read once as a migration default and never written. */
     private const val K_HUD = "stats_hud_enabled"
@@ -121,7 +121,7 @@ internal object SettingsFields {
 
     /**
      * One field. [name] is the Kotlin property (the reflection check keys on it), [key] the JSON
-     * key on the profile overlay and, unless [console] renames it, the console document;
+     * key on the preset overlay and, unless [console] renames it, the console document;
      * [prefsKey] the SharedPreferences key when it differs from [key].
      */
     class Field<T>(
@@ -263,7 +263,7 @@ internal object SettingsFields {
 
     /**
      * `pad_speaker` on the console: `"pad"` = on, `"off"` = off. `"mix"` is off, not on: it is
-     * unimplemented everywhere and `pad_audio::speaker_active` renders it as off, so a profile
+     * unimplemented everywhere and `pad_audio::speaker_active` renders it as off, so a preset
      * carrying it must not open the pad's speaker here alone.
      */
     object PadSpeakerKind : Kind<Boolean> {

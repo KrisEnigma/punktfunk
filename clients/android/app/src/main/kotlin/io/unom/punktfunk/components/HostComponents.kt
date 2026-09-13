@@ -59,7 +59,7 @@ fun SectionLabel(text: String) {
 
 /**
  * One row of a host card's overflow menu. [startsSection] draws a divider above it, which is how
- * the profile actions ("Connect with: …", "Pin as card: …") stay legible next to the host actions
+ * the preset actions ("Connect with: …", "Pin as card: …") stay legible next to the host actions
  * in one flat menu — Compose has no submenus, and the Windows client made the same call.
  */
 data class HostMenuItem(
@@ -73,9 +73,9 @@ data class HostMenuItem(
  * don't know the OS), name + address, a trust pill, and (for saved hosts) an overflow menu with
  * Wake / Edit / Forget plus whatever [menuItems] adds. Tapping the card connects.
  *
- * [profileLabel] names the settings profile this card connects with. On a host's own card that is
+ * [presetLabel] names the settings preset this card connects with. On a host's own card that is
  * its default binding, drawn as a quiet chip — the card says what a tap will do. On a **pinned
- * card** ([profileProminent]) the host name is still the title, but the profile is the loud part,
+ * card** ([presetProminent]) the host name is still the title, but the preset is the loud part,
  * because the pin exists to make that one combination a single tap.
  */
 @Composable
@@ -91,18 +91,18 @@ fun HostCard(
     onForget: (() -> Unit)?,
     onEdit: (() -> Unit)? = null,
     onWake: (() -> Unit)? = null,
-    profileLabel: String? = null,
-    profileProminent: Boolean = false,
+    presetLabel: String? = null,
+    presetProminent: Boolean = false,
     accent: Color? = null,
     menuItems: List<HostMenuItem> = emptyList(),
     /**
-     * Keep the profile chip's space even on a card that has no profile. `LazyVerticalGrid` sizes a
+     * Keep the preset chip's space even on a card that has no preset. `LazyVerticalGrid` sizes a
      * row to its tallest item but does NOT stretch the others, so a card that grew a chip would
      * leave its neighbour visibly short — a row of cards stepping up and down reads as broken
      * layout. The caller passes true when ANY card in that section carries a chip, so a user with
-     * no profiles never pays for the slot.
+     * no presets never pays for the slot.
      */
-    reserveProfileSlot: Boolean = false,
+    reservePresetSlot: Boolean = false,
 ) {
     // D-pad / controller focus highlight: a clickable card is focusable, but the default state
     // layer is too subtle on a TV across a room — draw a clear primary-colour border when focused.
@@ -146,14 +146,14 @@ fun HostCard(
                     overflow = TextOverflow.Ellipsis,
                     textAlign = TextAlign.Center,
                 )
-                if (profileLabel != null || reserveProfileSlot) {
+                if (presetLabel != null || reservePresetSlot) {
                     Spacer(Modifier.height(10.dp))
                     Box(
-                        Modifier.heightIn(min = PROFILE_CHIP_SLOT),
+                        Modifier.heightIn(min = PRESET_CHIP_SLOT),
                         contentAlignment = Alignment.Center,
                     ) {
-                        if (profileLabel != null) {
-                            ProfileChip(profileLabel, accent, prominent = profileProminent)
+                        if (presetLabel != null) {
+                            PresetChip(presetLabel, accent, prominent = presetProminent)
                         }
                     }
                 }
@@ -223,12 +223,12 @@ fun HostCard(
 }
 
 /**
- * The profile a card connects with. Quiet on a bound host's own card (it is a note about what a tap
- * does); filled and tinted on a pinned card, where the profile IS the reason the card exists — the
+ * The preset a card connects with. Quiet on a bound host's own card (it is a note about what a tap
+ * does); filled and tinted on a pinned card, where the preset IS the reason the card exists — the
  * accent field the schema reserves earns its keep here.
  */
 @Composable
-private fun ProfileChip(label: String, accent: Color?, prominent: Boolean) {
+private fun PresetChip(label: String, accent: Color?, prominent: Boolean) {
     val tint = accent ?: MaterialTheme.colorScheme.primary
     Row(
         modifier = Modifier
@@ -254,7 +254,7 @@ private fun ProfileChip(label: String, accent: Color?, prominent: Boolean) {
 }
 
 /**
- * Reserved height for the profile chip — the one part of a card that varies. `LazyVerticalGrid`
+ * Reserved height for the preset chip — the one part of a card that varies. `LazyVerticalGrid`
  * sizes a row to its tallest item and does NOT stretch the others, so a card that grew a chip its
  * neighbour lacks would leave the row stepping up and down.
  *
@@ -262,7 +262,7 @@ private fun ProfileChip(label: String, accent: Color?, prominent: Boolean) {
  * allowed to grow rather than clip, and the reservation is sized with room to spare because the
  * equal-height guarantee only holds while every card fits INSIDE it.
  */
-private val PROFILE_CHIP_SLOT = 26.dp
+private val PRESET_CHIP_SLOT = 26.dp
 
 /** Live presence, on any dynamic scheme: green reads as "up" to everyone, and Material You's
  * primary might be any hue at all — including a green that would then mean nothing. */

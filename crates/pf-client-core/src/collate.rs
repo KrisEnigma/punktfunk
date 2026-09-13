@@ -10,7 +10,7 @@
 
 use crate::library::{store_label, GameEntry, DESKTOP_ID};
 
-/// The five fields collation reads. Each shell keeps its own model — the console's
+/// What collation reads. Each shell keeps its own model — the console's
 /// `LibraryGame` carries art and running state, the desktop shells hold `GameEntry` — and
 /// implements this so the policy stays one file rather than one copy per toolkit.
 pub trait Collatable {
@@ -21,6 +21,14 @@ pub trait Collatable {
     fn platform(&self) -> Option<&str>;
     /// Opens the launcher itself, not a title.
     fn is_launcher(&self) -> bool;
+    /// Unix ms of the host's last launch; 0 when it has none.
+    fn last_played_ms(&self) -> u64 {
+        0
+    }
+    /// Play time the host counted, ms; 0 when it has none.
+    fn play_time_ms(&self) -> u64 {
+        0
+    }
 }
 
 impl Collatable for crate::library::GameEntry {
@@ -39,6 +47,12 @@ impl Collatable for crate::library::GameEntry {
     fn is_launcher(&self) -> bool {
         GameEntry::is_launcher(self)
     }
+    fn last_played_ms(&self) -> u64 {
+        self.stats.map_or(0, |s| s.last_played_unix_ms)
+    }
+    fn play_time_ms(&self) -> u64 {
+        self.stats.map_or(0, |s| s.play_time_ms)
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -50,6 +64,10 @@ pub enum SortKey {
     Title,
     Platform,
     Store,
+    /// Newest launch first; titles never played keep host order after them.
+    Recent,
+    /// Most play time first; titles with none keep host order after them.
+    PlayTime,
 }
 
 impl SortKey {
@@ -60,6 +78,8 @@ impl SortKey {
             "title" => SortKey::Title,
             "platform" => SortKey::Platform,
             "store" => SortKey::Store,
+            "recent" => SortKey::Recent,
+            "playtime" => SortKey::PlayTime,
             _ => SortKey::HostOrder,
         }
     }
@@ -71,6 +91,8 @@ impl SortKey {
             SortKey::Title => "title",
             SortKey::Platform => "platform",
             SortKey::Store => "store",
+            SortKey::Recent => "recent",
+            SortKey::PlayTime => "playtime",
         }
     }
 
@@ -80,14 +102,18 @@ impl SortKey {
             SortKey::Title => "A–Z",
             SortKey::Platform => "Platform",
             SortKey::Store => "Store",
+            SortKey::Recent => "Recent",
+            SortKey::PlayTime => "Most played",
         }
     }
 
-    pub const ALL: [SortKey; 4] = [
+    pub const ALL: [SortKey; 6] = [
         SortKey::HostOrder,
         SortKey::Title,
         SortKey::Platform,
         SortKey::Store,
+        SortKey::Recent,
+        SortKey::PlayTime,
     ];
 }
 
@@ -211,6 +237,11 @@ pub fn collate<T: Collatable>(games: &[T], sort: SortKey, group_by: Option<Group
                 .cmp(store_label(gb.store()))
                 .then_with(|| sort_title(ga.title()).cmp(&sort_title(gb.title())))
                 .then(a.cmp(&b)),
+            SortKey::Recent => gb
+                .last_played_ms()
+                .cmp(&ga.last_played_ms())
+                .then(a.cmp(&b)),
+            SortKey::PlayTime => gb.play_time_ms().cmp(&ga.play_time_ms()).then(a.cmp(&b)),
         }
     };
 
@@ -281,7 +312,7 @@ pub fn worth_browsing<T: Collatable>(games: &[T]) -> bool {
 mod tests {
     use super::*;
 
-    const EVERY_SORT: [SortKey; 4] = SortKey::ALL;
+    const EVERY_SORT: [SortKey; 6] = SortKey::ALL;
 
     fn game(
         id: &str,
@@ -301,6 +332,7 @@ mod tests {
             genres: Vec::new(),
             role: launcher.then(|| "launcher".to_string()),
             icon: None,
+            stats: None,
         }
     }
 
@@ -429,7 +461,7 @@ mod tests {
         let file: serde_json::Value =
             serde_json::from_str(raw).expect("library-collate-vectors.json must parse");
         assert_eq!(
-            file["version"], 1,
+            file["version"], 2,
             "bump the reader when the file's version moves"
         );
 
@@ -448,6 +480,7 @@ mod tests {
                 genres: Vec::new(),
                 role: e["role"].as_str().map(str::to_string),
                 icon: e["icon"].as_str().map(str::to_string),
+                stats: serde_json::from_value(e["stats"].clone()).expect("stats"),
             })
             .collect();
         let ids =

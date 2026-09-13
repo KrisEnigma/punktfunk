@@ -89,6 +89,21 @@ pub struct GameEntry {
     /// Resolve through [`GameEntry::icon_token`] — never interpolate `icon` raw.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub icon: Option<String>,
+    /// Host play stats. `None` until the host has launched the title once.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stats: Option<GameStats>,
+}
+
+/// One title's play numbers as the host keeps them: the last launch (unix ms), total and
+/// last-run play time (ms), and the launch count. Every field defaults, so a host that adds
+/// or drops one never fails the catalog.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct GameStats {
+    pub last_played_unix_ms: u64,
+    pub play_time_ms: u64,
+    pub last_run_ms: u64,
+    pub launch_count: u32,
 }
 
 /// The console's desktop-tile id. `\0` prefix as Home's Add and Rescan tiles use: a host

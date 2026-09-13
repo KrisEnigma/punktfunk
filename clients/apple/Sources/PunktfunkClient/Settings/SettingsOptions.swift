@@ -172,7 +172,7 @@ enum SettingsOptions {
         var options = bitratePresets
         if !options.contains(where: { $0.tag == current }) {
             options.insert(
-                (SpeedTestSheet.mbpsLabel(kbps: current) + " (custom)", current), at: 1)
+                (SpeedTestView.mbpsLabel(kbps: current) + " (custom)", current), at: 1)
         }
         return options
     }

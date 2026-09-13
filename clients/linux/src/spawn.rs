@@ -32,7 +32,7 @@ pub struct SpawnOpts {
 pub use orchestrate::{session_binary, CancelHandle};
 
 /// The plan one card click resolves to. `for_target` does ALL of the resolving — this
-/// device's settings with the host's bound profile (or the "Connect with ▸" one-off) overlaid,
+/// device's settings with the host's bound preset (or the "Connect with ▸" one-off) overlaid,
 /// and the per-host clipboard decision — through the same helpers the session's own compat path
 /// uses, so the two cannot disagree.
 ///
@@ -40,7 +40,7 @@ pub use orchestrate::{session_binary, CancelHandle};
 /// child's `--resolved-spec`, and a session running from a spec reads NO stores. This used to
 /// build the plan with `..Settings::default()`, on the theory that only the argv read it —
 /// which meant every stream since the arch-split ran at the DEFAULTS: the host's fallback
-/// bitrate (20 Mbps), the native resolution, `auto` codec, stereo, and no profile.
+/// bitrate (20 Mbps), the native resolution, `auto` codec, stereo, and no preset.
 fn plan_for(req: &ConnectRequest, fp_hex: &str, tofu: bool, opts: &SpawnOpts) -> ConnectPlan {
     let mut plan = ConnectPlan::for_target(
         HostTarget {
@@ -55,8 +55,8 @@ fn plan_for(req: &ConnectRequest, fp_hex: &str, tofu: bool, opts: &SpawnOpts) ->
         req.launch.as_ref().map(|(id, _)| id.clone()),
         // A plain card click carries no one-off: the resolver honors the host's own binding
         // (design/client-settings-profiles.md §4.6). Only a "Connect with ▸" pick (or a URL's
-        // `profile=`) sets one, and it applies to this session alone.
-        req.profile.clone(),
+        // `preset=`) sets one, and it applies to this session alone.
+        req.preset.clone(),
     );
     // This shell still runs its own dial-first wake fallback in `app.rs`, so the plan's own
     // wake stays off (it becomes real when the GTK connect path moves onto
@@ -73,7 +73,7 @@ fn plan_for(req: &ConnectRequest, fp_hex: &str, tofu: bool, opts: &SpawnOpts) ->
 /// connects pinned to it, so ready proves the host really holds that identity).
 ///
 /// Settings are NOT a parameter: the plan resolves them (including the fullscreen policy,
-/// which is a profileable field — a shell-read global would override a profile that set it).
+/// which is a presetable field — a shell-read global would override a preset that set it).
 ///
 /// The caller has already taken `busy`; [`AppMsg::SessionExited`] releases it. `Err` =
 /// the spawn itself failed (binary missing?) — surfaced as a connect error.
@@ -121,7 +121,7 @@ mod tests {
     use super::*;
 
     /// The plan a card click builds carries THIS DEVICE'S settings, with the host's bound
-    /// profile overlaid — not `Settings::default()`.
+    /// preset overlaid — not `Settings::default()`.
     ///
     /// This is the 0.22.x regression, and it was invisible because the defaults are all
     /// plausible: the spec's `bitrate_kbps: 0` means "host default", which the host reads as
@@ -132,7 +132,7 @@ mod tests {
     // The crate's one test env mutation (the `HOME` scoping below) — see main.rs's deny note.
     #[allow(unsafe_code)]
     fn the_plan_carries_resolved_settings_not_defaults() {
-        use pf_client_core::profiles::{ProfilesFile, SettingsOverlay, StreamProfile};
+        use pf_client_core::presets::{PresetsFile, SettingsOverlay, StreamPreset};
         use pf_client_core::trust::{KnownHost, KnownHosts, Settings};
 
         let home = std::env::temp_dir().join(format!("pf-spawn-test-{}", std::process::id()));
@@ -143,7 +143,7 @@ mod tests {
         // replaced environ storage alive, and every reader tolerates either value.
         unsafe { std::env::set_var("HOME", &home) };
 
-        // A device whose owner has set a bitrate, and a host bound to a profile that raises it
+        // A device whose owner has set a bitrate, and a host bound to a preset that raises it
         // further — the two layers the spec has to carry.
         let globals = Settings {
             bitrate_kbps: 200_000,
@@ -154,16 +154,16 @@ mod tests {
             ..Default::default()
         };
         globals.save();
-        let mut catalog = ProfilesFile {
+        let mut catalog = PresetsFile {
             version: 1,
-            profiles: vec![StreamProfile {
+            presets: vec![StreamPreset {
                 id: "aaaaaaaaaaaa".into(),
                 name: "Game".into(),
                 overrides: SettingsOverlay {
                     bitrate_kbps: Some(750_000),
                     ..Default::default()
                 },
-                ..StreamProfile::new("")
+                ..StreamPreset::new("")
             }],
         };
         catalog.save().unwrap();
@@ -174,7 +174,7 @@ mod tests {
                 port: 9777,
                 fp_hex: "a".repeat(64),
                 paired: true,
-                profile_id: Some("aaaaaaaaaaaa".into()),
+                preset_id: Some("aaaaaaaaaaaa".into()),
                 clipboard_sync: true,
                 ..Default::default()
             }],
@@ -189,16 +189,16 @@ mod tests {
             pair_optional: false,
             launch: None,
             mac: vec![],
-            profile: None,
+            preset: None,
         };
         let opts = SpawnOpts::default();
 
-        // A card click: globals, with the BOUND profile's overrides on top.
+        // A card click: globals, with the BOUND preset's overrides on top.
         let plan = plan_for(&req, &"a".repeat(64), false, &opts);
-        assert_eq!(plan.settings.bitrate_kbps, 750_000, "profile override");
+        assert_eq!(plan.settings.bitrate_kbps, 750_000, "preset override");
         assert_eq!((plan.settings.width, plan.settings.height), (2560, 1440));
         assert_eq!(plan.settings.codec, "av1");
-        assert_eq!(plan.profile.as_ref().map(|p| p.name.as_str()), Some("Game"));
+        assert_eq!(plan.preset.as_ref().map(|p| p.name.as_str()), Some("Game"));
         assert!(plan.clipboard, "the host's own opt-in");
         // …and the spec the child actually runs from is those same settings.
         assert_eq!(plan.spec(plan.clipboard).settings, plan.settings);
@@ -208,14 +208,14 @@ mod tests {
         // "Connect with ▸ Default settings" (`Some("")`) drops back to the globals, and the
         // flag still rides so the session agrees about which layer it is on.
         let defaults_req = ConnectRequest {
-            profile: Some(String::new()),
+            preset: Some(String::new()),
             ..req.clone()
         };
         let plan = plan_for(&defaults_req, &"a".repeat(64), false, &opts);
         assert_eq!(plan.settings.bitrate_kbps, 200_000, "back to the globals");
-        assert_eq!(plan.profile, None);
+        assert_eq!(plan.preset, None);
         let args = plan.session_args();
-        let i = args.iter().position(|a| a == "--profile").unwrap();
+        let i = args.iter().position(|a| a == "--preset").unwrap();
         assert_eq!(args[i + 1], "");
 
         let _ = std::fs::remove_dir_all(&home);

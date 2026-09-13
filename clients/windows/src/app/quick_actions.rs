@@ -7,11 +7,11 @@
 //! keyboard and a screen reader the same reach. Under it the shortcuts: a name, the four
 //! modifiers as toggles, the key on a keyboard-shaped grid or pressed on the real keyboard, Save
 //! and Remove. Every edit commits at once through the settings page's own
-//! [`super::settings::commit`], so a profile owns the whole ring the moment it touches it (D10).
+//! [`super::settings::commit`], so a preset owns the whole ring the moment it touches it (D10).
 //! The model — catalogue, geometry, chords, icons — is `pf_client_core`'s.
 
 use super::lucide;
-use super::settings::{active_profile, commit};
+use super::settings::{active_preset, commit};
 use super::style::*;
 use super::AppCtx;
 use pf_client_core::overlay_actions::{
@@ -171,10 +171,10 @@ struct Ui {
     reset_armed: bool,
 }
 
-/// The scope's effective ring: the globals with the profile's overrides on top.
+/// The scope's effective ring: the globals with the preset's overrides on top.
 fn current(props: &Props) -> OverlayConfig {
     let base = props.ctx.settings.lock().unwrap().clone();
-    let effective = match active_profile(&props.scope) {
+    let effective = match active_preset(&props.scope) {
         Some(p) => p.overrides.apply(&base),
         None => base,
     };

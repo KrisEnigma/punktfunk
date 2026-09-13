@@ -107,7 +107,7 @@
             <!-- punktfunk:// deep links (design/client-deep-links.md §2): an external tool, an OS
                  shortcut or a wiki page opens a stream on a host this device already trusts. The
                  URL carries only REFERENCES to things that exist here (a host record, a settings
-                 profile, a library id) — never resolution/bitrate/codec values, and never a
+                 preset, a library id) — never resolution/bitrate/codec values, and never a
                  pairing route; MainActivity's router enforces the rest. BROWSABLE is what lets a
                  browser hand it over (behind its own "Open Punktfunk?" prompt).
                  NOTE: launchMode deliberately stays `standard` and the configChanges set above is

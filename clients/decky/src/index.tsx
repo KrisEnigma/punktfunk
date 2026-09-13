@@ -157,16 +157,16 @@ const HostRow: FC<{ host: HostView; refresh: () => void }> = ({ host, refresh })
         </ButtonItem>
       </PanelSectionRow>
       {/* Pinned cards, nested under their host rather than in a section of their own: a card
-          IS a (host, profile) pair, and a row that floats free of its host is the "a pinned
+          IS a (host, preset) pair, and a row that floats free of its host is the "a pinned
           tile reads as a duplicate host" problem the desktop shells still have. The host's
-          own BOUND profile is deliberately not a card — it applies silently on the plain row
+          own BOUND preset is deliberately not a card — it applies silently on the plain row
           above, and showing it twice would suggest they do different things. */}
       {!gated &&
-        host.pinnedProfiles.map((p) => (
+        host.pinnedPresets.map((p) => (
           <PanelSectionRow key={`${host.ref}:${p.id}`}>
             <ButtonItem
               layout="below"
-              onClick={() => void startStream(host, { profileId: p.id }, `“${p.name}”`)}
+              onClick={() => void startStream(host, { presetId: p.id }, `“${p.name}”`)}
               label={`▸ ${p.name}`}
             >
               <FaPlay style={{ marginRight: "0.5em" }} />

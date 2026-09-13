@@ -263,7 +263,7 @@ pub struct StatsSnapshot {
     pub asked_444: bool,
     /// Decode path or decoder name. Empty until the first frame decodes.
     pub decoder: String,
-    pub profile: Option<String>,
+    pub preset: Option<String>,
     /// AUs received, and their payload bytes (goodput: no FEC, no headers).
     pub received: u32,
     pub bytes: u64,
@@ -988,7 +988,7 @@ fn advanced_lines(s: &StatsSnapshot, tier: StatsVerbosity) -> Vec<HudLine> {
         if s.lost > 0 {
             f.push(format!("lost {:.1}%", s.lost_pct()));
         }
-        f.extend(s.profile.clone());
+        f.extend(s.preset.clone());
         out.push(line(Role::Primary, f));
         return out;
     }
@@ -998,7 +998,7 @@ fn advanced_lines(s: &StatsSnapshot, tier: StatsVerbosity) -> Vec<HudLine> {
         l1.extend(target(s));
         media_fields(s, &mut l1);
     }
-    l1.extend(s.profile.clone());
+    l1.extend(s.preset.clone());
     out.push(line(Role::Primary, l1));
     if let Some((p50, p95, ep)) = head {
         out.push(text(
@@ -1108,13 +1108,13 @@ fn standard_lines(s: &StatsSnapshot, tier: StatsVerbosity) -> Vec<HudLine> {
         if s.lost > 0 {
             f.push(format!("lost {:.1}%", s.lost_pct()));
         }
-        f.extend(s.profile.clone());
+        f.extend(s.preset.clone());
         out.push(line(Role::Primary, f));
         return out;
     }
     let mut l1 = vec![mode(s)];
     media_fields(s, &mut l1);
-    l1.extend(s.profile.clone());
+    l1.extend(s.preset.clone());
     out.push(line(Role::Primary, l1));
 
     let mut rates = vec![format!("received {}", fps(s.received_fps()))];
@@ -1426,9 +1426,9 @@ mod tests {
     }
 
     #[test]
-    fn the_profile_closes_the_first_line_at_every_tier() {
+    fn the_preset_closes_the_first_line_at_every_tier() {
         let mut s = desktop();
-        s.profile = Some("Work".into());
+        s.preset = Some("Work".into());
         for adv in [false, true] {
             for tier in [
                 StatsVerbosity::Compact,
@@ -1441,7 +1441,7 @@ mod tests {
                 );
             }
         }
-        s.profile = None;
+        s.preset = None;
         assert!(!all(&s, StatsVerbosity::Normal, true).contains(" ·  "));
     }
 
@@ -1615,7 +1615,7 @@ mod tests {
         a.audio_lossless = true;
         a.audio_rate_hz = 48_000;
         a.audio_bits = 24;
-        a.profile = Some("Game".into());
+        a.preset = Some("Game".into());
         shapes.push(a);
         let mut received_only = desktop();
         received_only.e2e = Summary::default();

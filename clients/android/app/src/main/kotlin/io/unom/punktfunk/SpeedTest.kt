@@ -21,31 +21,31 @@ import kotlinx.coroutines.withContext
  * known *before* the result lands, so the button can say where it will write.
  */
 sealed interface SpeedTestTarget {
-    /** No profile in play — the global default, i.e. what has always happened. */
+    /** No preset in play — the global default, i.e. what has always happened. */
     data object Global : SpeedTestTarget
 
-    /** The profile this host uses already overrides bitrate, so that override is what it reads. */
-    data class Profile(val profile: StreamProfile) : SpeedTestTarget
+    /** The preset this host uses already overrides bitrate, so that override is what it reads. */
+    data class Preset(val preset: StreamPreset) : SpeedTestTarget
 
     /**
-     * The host uses a profile, but that profile inherits bitrate. Writing either layer is
+     * The host uses a preset, but that preset inherits bitrate. Writing either layer is
      * defensible, so the user gets both buttons rather than us guessing which they meant.
      */
-    data class Ask(val profile: StreamProfile) : SpeedTestTarget
+    data class Ask(val preset: StreamPreset) : SpeedTestTarget
 
     companion object {
         /**
-         * Resolved exactly the way a connect resolves it (see [ProfileStore.resolveFor]): the
+         * Resolved exactly the way a connect resolves it (see [PresetStore.resolveFor]): the
          * one-off pick this test was started from — a pinned card carries one — else the host's
-         * binding. A dangling binding resolves as no profile here too.
+         * binding. A dangling binding resolves as no preset here too.
          */
         fun resolve(
             host: KnownHost?,
-            oneOffProfile: String?,
-            profiles: ProfileStore,
+            oneOffPreset: String?,
+            presets: PresetStore,
         ): SpeedTestTarget {
-            val profile = profiles.resolveFor(host, oneOffProfile) ?: return Global
-            return if (profile.overrides.bitrateKbps != null) Profile(profile) else Ask(profile)
+            val preset = presets.resolveFor(host, oneOffPreset) ?: return Global
+            return if (preset.overrides.bitrateKbps != null) Preset(preset) else Ask(preset)
         }
     }
 }
@@ -146,32 +146,32 @@ suspend fun runSpeedTest(
 }
 
 /**
- * Write a measured bitrate into the layer [target] names. [toProfile] picks the side of a
+ * Write a measured bitrate into the layer [target] names. [toPreset] picks the side of a
  * [SpeedTestTarget.Ask]; it is ignored for the other targets, which have only one answer. Returns
  * a human phrase naming where it went, for the confirmation.
  */
 fun applySpeedTestResult(
     kbps: Int,
     target: SpeedTestTarget,
-    toProfile: Boolean,
-    profiles: ProfileStore,
+    toPreset: Boolean,
+    presets: PresetStore,
     settings: Settings,
     onGlobalChange: (Settings) -> Unit,
 ): String {
-    val profile = when (target) {
-        is SpeedTestTarget.Profile -> target.profile
-        is SpeedTestTarget.Ask -> target.profile.takeIf { toProfile }
+    val preset = when (target) {
+        is SpeedTestTarget.Preset -> target.preset
+        is SpeedTestTarget.Ask -> target.preset.takeIf { toPreset }
         SpeedTestTarget.Global -> null
     }
-    return if (profile == null) {
+    return if (preset == null) {
         onGlobalChange(settings.copy(bitrateKbps = kbps))
         "the default bitrate"
     } else {
-        // Only the bitrate moves — a speed test has nothing to say about the rest of the profile.
+        // Only the bitrate moves — a speed test has nothing to say about the rest of the preset.
         // Re-read rather than trusting the copy this dialog was opened with, so a rename or another
         // edit in between isn't clobbered.
-        val live = profiles.byId(profile.id) ?: profile
-        profiles.save(live.copy(overrides = live.overrides.copy(bitrateKbps = kbps)))
+        val live = presets.byId(preset.id) ?: preset
+        presets.save(live.copy(overrides = live.overrides.copy(bitrateKbps = kbps)))
         "“${live.name}”"
     }
 }
