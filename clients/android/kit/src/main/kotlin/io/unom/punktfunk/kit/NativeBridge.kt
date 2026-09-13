@@ -289,7 +289,7 @@ object NativeBridge {
      * Close ~1 s of the stats overlay window and return it formatted for [tier] (0 Off, 1 Compact,
      * 2 Normal, 3 Detailed) in the Advanced vocabulary when [advanced]: one `<role>\t<text>` per
      * line, or `null` when no decode thread runs. [panelHz] is the rate this app may render at and
-     * [panelModeHz] the panel's active mode (0 = unknown); [profile] closes the first line. Poll
+     * [panelModeHz] the panel's active mode (0 = unknown); [preset] closes the first line. Poll
      * ~1 Hz; each call closes the window.
      */
     external fun nativeVideoStatsLines(
@@ -298,7 +298,7 @@ object NativeBridge {
         advanced: Boolean,
         panelHz: Float,
         panelModeHz: Float,
-        profile: String?,
+        preset: String?,
     ): String?
 
     /**
@@ -635,7 +635,7 @@ object NativeBridge {
 
     /**
      * Build the console: [optionsJson] = `{device_name, gpu_cache_bytes, settings: <trust::Settings>,
-     * profiles: [[id, name]], known_hosts: <KnownHosts>, entry: {} | {"library": <HostRow>}}`.
+     * presets: [[id, name]], known_hosts: <KnownHosts>, entry: {} | {"library": <HostRow>}}`.
      * Returns a handle (its render thread parked until a surface arrives), or `0` on a bad options
      * document. EGL/Skia failures arrive later as a `{"dead": …}` event.
      */
@@ -759,8 +759,8 @@ object NativeBridge {
     /** A settings change made elsewhere (touch UI, deep link): the shell reads it next. Not a save. */
     external fun nativeConsoleSetSettings(handle: Long, json: String)
 
-    /** The profile catalog `[[id, name]]`. */
-    external fun nativeConsoleSetProfiles(handle: Long, json: String)
+    /** The preset catalog `[[id, name]]`. */
+    external fun nativeConsoleSetPresets(handle: Long, json: String)
 
     /** The known-hosts records (`KnownHosts` JSON) the console builds `punktfunk://` links from. */
     external fun nativeConsoleSetKnownHosts(handle: Long, json: String)

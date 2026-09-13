@@ -19,7 +19,7 @@ import org.robolectric.annotation.Config
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [36])
 class SpeedTestTest {
-    private val store get() = ProfileStore(RuntimeEnvironment.getApplication())
+    private val store get() = PresetStore(RuntimeEnvironment.getApplication())
     private fun host() = KnownHost("192.168.1.42", 9777, "Desk", "a".repeat(64), paired = true)
 
     @Test
@@ -29,44 +29,44 @@ class SpeedTestTest {
     }
 
     @Test
-    fun aProfileThatSetsBitrateIsTheLayerThatHostReads() {
+    fun aPresetThatSetsBitrateIsTheLayerThatHostReads() {
         val s = store
-        val game = newProfile("Game").copy(overrides = SettingsOverlay(bitrateKbps = 50_000))
+        val game = newPreset("Game").copy(overrides = SettingsOverlay(bitrateKbps = 50_000))
         s.save(game)
-        val target = SpeedTestTarget.resolve(host().copy(profileId = game.id), null, s)
-        assertEquals(game.id, (target as SpeedTestTarget.Profile).profile.id)
+        val target = SpeedTestTarget.resolve(host().copy(presetId = game.id), null, s)
+        assertEquals(game.id, (target as SpeedTestTarget.Preset).preset.id)
     }
 
     @Test
-    fun aProfileThatInheritsBitrateAsksWhichLayer() {
+    fun aPresetThatInheritsBitrateAsksWhichLayer() {
         val s = store
-        val work = newProfile("Work") // overrides nothing
+        val work = newPreset("Work") // overrides nothing
         s.save(work)
-        val target = SpeedTestTarget.resolve(host().copy(profileId = work.id), null, s)
+        val target = SpeedTestTarget.resolve(host().copy(presetId = work.id), null, s)
         // Both layers are defensible here, so the user picks — we don't guess.
-        assertEquals(work.id, (target as SpeedTestTarget.Ask).profile.id)
+        assertEquals(work.id, (target as SpeedTestTarget.Ask).preset.id)
     }
 
     @Test
     fun theOneOffPickWinsAndTheEmptyOneForcesTheDefaults() {
         val s = store
-        val game = newProfile("Game").copy(overrides = SettingsOverlay(bitrateKbps = 50_000))
-        val work = newProfile("Work")
+        val game = newPreset("Game").copy(overrides = SettingsOverlay(bitrateKbps = 50_000))
+        val work = newPreset("Work")
         listOf(game, work).forEach(s::save)
-        val bound = host().copy(profileId = work.id)
+        val bound = host().copy(presetId = work.id)
 
-        // Testing from a pinned card measures — and writes — that card's profile.
-        assertEquals(game.id, (SpeedTestTarget.resolve(bound, game.id, s) as SpeedTestTarget.Profile).profile.id)
+        // Testing from a pinned card measures — and writes — that card's preset.
+        assertEquals(game.id, (SpeedTestTarget.resolve(bound, game.id, s) as SpeedTestTarget.Preset).preset.id)
         // "Connect with: Default settings" is a real choice, so its speed test targets the global.
         assertEquals(SpeedTestTarget.Global, SpeedTestTarget.resolve(bound, "", s))
-        // A dangling binding resolves as no profile everywhere else; here too.
-        assertEquals(SpeedTestTarget.Global, SpeedTestTarget.resolve(host().copy(profileId = "gone"), null, s))
+        // A dangling binding resolves as no preset everywhere else; here too.
+        assertEquals(SpeedTestTarget.Global, SpeedTestTarget.resolve(host().copy(presetId = "gone"), null, s))
     }
 
     @Test
     fun applyingWritesOnlyTheBitrate_andOnlyToTheChosenLayer() {
         val s = store
-        val game = newProfile("Game").copy(
+        val game = newPreset("Game").copy(
             overrides = SettingsOverlay(bitrateKbps = 50_000, width = 3840, height = 2160),
         )
         s.save(game)
@@ -75,14 +75,14 @@ class SpeedTestTest {
 
         val where = applySpeedTestResult(
             kbps = 84_000,
-            target = SpeedTestTarget.Profile(game),
-            toProfile = true,
-            profiles = s,
+            target = SpeedTestTarget.Preset(game),
+            toPreset = true,
+            presets = s,
             settings = globals,
             onGlobalChange = { savedGlobals = it },
         )
         assertEquals("“Game”", where)
-        assertNull("the global must not move when a profile was the target", savedGlobals)
+        assertNull("the global must not move when a preset was the target", savedGlobals)
         val after = s.byId(game.id)!!.overrides
         assertEquals(84_000, after.bitrateKbps)
         // Nothing else in the overlay is a speed test's business.
@@ -93,27 +93,27 @@ class SpeedTestTest {
     @Test
     fun theAskCaseHonoursWhichButtonWasPressed() {
         val s = store
-        val work = newProfile("Work")
+        val work = newPreset("Work")
         s.save(work)
         val globals = Settings(bitrateKbps = 20_000)
         var savedGlobals: Settings? = null
 
-        // "Set as default" writes the global and leaves the profile inheriting.
+        // "Set as default" writes the global and leaves the preset inheriting.
         val whereGlobal = applySpeedTestResult(
-            42_000, SpeedTestTarget.Ask(work), toProfile = false, profiles = s,
+            42_000, SpeedTestTarget.Ask(work), toPreset = false, presets = s,
             settings = globals, onGlobalChange = { savedGlobals = it },
         )
         assertEquals("the default bitrate", whereGlobal)
         assertEquals(42_000, savedGlobals!!.bitrateKbps)
         assertNull(s.byId(work.id)!!.overrides.bitrateKbps)
 
-        // "Set in Work" records the override instead — and now that profile stops inheriting.
+        // "Set in Work" records the override instead — and now that preset stops inheriting.
         savedGlobals = null
-        val whereProfile = applySpeedTestResult(
-            42_000, SpeedTestTarget.Ask(work), toProfile = true, profiles = s,
+        val wherePreset = applySpeedTestResult(
+            42_000, SpeedTestTarget.Ask(work), toPreset = true, presets = s,
             settings = globals, onGlobalChange = { savedGlobals = it },
         )
-        assertEquals("“Work”", whereProfile)
+        assertEquals("“Work”", wherePreset)
         assertNull(savedGlobals)
         assertEquals(42_000, s.byId(work.id)!!.overrides.bitrateKbps)
     }

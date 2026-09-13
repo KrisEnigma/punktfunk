@@ -197,5 +197,5 @@ Client: one toggle, in Settings under **Quality** with
 [the rest of the video settings](/docs/client-settings#video) — **10-bit HDR** on the Linux, macOS,
 iOS, iPadOS and tvOS apps, **HDR (10-bit, BT.2020 PQ)** on Windows, **HDR** on Android. It is **on
 by default** on all of them. Off means "never send me 10-bit", and the host then never upgrades the
-session. Like the other video settings it can be set per [profile](/docs/profiles-and-links), so a
-Work profile can prefer 4:4:4 while a Couch profile prefers HDR.
+session. Like the other video settings it can be set per [preset](/docs/presets-and-links), so a
+Work preset can prefer 4:4:4 while a Couch preset prefers HDR.

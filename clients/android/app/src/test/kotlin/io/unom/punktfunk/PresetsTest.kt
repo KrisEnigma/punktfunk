@@ -1,5 +1,6 @@
 package io.unom.punktfunk
 
+import android.content.Context
 import io.unom.punktfunk.kit.security.KnownHost
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -13,18 +14,18 @@ import org.robolectric.RuntimeEnvironment
 import org.robolectric.annotation.Config
 
 /**
- * The profile model — the part of this feature that is wrong-or-right rather than pretty-or-ugly.
- * A profile is a named bundle of OVERRIDES, not a snapshot: an untouched field keeps following the
+ * The preset model — the part of this feature that is wrong-or-right rather than pretty-or-ugly.
+ * A preset is a named bundle of OVERRIDES, not a snapshot: an untouched field keeps following the
  * global live, a touched one is recorded even when it equals today's global (a pin), and the only
  * way back to inheriting is an explicit reset. These tests are the Kotlin twin of the Rust
- * `profiles.rs` suite, so the two can't drift.
+ * `presets.rs` suite, so the two can't drift.
  *
  * `sdk = [36]` for the same reason the screenshot tests pin it: Robolectric ships android-all jars
  * only up to API 36 while the app compiles against 37.
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [36])
-class ProfilesTest {
+class PresetsTest {
     private val base = Settings(
         width = 1920,
         height = 1080,
@@ -77,7 +78,7 @@ class ProfilesTest {
         assertEquals(StatsVerbosity.DETAILED, out.statsVerbosity)
         assertFalse(out.lowLatencyMode)
 
-        // Device-scope settings are not in the overlay at all, so no profile can move them.
+        // Device-scope settings are not in the overlay at all, so no preset can move them.
         assertEquals(base.gamepadUiEnabled, out.gamepadUiEnabled)
         assertEquals(base.gamepadUiMode, out.gamepadUiMode)
         assertEquals(base.autoWakeEnabled, out.autoWakeEnabled)
@@ -127,8 +128,8 @@ class ProfilesTest {
 
     @Test
     fun catalogRoundTripsAndPreservesWhatItCannotRepresent() {
-        val store = ProfileStore(RuntimeEnvironment.getApplication())
-        val game = newProfile("Game").copy(
+        val store = PresetStore(RuntimeEnvironment.getApplication())
+        val game = newPreset("Game").copy(
             accent = "#ff8800",
             overrides = SettingsOverlay(
                 width = 3840,
@@ -139,10 +140,10 @@ class ProfilesTest {
                 codec = "vvc-from-the-future",
                 extra = mapOf("some_new_axis" to 7),
             ),
-            extra = mapOf("future_profile_key" to "kept"),
+            extra = mapOf("future_preset_key" to "kept"),
         )
         store.save(game)
-        store.save(newProfile("Work"))
+        store.save(newPreset("Work"))
 
         val loaded = store.byId(game.id)!!
         assertEquals("Game", loaded.name)
@@ -151,12 +152,29 @@ class ProfilesTest {
         assertEquals(3840, loaded.overrides.width)
         // The don't-clobber rule: an older build must not erase a newer one's keys by opening it.
         assertEquals(mapOf<String, Any>("some_new_axis" to 7), loaded.overrides.extra)
-        assertEquals(mapOf<String, Any>("future_profile_key" to "kept"), loaded.extra)
+        assertEquals(mapOf<String, Any>("future_preset_key" to "kept"), loaded.extra)
         assertEquals("vvc-from-the-future", loaded.overrides.apply(base).codec)
 
-        // A profile that overrides nothing is the "inherits everything" one a create starts at.
+        // A preset that overrides nothing is the "inherits everything" one a create starts at.
         assertTrue(store.all().first { it.name == "Work" }.overrides.isEmpty())
         assertEquals(listOf("Game", "Work"), store.all().map { it.name })
+    }
+
+    /**
+     * A catalog from before the rename moves over once. Deleting every preset afterwards does not
+     * bring the old ones back, and the old file stays as it was for an older build of this app.
+     */
+    @Test
+    fun aPreRenameCatalogMovesOverOnce() {
+        val app = RuntimeEnvironment.getApplication()
+        val legacy = app.getSharedPreferences("punktfunk_profiles", Context.MODE_PRIVATE)
+        val game = """{"id":"a1b2c3d4e5f6","name":"Game"}"""
+        legacy.edit().putString("a1b2c3d4e5f6", game).commit()
+        val store = PresetStore(app)
+        assertEquals(listOf("Game"), store.all().map { it.name })
+        store.delete("a1b2c3d4e5f6")
+        assertTrue(PresetStore(app).all().isEmpty())
+        assertEquals(setOf("a1b2c3d4e5f6"), legacy.all.keys)
     }
 
     /**
@@ -170,7 +188,7 @@ class ProfilesTest {
      */
     @Test
     fun everyModelledOverrideSurvivesAResetToInherited() {
-        val store = ProfileStore(RuntimeEnvironment.getApplication())
+        val store = PresetStore(RuntimeEnvironment.getApplication())
         val all = SettingsOverlay(
             width = 3840, height = 2160, hz = 120, bitrateKbps = 80_000, renderScale = 1.5,
             codec = "av1", hdrEnabled = false, tenBitSdr = true, compositor = 4,
@@ -181,7 +199,7 @@ class ProfilesTest {
             statsVerbosity = StatsVerbosity.DETAILED, lowLatencyMode = false,
             presentPriority = "smooth", smoothBuffer = 2,
         )
-        val p = newProfile("Everything").copy(overrides = all)
+        val p = newPreset("Everything").copy(overrides = all)
         store.save(p)
         val loaded = store.byId(p.id)!!.overrides
         assertEquals("a modelled key was carried through as an unknown one", emptyMap<String, Any>(), loaded.extra)
@@ -196,20 +214,20 @@ class ProfilesTest {
 
     @Test
     fun resolvePrefersIdsAndRefusesAmbiguity() {
-        val store = ProfileStore(RuntimeEnvironment.getApplication())
-        val work = newProfile("Work")
-        val work2 = newProfile("work") // saved directly: the UI's name guard is what prevents this
-        val game = newProfile("Game")
+        val store = PresetStore(RuntimeEnvironment.getApplication())
+        val work = newPreset("Work")
+        val work2 = newPreset("work") // saved directly: the UI's name guard is what prevents this
+        val game = newPreset("Game")
         listOf(work, work2, game).forEach(store::save)
 
-        assertEquals(ProfileResolution.FOUND, store.resolve(work.id).second)
+        assertEquals(PresetResolution.FOUND, store.resolve(work.id).second)
         assertEquals(work.id, store.resolve(work.id).first!!.id)
-        // Two profiles carry this name — refuse rather than pick whichever came first.
-        assertEquals(ProfileResolution.AMBIGUOUS, store.resolve("Work").second)
+        // Two presets carry this name — refuse rather than pick whichever came first.
+        assertEquals(PresetResolution.AMBIGUOUS, store.resolve("Work").second)
         assertNull(store.resolve("Work").first)
         assertEquals(game.id, store.resolve("GAME").first!!.id) // names match case-insensitively
-        assertEquals(ProfileResolution.NOT_FOUND, store.resolve("nope").second)
-        assertEquals(ProfileResolution.NOT_FOUND, store.resolve("").second)
+        assertEquals(PresetResolution.NOT_FOUND, store.resolve("nope").second)
+        assertEquals(PresetResolution.NOT_FOUND, store.resolve("").second)
 
         assertTrue(store.nameTaken("GAME"))
         assertFalse(store.nameTaken("GAME", except = game.id)) // renaming in place is allowed
@@ -217,12 +235,12 @@ class ProfilesTest {
     }
 
     @Test
-    fun profilePrecedenceIsOneOffThenBindingThenNone() {
-        val store = ProfileStore(RuntimeEnvironment.getApplication())
-        val work = newProfile("Work")
-        val game = newProfile("Game")
+    fun presetPrecedenceIsOneOffThenBindingThenNone() {
+        val store = PresetStore(RuntimeEnvironment.getApplication())
+        val work = newPreset("Work")
+        val game = newPreset("Game")
         listOf(work, game).forEach(store::save)
-        val bound = host().copy(profileId = work.id)
+        val bound = host().copy(presetId = work.id)
 
         // A plain tap follows the binding…
         assertEquals(work.id, store.resolveFor(bound, oneOff = null)!!.id)
@@ -240,11 +258,11 @@ class ProfilesTest {
     /** A title's own binding sits between the one-off and the host's default. */
     @Test
     fun aTitleBindingOutranksTheHostAndYieldsToAOneOff() {
-        val store = ProfileStore(RuntimeEnvironment.getApplication())
-        val work = newProfile("Work")
-        val game = newProfile("Game")
+        val store = PresetStore(RuntimeEnvironment.getApplication())
+        val work = newPreset("Work")
+        val game = newPreset("Game")
         listOf(work, game).forEach(store::save)
-        val h = host().copy(profileId = work.id, gameProfiles = mapOf("halo" to game.id))
+        val h = host().copy(presetId = work.id, gamePresets = mapOf("halo" to game.id))
 
         assertEquals(game.id, store.resolveFor(h, oneOff = null, launch = "halo")!!.id)
         // A title with no entry inherits the host's default; the desktop does too.
@@ -253,21 +271,21 @@ class ProfilesTest {
         // A one-off still wins, and "" still forces the globals.
         assertEquals(work.id, store.resolveFor(h, oneOff = work.id, launch = "halo")!!.id)
         assertNull(store.resolveFor(h, oneOff = "", launch = "halo"))
-        // Deleted title profile: the host's default stands, not the globals.
+        // Deleted title preset: the host's default stands, not the globals.
         store.delete(game.id)
         assertEquals(work.id, store.resolveFor(h, oneOff = null, launch = "halo")!!.id)
     }
 
     @Test
-    fun aDeletedProfileLeavesNoErrorBehind() {
-        val store = ProfileStore(RuntimeEnvironment.getApplication())
-        val work = newProfile("Work")
+    fun aDeletedPresetLeavesNoErrorBehind() {
+        val store = PresetStore(RuntimeEnvironment.getApplication())
+        val work = newPreset("Work")
         store.save(work)
-        val h = host().copy(profileId = work.id, pinnedProfileIds = listOf(work.id, work.id))
+        val h = host().copy(presetId = work.id, pinnedPresetIds = listOf(work.id, work.id))
         assertEquals(1, store.pinsFor(h).size) // a duplicate pin is one card, not two
 
         store.delete(work.id)
-        // A dangling binding resolves as "no profile" — never an error, never a blocked connect —
+        // A dangling binding resolves as "no preset" — never an error, never a blocked connect —
         // and its pinned card simply stops rendering.
         assertNull(store.resolveFor(h, oneOff = null))
         assertTrue(store.pinsFor(h).isEmpty())
@@ -275,20 +293,20 @@ class ProfilesTest {
     }
 
     /**
-     * A profile created from the UI gets a colour, and a distinct one — the accent is the WHOLE
-     * signal on a bound host card's chip and a pinned card's tint, so two profiles sharing it (or
+     * A preset created from the UI gets a colour, and a distinct one — the accent is the WHOLE
+     * signal on a bound host card's chip and a pinned card's tint, so two presets sharing it (or
      * having none) makes those surfaces say less than they look like they're saying.
      */
     @Test
     fun creationHandsOutADistinctColour() {
-        val made = mutableListOf<StreamProfile>()
-        repeat(PROFILE_ACCENTS.size) { made += newProfile("p$it", nextAccent(made)) }
-        assertEquals(PROFILE_ACCENTS, made.map { it.accent })
+        val made = mutableListOf<StreamPreset>()
+        repeat(PRESET_ACCENTS.size) { made += newPreset("p$it", nextAccent(made)) }
+        assertEquals(PRESET_ACCENTS, made.map { it.accent })
         // Past the palette it wraps rather than handing out nothing — a duplicate colour beats an
         // invisible chip, and the picker is right there.
-        assertEquals(PROFILE_ACCENTS.first(), nextAccent(made))
+        assertEquals(PRESET_ACCENTS.first(), nextAccent(made))
         // A gap is reused before wrapping.
-        assertEquals(PROFILE_ACCENTS[2], nextAccent(made.filter { it.accent != PROFILE_ACCENTS[2] }))
+        assertEquals(PRESET_ACCENTS[2], nextAccent(made.filter { it.accent != PRESET_ACCENTS[2] }))
         // The colour is presentation, so it never reaches the resolved settings.
         assertEquals(base, made.first().overrides.apply(base))
     }
@@ -374,9 +392,9 @@ class ProfilesTest {
 
     /**
      * The stored values are a CROSS-CLIENT contract, shared verbatim with the Apple client's
-     * `AudioFormatChoice` raw values and the desktop `AUDIO_FORMATS`. A profile carries the key
+     * `AudioFormatChoice` raw values and the desktop `AUDIO_FORMATS`. A preset carries the key
      * through untouched, so a rename here does not break a round trip loudly — it breaks it
-     * silently, by leaving the other client to fall back to its own global default on a profile
+     * silently, by leaving the other client to fall back to its own global default on a preset
      * that looks like it applied. Spelled out as literals rather than referenced through the
      * constants, because a test that reads the constant cannot detect the constant changing.
      *
@@ -414,10 +432,10 @@ class ProfilesTest {
 
     @Test
     fun mintedIdsAreWellFormed() {
-        val id = newProfileId()
+        val id = newPresetId()
         assertEquals(12, id.length)
         assertTrue(id.all { it.isDigit() || it in 'a'..'f' })
-        assertNotEquals(id, newProfileId())
+        assertNotEquals(id, newPresetId())
     }
 
     private fun host() = KnownHost("192.168.1.42", 9777, "Desk", "a".repeat(64), paired = true)

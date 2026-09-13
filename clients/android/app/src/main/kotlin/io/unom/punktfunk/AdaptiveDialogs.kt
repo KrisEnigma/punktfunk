@@ -278,7 +278,7 @@ fun SpeedTestPrompt(
     hostName: String,
     target: SpeedTestTarget,
     phase: SpeedTestPhase,
-    onApply: (toProfile: Boolean) -> Unit,
+    onApply: (toPreset: Boolean) -> Unit,
     onDismiss: () -> Unit,
 ) {
     val done = phase as? SpeedTestPhase.Done
@@ -293,8 +293,8 @@ fun SpeedTestPrompt(
                     DialogAction(
                         when (target) {
                             SpeedTestTarget.Global -> "Apply"
-                            is SpeedTestTarget.Profile -> "Apply to “${target.profile.name}”"
-                            is SpeedTestTarget.Ask -> "Set in “${target.profile.name}”"
+                            is SpeedTestTarget.Preset -> "Apply to “${target.preset.name}”"
+                            is SpeedTestTarget.Ask -> "Set in “${target.preset.name}”"
                         },
                         primary = true,
                     ) { onApply(true) },
@@ -338,11 +338,11 @@ fun SpeedTestPrompt(
 private fun speedTestTargetNote(target: SpeedTestTarget): String = when (target) {
     SpeedTestTarget.Global ->
         "This host uses the default settings, so the bitrate goes there."
-    is SpeedTestTarget.Profile ->
-        "This host streams with “${target.profile.name}”, which sets its own bitrate — " +
+    is SpeedTestTarget.Preset ->
+        "This host streams with “${target.preset.name}”, which sets its own bitrate — " +
             "that override is what it actually reads."
     is SpeedTestTarget.Ask ->
-        "This host streams with “${target.profile.name}”, which currently inherits the default " +
-            "bitrate. Setting it in the profile affects only this host's profile; setting it as " +
+        "This host streams with “${target.preset.name}”, which currently inherits the default " +
+            "bitrate. Setting it in the preset affects only this host's preset; setting it as " +
             "the default affects everything that inherits it."
 }

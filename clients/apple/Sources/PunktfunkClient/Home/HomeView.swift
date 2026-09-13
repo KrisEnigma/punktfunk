@@ -20,7 +20,7 @@ struct HomeView: View {
     @ObservedObject var discovery: HostDiscovery
     /// The preset catalog — the source of the card chips, the "Connect with ▸" menu, and the
     /// pinned host+preset cards the grid renders alongside their host (design §5.2a).
-    @ObservedObject private var profiles = PresetStore.shared
+    @ObservedObject private var presets = PresetStore.shared
     @Binding var showAddHost: Bool
     @Binding var pairingTarget: StoredHost?
     @Binding var speedTestTarget: StoredHost?
@@ -46,8 +46,19 @@ struct HomeView: View {
     /// "Browse Library…" action.
     /// The host being edited (name / address / port / Wake-on-LAN MAC) — drives the edit sheet.
     @State private var editTarget: StoredHost?
+    #if os(macOS)
+    @Environment(\.openWindow) private var openWindow
+    #else
     /// The host whose page is pushed.
     @State private var detailTarget: StoredHost.ID?
+    #endif
+    #if os(iOS)
+    @Environment(\.horizontalSizeClass) private var sizeClass
+    /// The host whose page is up as the iPad's sheet of sections.
+    @State private var sectionsHost: StoredHost?
+    /// An act that sheet handed back, run once the sheet is gone.
+    @State private var pendingHandOff: HostPageRequest?
+    #endif
     /// The start-screen pointer; the default host's card carries the accent bar.
     @AppStorage(DefaultsKey.defaultHost) private var defaultHostID = ""
     /// The outcome of the last "Send Logs to Host" — drives its alert.
@@ -164,11 +175,21 @@ struct HomeView: View {
                     try? await Task.sleep(for: .seconds(10))
                 }
             }
-            // The host page, from a card's ⓘ or its menu (design §2.4).
+            // The host page, from a card's ⓘ or its menu (design §2.4), and the speed test pushed
+            // from it. The Mac opens both in the host's own window (`MacHostWindow`).
+            #if !os(macOS)
             .navigationDestination(item: $detailTarget) { id in
                 HostDetailView(
                     store: store, hostID: id, actions: { hostActions(for: $0, pinned: nil) })
             }
+            .navigationDestination(item: $speedTestTarget) { host in
+                SpeedTestView(host: host)
+                    .navigationTitle("Speed Test")
+                    #if os(iOS)
+                    .navigationBarTitleDisplayMode(.inline)
+                    #endif
+            }
+            #endif
             #if os(tvOS)
             // Pushed routes — the Settings-app navigation feel (push animation, Menu
             // pops) instead of modal overlays.
@@ -180,9 +201,6 @@ struct HomeView: View {
             }
             .navigationDestination(item: $pairingTarget) { host in
                 PairSheet(host: host) { fingerprint in onPaired(host, fingerprint) }
-            }
-            .navigationDestination(item: $speedTestTarget) { host in
-                SpeedTestSheet(host: host)
             }
             .navigationDestination(item: $editTarget) { host in
                 AddHostSheet(
@@ -305,6 +323,14 @@ struct HomeView: View {
             SettingsView()
                 .settingsSheetSizing()
         }
+        // The iPad's host page, laid out like the Mac's host window.
+        .sheet(item: $sectionsHost, onDismiss: runHandOff) { host in
+            HostSectionsView(hostID: host.id, store: store) { request in
+                pendingHandOff = request
+                sectionsHost = nil
+            }
+            .settingsSheetSizing()
+        }
         #endif
         #endif
     }
@@ -316,7 +342,7 @@ struct HomeView: View {
     /// binding (`HostArrangement`).
     private var hostGroups: [HostGroup] {
         HostArrangement.groups(
-            hosts: store.hosts, catalog: profiles.catalog,
+            hosts: store.hosts, catalog: presets.catalog,
             online: Set(store.hosts.filter(isOnline).map(\.id)),
             sort: HostSort(rawValue: sortRaw) ?? .added,
             grouping: HostGrouping(rawValue: groupingRaw) ?? .none)
@@ -357,34 +383,49 @@ struct HomeView: View {
             nowPlaying: nowPlaying.title(for: host))
     }
 
-    /// Everything a card and the host page can do for `host`. A pinned card connects and browses
-    /// with ITS preset and carries no host acts: it is a shortcut, not a second host.
+    /// Everything a card and the host page can do for `host`, run on this grid's sheets.
     private func hostActions(for host: StoredHost, pinned: StreamPreset?) -> HostActions {
-        let selection: PresetSelection = pinned.map { .preset($0.id) } ?? .inherit
-        // Library, speed test and logs dial with the pinned identity, and an unpinned host would
-        // accept any certificate. So they wait for a pairing.
-        let paired = host.pinnedSHA256 != nil
-        let wakeable = pinned == nil && !isOnline(host) && !host.wakeMacs.isEmpty
-            && PunktfunkConnection.wakeOnLANAvailable
-        return HostActions(
-            connect: { connect(host, selection) },
-            pair: { if !model.isBusy { pairingTarget = host } },
-            edit: { editTarget = host },
-            forget: { store.forgetIdentity(host) },
-            remove: { store.remove(host) },
-            browseLibrary: paired
-                ? { libraryTarget = LibraryTarget(host: host, profile: selection) } : nil,
-            speedTest: paired ? { if !model.isBusy { speedTestTarget = host } } : nil,
-            sendLogs: paired ? { Task { sendLogsResult = await SendLogs.toHost(host) } } : nil,
-            wake: wakeable ? { wake(host) } : nil,
-            copyLink: LinkClipboard.isAvailable
-                ? { LinkClipboard.copy(DeepLink.forHost(host, preset: pinned?.id).urlString) }
-                : nil,
-            showDetails: pinned == nil ? { detailTarget = host.id } : nil,
-            power: pinned == nil ? hostPower.actions(for: host) : [],
-            runPower: { action in hostAction(action, on: host) },
-            presets: presetMenu(for: host))
+        HostActions(
+            host: host, pinned: pinned, online: isOnline(host), store: store,
+            presets: presets.presets, power: hostPower.actions(for: host),
+            surface: HostActionSurface(
+                connect: { connect(host, $0) },
+                pair: { if !model.isBusy { pairingTarget = host } },
+                edit: { editTarget = host },
+                browse: { libraryTarget = LibraryTarget(host: host, preset: $0) },
+                speedTest: { if !model.isBusy { speedTestTarget = host } },
+                sendLogs: { Task { sendLogsResult = await SendLogs.toHost(host) } },
+                wake: { wake(host) },
+                showDetails: { showDetails(host) },
+                runPower: { hostAction($0, on: host) }))
     }
+
+    /// The host page: its own window on the Mac, a sheet of sections on the iPad, pushed on the
+    /// iPhone and Apple TV.
+    private func showDetails(_ host: StoredHost) {
+        #if os(macOS)
+        openWindow(id: MacHostWindow.sceneID, value: host.id)
+        #elseif os(iOS)
+        if sizeClass == .regular { sectionsHost = host } else { detailTarget = host.id }
+        #else
+        detailTarget = host.id
+        #endif
+    }
+
+    #if os(iOS)
+    /// The iPad's host sheet closed on an act that belongs to the grid: run it now it is gone.
+    private func runHandOff() {
+        guard let request = pendingHandOff else { return }
+        pendingHandOff = nil
+        guard let host = store.hosts.first(where: { $0.id == request.hostID }) else { return }
+        switch request {
+        case .connect(_, let selection): connect(host, selection)
+        case .browse: libraryTarget = LibraryTarget(host: host)
+        case .wake: wake(host)
+        case .pair: if !model.isBusy { pairingTarget = host }
+        }
+    }
+    #endif
 
     /// A host action picked from a card's menu: explain an unavailable one, confirm a
     /// destructive one, run the rest.
@@ -404,20 +445,6 @@ struct HomeView: View {
 
     private func runHostAction(_ action: HostAction, on host: StoredHost) {
         Task { hostActionResult = await hostPower.invoke(action, on: host) }
-    }
-
-    /// The preset affordances every host card carries (§5.2/§5.2a).
-    private func presetMenu(for host: StoredHost) -> HostPresetMenu {
-        HostPresetMenu(
-            profiles: profiles.profiles,
-            boundID: host.profileID,
-            pinnedIDs: host.pinnedProfileIDs ?? [],
-            connectWith: { selection in connect(host, selection) },
-            setDefault: { store.setPreset(host.id, profileID: $0) },
-            togglePin: { id in
-                let pinned = (host.pinnedProfileIDs ?? []).contains(id)
-                store.setPinned(host.id, profileID: id, pinned: !pinned)
-            })
     }
 
     private var discoveredSection: some View {
@@ -544,14 +571,12 @@ struct HomeView: View {
     }
     #endif
 
-    /// macOS caps card width (a huge window shouldn't yield huge cards); on iOS the columns FILL
-    /// the width so the cards stay edge-aligned with the title and bars — sized touch-first: one
-    /// column on iPhone portrait, 3–4 generous cards on iPad.
+    /// The columns fill the width everywhere, so no window width leaves a gutter beside the cards:
+    /// adaptive packs as many as fit and widens them to close the gap, which keeps a card under
+    /// twice the minimum. Touch-first on iOS: one column on iPhone portrait, 3–4 on iPad.
     private var gridColumns: [GridItem] {
-        // Wider than before: the monogram card is a horizontal module (tile + address line), so
-        // it needs room for a monospaced "IP:port" without truncating.
         #if os(macOS)
-        [GridItem(.adaptive(minimum: 250, maximum: 320), spacing: 16)]
+        [GridItem(.adaptive(minimum: 250), spacing: 16)]
         #elseif os(tvOS)
         // Tracks CardMetrics' 10-foot sizes — at the 30pt name a 320pt column truncates
         // every hostname longer than ~10 characters.

@@ -63,8 +63,7 @@ pub struct HostRow {
     /// `None` = this row is the primary tile.
     pub pin: Option<PresetChip>,
     /// Default preset (`KnownHost::preset_id`). Always `None` on a pinned row — that
-    /// preset is `pin`. Pre-rename key: Android's bridge (`ConsoleJson.kt`) sends it.
-    #[serde(rename = "bound_profile")]
+    /// preset is `pin`.
     pub bound_preset: Option<PresetChip>,
     /// What this host has up right now (`GET /api/v1/status`), as a title to show.
     /// Empty = nothing running, unpaired, unreachable, or a host too old to ask —
@@ -78,7 +77,7 @@ pub struct HostRow {
     /// Library title id → preset id (`KnownHost::game_presets`), for the bind screen's
     /// checkmark. Ids, not chips: the shell only compares them, and a title's binding
     /// outranks `bound_preset` at launch, which the host resolves.
-    #[serde(default, rename = "game_profiles")]
+    #[serde(default)]
     pub game_presets: BTreeMap<String, String>,
 }
 
@@ -314,8 +313,6 @@ pub enum ConsoleCmd {
     /// or the preset. Idempotent.
     SetPin {
         key: String,
-        /// Pre-rename key: Android's bridge (`SkiaConsole.kt`) reads it.
-        #[serde(rename = "profile_id")]
         preset_id: String,
         pin: bool,
     },
@@ -323,12 +320,10 @@ pub enum ConsoleCmd {
     /// (`KnownHost::game_presets`); `None` binds the host's own default
     /// (`KnownHost::preset_id`). [`Self::SetPin`] is presentation; this is the
     /// binding. `preset_id: None` clears. Idempotent.
-    #[serde(rename = "BindProfile")]
     BindPreset {
         key: String,
         #[serde(default)]
         game: Option<String>,
-        #[serde(rename = "profile_id")]
         preset_id: Option<String>,
     },
     /// Per-host clipboard share while streaming (`KnownHost::clipboard_sync`).

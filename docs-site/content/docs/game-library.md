@@ -142,11 +142,15 @@ runs what it already knows about the title, so a client can never hand the host 
 Every library leads with a **Desktop** tile that streams the host itself and launches nothing — so
 a host with no plugins installed is still one press from its desk, and getting there is not a trip
 back through the host's menu. It reads **Resume <title>** when the host already has a game up,
-which is also the only way back into one the host started on its own.
+which is also the only way back into one the host started on its own. On the Apple app's Library the
+**Desktops** section holds one per paired host.
 
 - **Native clients** — a **paired** host's card offers **Browse library…** (**Browse Library…** on
   Apple) with nothing to switch on first; pairing is the only condition, on every client. Pick a
-  title and the stream starts with the host launching it.
+  title and the stream starts with the host launching it. On iPhone and iPad the library is its own
+  **Library** tab, and on the Mac the **Library** row in the window's sidebar, where the title menu
+  picks the host. There a long press or right-click on a title offers **Play** (or **Resume**),
+  **Favorites**, **Details…** and **Copy Link**.
 - **Android** — the library lives only in the controller-optimized home, which a TV always uses and a
   phone or tablet switches to when a controller is connected. Press **Y** on a saved host, or press
   **up** for its options and choose **Library** — the route a TV remote takes, having no **Y** to
@@ -160,7 +164,7 @@ which is also the only way back into one the host started on its own.
   Moonlight's app list beside `Desktop`, with covers served by the host. A title keeps the same app id
   across host restarts, so Moonlight's cached tiles stay correct. Titles with no launch recipe are
   left out.
-- **A link** — a [`punktfunk://` link](/docs/profiles-and-links) carries the id in a `launch=`
+- **A link** — a [`punktfunk://` link](/docs/presets-and-links) carries the id in a `launch=`
   parameter, so a desktop shortcut, a browser bookmark or a home-automation rule starts the stream
   with the title already launching: `punktfunk://connect/couch-pc?launch=steam:570`. On the Apple
   apps, `punktfunk://browse/couch-pc` opens the library itself instead — that route backs their
@@ -196,6 +200,10 @@ Every launch stamps the title with a last-played time and adds one to its launch
 launched game is seen running, its play time grows, and the same clock keeps the most recent run
 on its own. Clients get the four numbers on each library entry; a title never launched from
 Punktfunk carries none.
+
+The Apple app sorts by them, **Recent** and **Most played**, names the number under each poster in
+those sorts, keeps a **Recently Played** row on its Library, and shows all of it on a title's
+**Details…**.
 
 Play time is time the host can see the game: from the game running to its exit, while a session
 is attached to it. A game kept running after its session ends is not counted until a client comes

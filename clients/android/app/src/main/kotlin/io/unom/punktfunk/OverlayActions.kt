@@ -11,7 +11,7 @@ import org.json.JSONObject
  *
  * Parsing never fails: fewer than six slots pad with empty, more are truncated, an unknown id or a
  * dangling `shortcut:` reference is an empty slot, an absent field takes its default, and an
- * unparseable blob is the platform default — profiles sync between client versions.
+ * unparseable blob is the platform default — presets sync between client versions.
  */
 
 /** What a ring slot does. [Host] carries a host-advertised action id; [Shortcut] refers into
