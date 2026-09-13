@@ -595,7 +595,7 @@ final class SharedFoundationTests: XCTestCase {
         XCTAssertEqual(bound.presetName, "Game")
         // The chip colour rides along, so the HUD can name the session in the same colour the
         // card that launched it wore.
-        XCTAssertEqual(bound.profileAccent, "#ff8800")
+        XCTAssertEqual(bound.presetAccent, "#ff8800")
 
         // A one-off pick wins over the binding — and does not rebind anything.
         let oneOff = EffectiveSettings.resolve(
