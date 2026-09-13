@@ -138,6 +138,23 @@ enum ShotScenes {
             },
         ]
         #endif
+        #if os(macOS)
+        // The Mac's host window, as a card's ⓘ opens it, and one of its other sections.
+        scenes += [
+            ShotScene(name: "16b-host-window", orientation: .natural, colorScheme: .dark) {
+                AnyView(MacHostWindow(hostID: ShotMock.battlestationID, store: ShotMock.pageStore))
+            },
+            ShotScene(name: "16e-host-window-presets", orientation: .natural, colorScheme: .dark) {
+                AnyView(MacHostWindow(
+                    hostID: ShotMock.battlestationID, store: ShotMock.pageStore, section: .presets))
+            },
+            ShotScene(name: "16c-host-window-connection", orientation: .natural, colorScheme: .dark) {
+                AnyView(MacHostWindow(
+                    hostID: ShotMock.battlestationID, store: ShotMock.pageStore,
+                    section: .connection))
+            },
+        ]
+        #endif
         #if os(iOS)
         // The Library tab with every section filled: Desktops, Recently Played, Favorites,
         // Launchers and Games.

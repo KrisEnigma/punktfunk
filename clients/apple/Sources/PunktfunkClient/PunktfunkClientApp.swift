@@ -11,6 +11,9 @@ import SwiftUI
 
 @main
 struct PunktfunkClientApp: App {
+    /// The main window's scene, for a host window that finds none open.
+    static let mainSceneID = "main"
+
     #if os(macOS)
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     #elseif os(iOS)
@@ -28,7 +31,7 @@ struct PunktfunkClientApp: App {
     }
 
     var body: some Scene {
-        WindowGroup("Punktfunk") {
+        WindowGroup("Punktfunk", id: Self.mainSceneID) {
             // Pin the whole app's tint to the brand purple explicitly — the asset-catalog accent
             // resolution is environment/timing-sensitive and can fall back to system blue. Wraps the
             // screenshot harness too, so captured screens are on-brand.
@@ -75,6 +78,14 @@ struct PunktfunkClientApp: App {
         .commands { StreamCommands() }
         #endif
         #if os(macOS)
+        // A host's page, one window per host.
+        WindowGroup("Host", id: MacHostWindow.sceneID, for: StoredHost.ID.self) { $hostID in
+            if let hostID {
+                MacHostWindow(hostID: hostID, store: .shared)
+                    .tint(.brand)
+            }
+        }
+        .defaultSize(width: 720, height: 540)
         Settings {
             // A separate scene — `.tint` does not cross scene boundaries, so re-apply the brand
             // tint here or the Preferences window falls back to the (unreliable) asset accent.

@@ -248,7 +248,7 @@ extension ShotMock {
 
     /// The grid's hosts plus one never paired. Built once: it also tells `NowPlayingStore` that
     /// Battlestation has a game up, and doing that from a view's body would re-render forever.
-    private static let pageStore: HostStore = {
+    static let pageStore: HostStore = {
         let store = hostStore()
         store.hosts.append(StoredHost(
             id: studioID, name: "Studio PC", address: "192.168.1.58", port: 9777,

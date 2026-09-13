@@ -108,6 +108,8 @@ struct ContentView: View {
     #if os(macOS)
     /// The Mac's source-list selection. A written `libraryTarget` opens the Library row on it.
     @State private var macDestination: MacDestination = .hosts
+    /// What a host window hands over: this window streams, browses, wakes and pairs for it.
+    @ObservedObject private var hostRouter = MacHostRouter.shared
     #endif
     /// Wakes a sleeping host and waits for it to come back online before connecting (drives the
     /// "Waking…" phase of the connect overlay). Available on every platform now that the iOS/tvOS
@@ -539,6 +541,16 @@ struct ContentView: View {
             model.returnToLibrary = nil
             libraryTarget = shelf
         }
+        #if os(macOS)
+        .onChange(of: hostRouter.pending) { _, request in
+            if request != nil { takeHostRequest() }
+        }
+        .onAppear {
+            hostRouter.mainWindows += 1
+            takeHostRequest()
+        }
+        .onDisappear { hostRouter.mainWindows -= 1 }
+        #endif
         // On the outer Group so the sheet survives the trust-prompt → home transition
         // (the "Pair with PIN instead" path disconnects first — the host's accept loop
         // is sequential, a pairing connection would queue behind the live session).
@@ -729,6 +741,24 @@ struct ContentView: View {
 
     private var macLibrarySheet: Binding<LibraryTarget?> {
         Binding(get: { gamepadUIActive ? libraryTarget : nil }, set: { libraryTarget = $0 })
+    }
+
+    /// Run a host window's pending request here, unless another main window took it first.
+    private func takeHostRequest() {
+        guard let request = hostRouter.take() else { return }
+        func saved(_ id: StoredHost.ID) -> StoredHost? { store.hosts.first { $0.id == id } }
+        switch request {
+        case .connect(let id, let selection):
+            if let host = saved(id), !model.isBusy { connect(host, preset: selection) }
+        case .browse(let id):
+            if let host = saved(id) { libraryTarget = LibraryTarget(host: host) }
+        case .wake(let id):
+            if let host = saved(id) { wakeOnly(host) }
+        case .pair(let id):
+            if let host = saved(id), !model.isBusy { pairingTarget = host }
+        case .speedTest(let id):
+            if let host = saved(id), !model.isBusy { speedTestTarget = host }
+        }
     }
     #endif
 

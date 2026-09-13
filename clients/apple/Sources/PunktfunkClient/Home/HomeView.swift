@@ -46,8 +46,12 @@ struct HomeView: View {
     /// "Browse Library…" action.
     /// The host being edited (name / address / port / Wake-on-LAN MAC) — drives the edit sheet.
     @State private var editTarget: StoredHost?
+    #if os(macOS)
+    @Environment(\.openWindow) private var openWindow
+    #else
     /// The host whose page is pushed.
     @State private var detailTarget: StoredHost.ID?
+    #endif
     /// The start-screen pointer; the default host's card carries the accent bar.
     @AppStorage(DefaultsKey.defaultHost) private var defaultHostID = ""
     /// The outcome of the last "Send Logs to Host" — drives its alert.
@@ -164,18 +168,9 @@ struct HomeView: View {
                     try? await Task.sleep(for: .seconds(10))
                 }
             }
-            // The host page, from a card's ⓘ or its menu (design §2.4): pushed on touch, an
-            // inspector on the Mac, whose window has room beside the grid.
-            #if os(macOS)
-            .inspector(isPresented: hostPageShown) {
-                if let id = detailTarget {
-                    HostDetailView(
-                        store: store, hostID: id, actions: { hostActions(for: $0, pinned: nil) })
-                        .inspectorColumnWidth(min: 280, ideal: 320, max: 420)
-                }
-            }
-            .focusedSceneValue(\.hostPageToggle, toggleHostPage)
-            #else
+            // The host page, from a card's ⓘ or its menu (design §2.4): pushed on touch. The Mac
+            // opens it in its own window (`MacHostWindow`).
+            #if !os(macOS)
             .navigationDestination(item: $detailTarget) { id in
                 HostDetailView(
                     store: store, hostID: id, actions: { hostActions(for: $0, pinned: nil) })
@@ -369,33 +364,30 @@ struct HomeView: View {
             nowPlaying: nowPlaying.title(for: host))
     }
 
-    /// Everything a card and the host page can do for `host`. A pinned card connects and browses
-    /// with ITS preset and carries no host acts: it is a shortcut, not a second host.
+    /// Everything a card and the host page can do for `host`, run on this grid's sheets.
     private func hostActions(for host: StoredHost, pinned: StreamPreset?) -> HostActions {
-        let selection: PresetSelection = pinned.map { .preset($0.id) } ?? .inherit
-        // Library, speed test and logs dial with the pinned identity, and an unpinned host would
-        // accept any certificate. So they wait for a pairing.
-        let paired = host.pinnedSHA256 != nil
-        let wakeable = pinned == nil && !isOnline(host) && !host.wakeMacs.isEmpty
-            && PunktfunkConnection.wakeOnLANAvailable
-        return HostActions(
-            connect: { connect(host, selection) },
-            pair: { if !model.isBusy { pairingTarget = host } },
-            edit: { editTarget = host },
-            forget: { store.forgetIdentity(host) },
-            remove: { store.remove(host) },
-            browseLibrary: paired
-                ? { libraryTarget = LibraryTarget(host: host, preset: selection) } : nil,
-            speedTest: paired ? { if !model.isBusy { speedTestTarget = host } } : nil,
-            sendLogs: paired ? { Task { sendLogsResult = await SendLogs.toHost(host) } } : nil,
-            wake: wakeable ? { wake(host) } : nil,
-            copyLink: LinkClipboard.isAvailable
-                ? { LinkClipboard.copy(DeepLink.forHost(host, preset: pinned?.id).urlString) }
-                : nil,
-            showDetails: pinned == nil ? { detailTarget = host.id } : nil,
-            power: pinned == nil ? hostPower.actions(for: host) : [],
-            runPower: { action in hostAction(action, on: host) },
-            presets: presetMenu(for: host))
+        HostActions(
+            host: host, pinned: pinned, online: isOnline(host), store: store,
+            presets: presets.presets, power: hostPower.actions(for: host),
+            surface: HostActionSurface(
+                connect: { connect(host, $0) },
+                pair: { if !model.isBusy { pairingTarget = host } },
+                edit: { editTarget = host },
+                browse: { libraryTarget = LibraryTarget(host: host, preset: $0) },
+                speedTest: { if !model.isBusy { speedTestTarget = host } },
+                sendLogs: { Task { sendLogsResult = await SendLogs.toHost(host) } },
+                wake: { wake(host) },
+                showDetails: { showDetails(host) },
+                runPower: { hostAction($0, on: host) }))
+    }
+
+    /// The host page: pushed on touch, its own window on the Mac.
+    private func showDetails(_ host: StoredHost) {
+        #if os(macOS)
+        openWindow(id: MacHostWindow.sceneID, value: host.id)
+        #else
+        detailTarget = host.id
+        #endif
     }
 
     /// A host action picked from a card's menu: explain an unavailable one, confirm a
@@ -416,20 +408,6 @@ struct HomeView: View {
 
     private func runHostAction(_ action: HostAction, on host: StoredHost) {
         Task { hostActionResult = await hostPower.invoke(action, on: host) }
-    }
-
-    /// The preset affordances every host card carries (§5.2/§5.2a).
-    private func presetMenu(for host: StoredHost) -> HostPresetMenu {
-        HostPresetMenu(
-            presets: presets.presets,
-            boundID: host.presetID,
-            pinnedIDs: host.pinnedPresetIDs ?? [],
-            connectWith: { selection in connect(host, selection) },
-            setDefault: { store.setPreset(host.id, presetID: $0) },
-            togglePin: { id in
-                let pinned = (host.pinnedPresetIDs ?? []).contains(id)
-                store.setPinned(host.id, presetID: id, pinned: !pinned)
-            })
     }
 
     private var discoveredSection: some View {
@@ -543,22 +521,6 @@ struct HomeView: View {
         // it the odd one out there instead.
         .tint(.primary)
         #endif
-    }
-    #endif
-
-    #if os(macOS)
-    private var hostPageShown: Binding<Bool> {
-        Binding(get: { detailTarget != nil }, set: { if !$0 { detailTarget = nil } })
-    }
-
-    /// ⌥⌘I: close the host page, or open it on the default host (else the first saved one).
-    private func toggleHostPage() {
-        if detailTarget != nil {
-            detailTarget = nil
-            return
-        }
-        let host = StartScreen.defaultHost(id: defaultHostID, hosts: store.hosts).host
-        detailTarget = (host ?? store.hosts.first)?.id
     }
     #endif
 

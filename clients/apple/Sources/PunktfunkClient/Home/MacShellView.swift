@@ -1,6 +1,6 @@
 // The Mac's window (design/apple-touch-ui-overhaul.md §4): a source list with Hosts and Library,
-// the chosen destination beside it, and ⌘1 / ⌘2 / ⌥⌘I in the View menu. The touch UI's tabs are
-// this list's rows; the Library row is the Library tab, whose title menu picks the host.
+// the chosen destination beside it, and ⌘1 / ⌘2 in the View menu. The touch UI's tabs are this
+// list's rows; the Library row is the Library tab, whose title menu picks the host.
 
 import PunktfunkKit
 import SwiftUI
@@ -60,27 +60,16 @@ private struct MacNavigationKey: FocusedValueKey {
     typealias Value = MacNavigation
 }
 
-private struct HostPageToggleKey: FocusedValueKey {
-    typealias Value = () -> Void
-}
-
 extension FocusedValues {
     var macNavigation: MacNavigation? {
         get { self[MacNavigationKey.self] }
         set { self[MacNavigationKey.self] = newValue }
     }
-
-    /// Closes the host inspector, or opens it on the default host (`HomeView`).
-    var hostPageToggle: (() -> Void)? {
-        get { self[HostPageToggleKey.self] }
-        set { self[HostPageToggleKey.self] = newValue }
-    }
 }
 
-/// ⌘1 / ⌘2 / ⌥⌘I, above the sidebar toggle in the View menu.
+/// ⌘1 / ⌘2, above the sidebar toggle in the View menu.
 struct MacNavigationCommands: Commands {
     @FocusedValue(\.macNavigation) private var navigation
-    @FocusedValue(\.hostPageToggle) private var hostPage
 
     var body: some Commands {
         CommandGroup(before: .sidebar) {
@@ -90,9 +79,6 @@ struct MacNavigationCommands: Commands {
             Button("Library") { navigation?.showLibrary() }
                 .keyboardShortcut("2", modifiers: .command)
                 .disabled(navigation == nil)
-            Button("Host Page") { hostPage?() }
-                .keyboardShortcut("i", modifiers: [.option, .command])
-                .disabled(hostPage == nil)
             Divider()
         }
     }

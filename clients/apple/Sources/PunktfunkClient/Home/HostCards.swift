@@ -127,6 +127,62 @@ struct HostActions {
     var presets: HostPresetMenu?
 }
 
+/// Where one surface runs the acts that need more than the store: a sheet, a dial, a window.
+struct HostActionSurface {
+    var connect: (PresetSelection) -> Void
+    var pair: () -> Void
+    var edit: () -> Void
+    var browse: (PresetSelection) -> Void
+    var speedTest: () -> Void
+    var sendLogs: () -> Void
+    var wake: () -> Void
+    var showDetails: () -> Void
+    var runPower: (HostAction) -> Void
+}
+
+extension HostActions {
+    /// What `host` offers, gated in one place for the grid and the Mac's host window. A pinned
+    /// card connects and browses with ITS preset and carries no host acts: it is a shortcut, not
+    /// a second host.
+    @MainActor init(
+        host: StoredHost, pinned: StreamPreset?, online: Bool, store: HostStore,
+        presets: [StreamPreset], power: [HostAction], surface: HostActionSurface
+    ) {
+        let selection: PresetSelection = pinned.map { .preset($0.id) } ?? .inherit
+        // Library, speed test and logs dial with the pinned identity, and an unpinned host would
+        // accept any certificate. So they wait for a pairing.
+        let paired = host.pinnedSHA256 != nil
+        let wakeable = pinned == nil && !online && !host.wakeMacs.isEmpty
+            && PunktfunkConnection.wakeOnLANAvailable
+        self.init(
+            connect: { surface.connect(selection) },
+            pair: surface.pair,
+            edit: surface.edit,
+            forget: { store.forgetIdentity(host) },
+            remove: { store.remove(host) },
+            browseLibrary: paired ? { surface.browse(selection) } : nil,
+            speedTest: paired ? surface.speedTest : nil,
+            sendLogs: paired ? surface.sendLogs : nil,
+            wake: wakeable ? surface.wake : nil,
+            copyLink: LinkClipboard.isAvailable
+                ? { LinkClipboard.copy(DeepLink.forHost(host, preset: pinned?.id).urlString) }
+                : nil,
+            showDetails: pinned == nil ? surface.showDetails : nil,
+            power: pinned == nil ? power : [],
+            runPower: surface.runPower,
+            presets: HostPresetMenu(
+                presets: presets,
+                boundID: host.presetID,
+                pinnedIDs: host.pinnedPresetIDs ?? [],
+                connectWith: surface.connect,
+                setDefault: { store.setPreset(host.id, presetID: $0) },
+                togglePin: { id in
+                    let pinned = (host.pinnedPresetIDs ?? []).contains(id)
+                    store.setPinned(host.id, presetID: id, pinned: !pinned)
+                }))
+    }
+}
+
 /// A host's state as one plain sentence: a saved card's second line and the host page's subtitle.
 enum HostStatus: Equatable {
     case connecting

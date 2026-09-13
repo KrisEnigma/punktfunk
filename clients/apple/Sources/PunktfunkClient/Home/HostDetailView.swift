@@ -1,18 +1,45 @@
 // The host page (design/apple-touch-ui-overhaul.md §2.4): everything about one saved host that
-// is not "connect to it", pushed from a card's ⓘ or its menu's Host Details…. The card keeps the
-// daily acts; this page holds presets, connection, pairing, power, support and removal, each
-// with a line saying what it does. It reads the live record by id, so an edit shows at once and
-// a removal pops the page. Its acts come from the grid's own builder, the same set the card's
-// menu offers.
+// is not "connect to it", with the acts its card's menu offers. Touch pushes it as one form; the
+// Mac's `MacHostWindow` shows one section at a time beside a sidebar. It reads the live record
+// by id, so an edit shows at once and a removal closes it.
 
 import PunktfunkKit
 import SwiftUI
 
+/// The host page's parts: one form on touch, one sidebar row each in the Mac's host window.
+enum HostSection: String, CaseIterable, Identifiable {
+    case overview, presets, connection, pairing, power
+
+    var id: Self { self }
+
+    var title: String {
+        switch self {
+        case .overview: "Overview"
+        case .presets: "Presets"
+        case .connection: "Connection"
+        case .pairing: "Pairing"
+        case .power: "Power"
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .overview: "desktopcomputer"
+        case .presets: "slider.horizontal.3"
+        case .connection: "network"
+        case .pairing: "lock"
+        case .power: "power"
+        }
+    }
+}
+
 struct HostDetailView: View {
     @ObservedObject var store: HostStore
     let hostID: StoredHost.ID
-    /// The grid's per-host builder (`HomeView.hostActions`).
+    /// The surface's per-host builder (`HostActions(host:…)`).
     let actions: (StoredHost) -> HostActions
+    /// One section alone (the Mac's host window), or nil for every section in one form.
+    var only: HostSection?
     @ObservedObject private var nowPlaying = NowPlayingStore.shared
     @AppStorage(DefaultsKey.defaultHost) private var defaultHostID = ""
     @AppStorage(DefaultsKey.autoWake) private var autoWake = true
@@ -36,34 +63,43 @@ struct HostDetailView: View {
             host: host, isOnline: online, isConnecting: false, nowPlaying: playing,
             autoWake: autoWake)
         return Form {
-            Section {
-                header(host, status)
-                Button(action: a.connect) {
-                    Label(playing.map { "Resume \($0)" } ?? "Connect", systemImage: "play.fill")
-                }
-                if let browse = a.browseLibrary {
-                    Button(action: browse) {
-                        Label("Browse Library", systemImage: "square.grid.2x2")
+            if shows(.overview) {
+                Section {
+                    header(host, status)
+                    Button(action: a.connect) {
+                        Label(playing.map { "Resume \($0)" } ?? "Connect", systemImage: "play.fill")
+                    }
+                    if let browse = a.browseLibrary {
+                        Button(action: browse) {
+                            Label("Browse Library", systemImage: "square.grid.2x2")
+                        }
                     }
                 }
             }
-            presetsSection(host, a)
-            connectionSection(host, a)
-            pairingSection(host, a)
-            powerSection(a)
-            if let sendLogs = a.sendLogs {
+            if shows(.presets) { presetsSection(host, a) }
+            if shows(.connection) { connectionSection(host, a) }
+            if shows(.pairing) { pairingSection(host, a) }
+            if shows(.power) { powerSection(a) }
+            if shows(.overview) {
+                if let sendLogs = a.sendLogs {
+                    Section {
+                        Button("Send Logs to Host", systemImage: "doc.text", action: sendLogs)
+                    } footer: {
+                        Text("Uploads this device's recent log to the host, for a bug report.")
+                    }
+                }
                 Section {
-                    Button("Send Logs to Host", systemImage: "doc.text", action: sendLogs)
+                    // A Mac form draws even a destructive button in the window's tint.
+                Button("Remove Host", role: .destructive) { confirmRemove = true }
+                    .tint(.red)
                 } footer: {
-                    Text("Uploads this device's recent log to the host, for a bug report.")
+                    Text("Deletes the host from this device. The host itself is untouched.")
                 }
             }
-            Section {
-                Button("Remove Host", role: .destructive) { confirmRemove = true }
-            } footer: {
-                Text("Deletes the host from this device. The host itself is untouched.")
-            }
         }
+        #if os(macOS)
+        .formStyle(.grouped)
+        #endif
         .navigationTitle(host.displayName)
         #if os(iOS)
         .navigationBarTitleDisplayMode(.inline)
@@ -84,6 +120,8 @@ struct HostDetailView: View {
             Text("You can add it again later.")
         }
     }
+
+    private func shows(_ section: HostSection) -> Bool { only == nil || only == section }
 
     private func header(_ host: StoredHost, _ status: HostStatus) -> some View {
         let m = CardMetrics.current
@@ -124,6 +162,11 @@ struct HostDetailView: View {
             } footer: {
                 Text("A tap on the card connects with the chosen preset. A pinned preset gets its "
                     + "own card next to this host.")
+            }
+        } else if only == .presets {
+            Section {
+                Text("No presets yet. Make one in Settings, then choose it here.")
+                    .foregroundStyle(.secondary)
             }
         }
     }
@@ -169,6 +212,7 @@ struct HostDetailView: View {
                     get: { defaultHostID.lowercased() == host.id.uuidString.lowercased() },
                     set: { defaultHostID = $0 ? host.id.uuidString : "" }))
                 Button("Forget Identity…", role: .destructive) { confirmForget = true }
+                    .tint(.red)
             }
         } header: {
             Text("Pairing")
@@ -196,6 +240,11 @@ struct HostDetailView: View {
                 Text("Power")
             } footer: {
                 Text("Restart and shut down end every stream from this host, and ask first.")
+            }
+        } else if only == .power {
+            Section {
+                Text("This host offers this device no power actions.")
+                    .foregroundStyle(.secondary)
             }
         }
     }
