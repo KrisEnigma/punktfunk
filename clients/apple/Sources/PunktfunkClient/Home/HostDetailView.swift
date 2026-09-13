@@ -95,6 +95,15 @@ struct HostDetailView: View {
                     // A Mac form draws even a destructive button in the window's tint.
                 Button("Remove Host", role: .destructive) { confirmRemove = true }
                     .tint(.red)
+                    // On the button, so iOS 26 opens the dialog from the row that asked.
+                    .confirmationDialog(
+                        "Remove \(host.displayName)?", isPresented: $confirmRemove,
+                        titleVisibility: .visible
+                    ) {
+                        Button("Remove Host", role: .destructive, action: a.remove)
+                    } message: {
+                        Text("You can add it again later.")
+                    }
                 } footer: {
                     Text("Deletes the host from this device. The host itself is untouched.")
                 }
@@ -107,21 +116,6 @@ struct HostDetailView: View {
         #if os(iOS)
         .navigationBarTitleDisplayMode(.inline)
         #endif
-        .confirmationDialog(
-            "Forget the identity of \(host.displayName)?", isPresented: $confirmForget,
-            titleVisibility: .visible
-        ) {
-            Button("Forget Identity", role: .destructive, action: a.forget)
-        } message: {
-            Text("The next connect asks for a PIN again.")
-        }
-        .confirmationDialog(
-            "Remove \(host.displayName)?", isPresented: $confirmRemove, titleVisibility: .visible
-        ) {
-            Button("Remove Host", role: .destructive, action: a.remove)
-        } message: {
-            Text("You can add it again later.")
-        }
     }
 
     private func shows(_ section: HostSection) -> Bool { only == nil || only == section }
@@ -225,6 +219,14 @@ struct HostDetailView: View {
                     set: { defaultHostID = $0 ? host.id.uuidString : "" }))
                 Button("Forget Identity…", role: .destructive) { confirmForget = true }
                     .tint(.red)
+                    .confirmationDialog(
+                        "Forget the identity of \(host.displayName)?", isPresented: $confirmForget,
+                        titleVisibility: .visible
+                    ) {
+                        Button("Forget Identity", role: .destructive, action: a.forget)
+                    } message: {
+                        Text("The next connect asks for a PIN again.")
+                    }
             }
         } header: {
             Text("Pairing")
