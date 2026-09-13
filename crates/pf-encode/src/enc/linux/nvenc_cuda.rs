@@ -966,8 +966,10 @@ impl NvencCudaEncoder {
     }
 
     /// Frames a forced intra refresh wave takes on this session; 0 when the wave is off.
+    /// AV1 never waves: NVENC codes every AV1 frame to load its entropy state from the
+    /// last, so a sweep cannot heal a loss. AV1 answers with an anchor or an IDR.
     fn wave_cycle(&self) -> u32 {
-        if !crate::rfi::wave_enabled() {
+        if !crate::rfi::wave_enabled() || self.codec == Codec::Av1 {
             return 0;
         }
         crate::rfi::wave_cycle(
@@ -2792,11 +2794,11 @@ mod tests {
         );
     }
 
-    /// The Windows `nvenc_wave_soak` on the CUDA session: many waves, each answering a frame
-    /// lost two ahead of its start (`PUNKTFUNK_NVENC_IR_ALWAYS=1` makes every RFI a wave), the
-    /// same `PF_WAVE_*` knobs, frames uploaded from host memory. The full stream and the view
-    /// that lost those frames land in `PUNKTFUNK_SMOKE_DIR` with `.idx` sidecars, for
-    /// `gpu_parity`'s field hashers.
+    /// The Windows `nvenc_wave_soak` on the CUDA session, HEVC only (AV1 never waves): many
+    /// waves, each answering a frame lost two ahead of its start (`PUNKTFUNK_NVENC_IR_ALWAYS=1`
+    /// makes every RFI a wave), the same `PF_WAVE_*` knobs, frames uploaded from host memory. The
+    /// full stream and the view that lost those frames land in `PUNKTFUNK_SMOKE_DIR` with `.idx`
+    /// sidecars, for `gpu_parity`'s field hashers.
     ///
     /// `cargo test -p pf-encode --features nvenc --release nvenc_cuda_wave_soak -- --ignored --nocapture`
     #[test]
@@ -2812,12 +2814,7 @@ mod tests {
         let on = |k: &str| std::env::var(k).is_ok_and(|v| v == "1");
         let (waves, gap) = (count("PF_WAVE_SOAK", 12), count("PF_WAVE_GAP", 12));
         let (spoil, idr) = (on("PF_WAVE_SPOIL"), on("PF_WAVE_IDR"));
-        let av1 = std::env::var("PF_WAVE_CODEC").is_ok_and(|v| v == "av1");
-        let (codec, ext) = if av1 {
-            (Codec::Av1, "obu")
-        } else {
-            (Codec::H265, "h265")
-        };
+        let (codec, ext) = (Codec::H265, "h265");
         assert!(
             on("PUNKTFUNK_NVENC_IR_ALWAYS"),
             "PUNKTFUNK_NVENC_IR_ALWAYS=1 makes every ask a wave"
