@@ -9,7 +9,7 @@ Android apps) and over GameStream (Moonlight). Pick whichever fits the device yo
 [update](/docs/install-client#keeping-a-client-up-to-date) and
 [remove](/docs/install-client#removing-a-client) each one.
 
-Two things apply to every app: [profiles and `punktfunk://` links](#profiles-and-links-every-app),
+Two things apply to every app: [presets and `punktfunk://` links](#presets-and-links-every-app),
 and the keys and chords that work [while you're streaming](#while-youre-streaming). What each app
 lets you change — resolution, bitrate, codec, HDR, audio, controllers — is catalogued in
 [Client settings](/docs/client-settings).
@@ -23,7 +23,12 @@ protocol — the lowest-latency, most resilient path, with the full feature set:
 - **PIN pairing** built in, and pinned reconnects after that.
 - **Controllers**, including DualSense — rumble, adaptive triggers, lightbar, motion, and touchpad.
 - A **[game library](/docs/game-library)** — browse the host's installed games with cover art and
-  launch one straight into the stream.
+  launch one straight into the stream. On iPhone and iPad it is the **Library** tab, on the Mac the
+  Library rows of the window's sidebar: desktops, recently played, favorites, launchers and games,
+  in sections you reorder or hide with **Customize**.
+- A **host page** behind each card's ⓘ: presets, address, pairing, power and support in one place.
+  On the Mac it opens as an inspector beside the grid (⌥⌘I), and ⌘1 and ⌘2 switch between Hosts
+  and the Library.
 - A live **stats overlay** (resolution, fps, bitrate, latency) and a built-in **network speed test**
   to pick a bitrate for your link.
 - **Widgets, Live Activities and Shortcuts** — a hosts widget and a game-library widget for the
@@ -172,7 +177,7 @@ punktfunk speed-test <host-ref>               # measure the link, print the reco
 
 A `<host-ref>` is a saved host's id, its name, or an address — the same reference a `punktfunk://`
 link takes. There is also `hosts add` / `hosts forget`,
-[`wake`](/docs/wake-on-lan#from-the-command-line), `reachable`, `profiles list` and `reset`; run
+[`wake`](/docs/wake-on-lan#from-the-command-line), `reachable`, `presets list` and `reset`; run
 `punktfunk help <command>` for a verb's flags.
 
 `--pin -` reads the PIN from stdin (`echo 1234 | punktfunk pair …`), which is the form to script.
@@ -196,18 +201,18 @@ Under the Flatpak, run it as `flatpak run --command=punktfunk io.unom.Punktfunk 
 > `punktfunk-probe` is different again — an in-repo protocol test and latency-measurement tool for
 > development, not shipped in any package; you build it from source.
 
-## Profiles and links (every app)
+## Presets and links (every app)
 
-Two things work the same in the Apple, Linux, Windows and Android apps. **Settings profiles** are
+Two things work the same in the Apple, Linux, Windows and Android apps. **Settings presets** are
 named sets of stream overrides — bitrate, resolution, codec, HDR and the rest — that you bind to a
 host or pick for a single connect; every field you didn't touch still follows your defaults. A
 **`punktfunk://` link** starts a stream from a browser, a desktop shortcut, a home-automation rule
 or `punktfunk open`, carrying only *references* to things that already exist on your device — never
 a setting, never a trust decision.
 
-[Profiles and links](/docs/profiles-and-links) has both in full: the link grammar, where each app
+[Presets and links](/docs/presets-and-links) has both in full: the link grammar, where each app
 puts **Copy link** and **Create shortcut…**, and what a link is refused for. From a script,
-`punktfunk profiles list` and `punktfunk launch --profile <ref>` reach the same profiles.
+`punktfunk presets list` and `punktfunk launch --preset <ref>` reach the same presets.
 
 ## While you're streaming
 
