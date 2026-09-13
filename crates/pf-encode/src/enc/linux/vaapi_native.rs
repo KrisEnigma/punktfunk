@@ -632,7 +632,9 @@ mod tests {
             let dropped: Vec<u8> = aus
                 .iter()
                 .enumerate()
-                .filter(|(i, _)| *i == 0 || (*i >= WAVE_START && *i != WAVE_START + 1))
+                .filter(|(i, _)| {
+                    *i == 0 || (*i >= WAVE_START && !(restart && *i == WAVE_START + 1))
+                })
                 .flat_map(|(_, a)| a.data.iter().copied())
                 .collect();
             let p2 = format!("{dir}/vaenc-wave-smoke-dropped.{ext}");
