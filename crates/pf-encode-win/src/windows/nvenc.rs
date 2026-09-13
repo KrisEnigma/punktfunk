@@ -2921,6 +2921,14 @@ mod tests {
         // `PF_WAVE_IDR=1`: two frames into every wave an IDR is forced, which flushes it.
         let spoil = std::env::var("PF_WAVE_SPOIL").is_ok_and(|v| v == "1");
         let idr = std::env::var("PF_WAVE_IDR").is_ok_and(|v| v == "1");
+        // `PF_WAVE_CODEC=av1`: the AV1 wave's bookkeeping; the dump is `.obu`, which the
+        // hash maps do not read yet.
+        let av1 = std::env::var("PF_WAVE_CODEC").is_ok_and(|v| v == "av1");
+        let (codec, ext) = if av1 {
+            (Codec::Av1, "obu")
+        } else {
+            (Codec::H265, "h265")
+        };
         assert!(
             std::env::var("PUNKTFUNK_NVENC_IR_ALWAYS").is_ok_and(|v| v == "1"),
             "PUNKTFUNK_NVENC_IR_ALWAYS=1 makes every ask a wave"
@@ -2988,7 +2996,7 @@ mod tests {
                 tex.expect("null frame texture")
             };
             let mut enc = NvencD3d11Encoder::open(
-                Codec::H265,
+                codec,
                 format,
                 W,
                 H,
@@ -3094,8 +3102,8 @@ mod tests {
                 .flat_map(|(_, a)| a.data.iter().copied())
                 .collect();
             let dir = std::env::var("PUNKTFUNK_SMOKE_DIR").unwrap_or_else(|_| ".".into());
-            std::fs::write(format!("{dir}/nvenc-wave.h265"), &full).expect("write");
-            std::fs::write(format!("{dir}/nvenc-wave-dropS.h265"), &view).expect("write");
+            std::fs::write(format!("{dir}/nvenc-wave.{ext}"), &full).expect("write");
+            std::fs::write(format!("{dir}/nvenc-wave-dropS.{ext}"), &view).expect("write");
             let csv = |v: &[usize]| {
                 v.iter()
                     .map(|n| n.to_string())
