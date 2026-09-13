@@ -11,6 +11,9 @@ import SwiftUI
 
 @main
 struct PunktfunkClientApp: App {
+    /// The main window's scene, for a host window that finds none open.
+    static let mainSceneID = "main"
+
     #if os(macOS)
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     #elseif os(iOS)
@@ -28,7 +31,7 @@ struct PunktfunkClientApp: App {
     }
 
     var body: some Scene {
-        WindowGroup("Punktfunk") {
+        WindowGroup("Punktfunk", id: Self.mainSceneID) {
             // Pin the whole app's tint to the brand purple explicitly — the asset-catalog accent
             // resolution is environment/timing-sensitive and can fall back to system blue. Wraps the
             // screenshot harness too, so captured screens are on-brand.
@@ -53,12 +56,13 @@ struct PunktfunkClientApp: App {
             #if !os(tvOS)
             .tint(.brand)
             #endif
-            // Geist Sans is the app's typeface. This sets the default for unstyled text and the
-            // form row labels; views that pick an explicit size/weight use `.geist(…)` directly.
-            // tvOS reads from across the room: its system body is 29pt, so pinning the phone's
-            // 17pt there shrank every unstyled control (rows, fields, buttons) to postage size.
+            // Geist Sans at each platform's own body size: the default for unstyled text, form
+            // rows and fields. The phone's 17 pt shrank every tvOS control (29 pt there) and
+            // bloated every Mac one (13 pt); views with an explicit size use `.geist(…)`.
             #if os(tvOS)
             .font(.geist(29, relativeTo: .body))
+            #elseif os(macOS)
+            .font(.geist(13, relativeTo: .body))
             #else
             .font(.geist(17, relativeTo: .body))
             #endif
@@ -66,10 +70,23 @@ struct PunktfunkClientApp: App {
         // The Stream menu (Release Mouse ⌃⌥⇧Q, Disconnect ⌃⌥⇧D, Show/Hide Statistics ⌃⌥⇧S —
         // the cross-client Ctrl+Alt+Shift set) — a real menu bar on macOS, hardware-keyboard
         // shortcuts on iPad. tvOS has neither.
-        #if !os(tvOS)
+        #if os(macOS)
+        .commands {
+            StreamCommands()
+            MacNavigationCommands()
+        }
+        #elseif !os(tvOS)
         .commands { StreamCommands() }
         #endif
         #if os(macOS)
+        // A host's page, one window per host.
+        WindowGroup("Host", id: MacHostWindow.sceneID, for: StoredHost.ID.self) { $hostID in
+            if let hostID {
+                MacHostWindow(hostID: hostID, store: .shared)
+                    .tint(.brand)
+            }
+        }
+        .defaultSize(width: 720, height: 540)
         Settings {
             // A separate scene — `.tint` does not cross scene boundaries, so re-apply the brand
             // tint here or the Preferences window falls back to the (unreliable) asset accent.

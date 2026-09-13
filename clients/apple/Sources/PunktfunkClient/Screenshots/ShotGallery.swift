@@ -60,7 +60,7 @@ extension ShotMock {
             pinnedSHA256: hostFingerprint(1), osChain: "linux/fedora/bazzite")
         let office = StoredHost(
             id: officeID, name: "Office NUC", address: "192.168.1.33", port: 9777,
-            pinnedSHA256: hostFingerprint(4), profileID: couchProfileID, osChain: "linux/ubuntu")
+            pinnedSHA256: hostFingerprint(4), presetID: couchPresetID, osChain: "linux/ubuntu")
         let workshop = StoredHost(
             id: workshopID, name: "Workshop", address: "10.0.0.7", port: 9777,
             pinnedSHA256: hostFingerprint(2), macAddresses: ["de:ad:be:ef:00:07"],
@@ -73,11 +73,11 @@ extension ShotMock {
         let crowded = StoredHost(
             id: editingID, name: "Living Room Gaming PC (behind the TV)",
             address: "fd7a:115c:a1e0::1a2b", port: 9777, pinnedSHA256: hostFingerprint(5),
-            profileID: hdrProfileID, osChain: "linux/nobara")
+            presetID: hdrPresetID, osChain: "linux/nobara")
         return [
             GalleryVariant(name: "Online") { card(battlestation) },
             GalleryVariant(name: "Playing") { card(livingRoom, playing: "Hollow Knight") },
-            GalleryVariant(name: "Bound preset") { card(office, bound: couchProfileID) },
+            GalleryVariant(name: "Bound preset") { card(office, bound: couchPresetID) },
             GalleryVariant(name: "Pinned preset card") { card(battlestation, pinned: hdrPreset) },
             GalleryVariant(name: "Default host") { card(battlestation, isDefault: true) },
             GalleryVariant(name: "Connecting") { card(battlestation, connecting: true) },
@@ -85,7 +85,7 @@ extension ShotMock {
             GalleryVariant(name: "Offline") { card(bedroom, online: false) },
             GalleryVariant(name: "Not paired") { card(unpaired) },
             GalleryVariant(name: "Everything at once") {
-                card(crowded, isDefault: true, bound: hdrProfileID,
+                card(crowded, isDefault: true, bound: hdrPresetID,
                      playing: "Starfall Vale: Definitive Edition")
             },
             GalleryVariant(name: "Discovered") { discovered(pairing: false) },
@@ -156,6 +156,9 @@ extension ShotMock {
             GalleryVariant(name: "Live, one title up") {
                 shelf(.catalog(games, running: ["steam:starfall"]))
             },
+            GalleryVariant(name: "No paired host") {
+                AnyView(LibraryNoHostView(showHosts: {}).frame(height: 440))
+            },
         ]
     }
 
@@ -205,7 +208,7 @@ extension ShotMock {
             copyLink: {}, showDetails: pinned == nil ? {} : nil,
             power: pinned == nil && paired && online ? powerGrant : [],
             presets: HostPresetMenu(
-                profiles: [hdrPreset, couchPreset], boundID: bound ?? host.profileID,
+                presets: [hdrPreset, couchPreset], boundID: bound ?? host.presetID,
                 pinnedIDs: pinned.map { [$0.id] } ?? [], connectWith: { _ in },
                 setDefault: { _ in }, togglePin: { _ in }))
     }
@@ -241,11 +244,52 @@ extension ShotMock {
         }
     }
 
+    /// The speed test page mid-burst, finished and failed: canned runs, no network.
+    static var speedTestVariants: [GalleryVariant] {
+        func page(_ phase: SpeedTestPhase, until seconds: Double) -> AnyView {
+            AnyView(NavigationStack {
+                SpeedTestView(host: host, shotRun: (phase, speedTrace(until: seconds)))
+            }
+            .frame(height: 620))
+        }
+        let done = PunktfunkConnection.ProbeResult(
+            done: true, recvBytes: 547_500_000, recvPackets: 380_200, hostBytes: 549_150_000,
+            hostPackets: 381_300, elapsedMs: 5_000, throughputKbps: 876_000, lossPct: 0.3)
+        return [
+            GalleryVariant(name: "Measuring") { page(.probing, until: 2.4) },
+            GalleryVariant(name: "Done") { page(.done(done), until: 5) },
+            GalleryVariant(name: "Couldn't reach the host") {
+                page(
+                    .failed("Couldn't reach 192.168.1.20. It may be asleep, or streaming to "
+                        + "something else."),
+                    until: 0)
+            },
+        ]
+    }
+
+    /// A plausible burst: a quick ramp, then around 900 Mbps with one dip, polled every 200 ms.
+    static func speedTrace(until seconds: Double) -> PunktfunkConnection.ProbeTrace {
+        let rates: [Double] = [
+            310, 620, 840, 905, 890, 912, 930, 870, 760, 880, 915, 925, 900, 910, 895, 920,
+            905, 890, 912, 908, 900, 915, 898, 910, 905,
+        ]
+        var trace = PunktfunkConnection.ProbeTrace()
+        var bytes: UInt64 = 0
+        for (i, mbps) in rates.enumerated() where Double(i + 1) * 0.2 <= seconds + 0.001 {
+            bytes += UInt64(mbps * 25_000) // 200 ms at `mbps`
+            let ms = UInt32((i + 1) * 200)
+            trace.add(.init(
+                done: false, recvBytes: bytes, recvPackets: 0, hostBytes: bytes, hostPackets: 0,
+                elapsedMs: ms, throughputKbps: UInt32(Double(bytes) * 8 / Double(ms)), lossPct: 0))
+        }
+        return trace
+    }
+
     static let studioID = UUID(uuidString: "5B0D1E00-0000-4000-8000-000000000007")!
 
     /// The grid's hosts plus one never paired. Built once: it also tells `NowPlayingStore` that
     /// Battlestation has a game up, and doing that from a view's body would re-render forever.
-    private static let pageStore: HostStore = {
+    static let pageStore: HostStore = {
         let store = hostStore()
         store.hosts.append(StoredHost(
             id: studioID, name: "Studio PC", address: "192.168.1.58", port: 9777,
@@ -299,6 +343,16 @@ struct ShotLibrarySections: View {
         }
     }
 }
+
+/// The details sheet for a played title that is up on the host, marked a favorite.
+struct ShotTitleDetails: View {
+    var body: some View {
+        TitleDetailSheet(
+            game: ShotMock.games.first { $0.id == "steam:starfall" } ?? ShotMock.games[0],
+            artLoader: ShotPosterArt.source, playLabel: "Resume", isFavorite: true,
+            onPlay: {}, onCopyLink: {})
+    }
+}
 #endif
 
 /// The touch grid on the mock catalog with one title up — what the Library tab grows from.
@@ -313,6 +367,18 @@ struct ShotLibraryTouch: View {
         }
     }
 }
+
+#if os(iOS) || os(macOS)
+/// The Library with its host filter over the mock hosts, on the mock catalog.
+struct ShotLibraryFilter: View {
+    var body: some View {
+        LibraryTabView(
+            store: ShotMock.pageStore, onLaunch: { _, _ in }, onConnectShelf: { _ in },
+            onConnectHost: { _ in }, showHosts: {},
+            shotPhase: .catalog(ShotMock.games, running: ["steam:starfall"]))
+    }
+}
+#endif
 
 #Preview("Host cards") {
     ShotGalleryView(title: "Host cards", variants: ShotMock.hostCardVariants)

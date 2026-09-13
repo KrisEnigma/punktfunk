@@ -58,7 +58,7 @@ See [Configuration](/docs/configuration) for the rest of `host.env`.
 
 The client switch is **per saved host**, not global — handing a machine your clipboard is a decision
 about *that* machine — so it lives in the host's edit sheet, deliberately not in a
-[settings profile](/docs/profiles-and-links#what-a-profile-cant-change).
+[settings preset](/docs/presets-and-links#what-a-preset-cant-change).
 
 | Client | Where the switch is | Label | Default |
 |---|---|---|---|

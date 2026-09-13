@@ -181,7 +181,10 @@ public enum DefaultsKey {
     /// client-settings-profiles.md §4.2. Lives in the APP GROUP suite with `hosts`, not with the
     /// settings: bindings and pins are fields on the host record, and an extension that can read
     /// the hosts should be able to read what they point at.
-    public static let profiles = "punktfunk.profiles"
+    public static let presets = "punktfunk.presets"
+    /// Where the catalog lived before the rename (design/preset-rename.md): read while `presets`
+    /// is absent, and left as it was for an older build.
+    public static let legacyPresets = "punktfunk.profiles"
     /// Physical-mouse model (macOS): "capture" (pointer lock + relative, the default) or
     /// "desktop" (uncaptured absolute pointer) — the cross-client `mouse_mode`. Replaces the
     /// never-shipped "punktfunk.cursorMode" (auto/always/never client-side-cursor setting,
