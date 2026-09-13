@@ -23,7 +23,7 @@ repository.workspace = true
 # only what the portable modules touch. `quic` (not `ureq-tls`): `trust` names
 # `NativeClient`/`endpoint` for identity + pairing; nothing here fetches over HTTPS.
 [target.'cfg(target_os = "android")'.dependencies]
-punktfunk-core = { path = "../punktfunk-core", features = ["quic"] }
+punktfunk-core = { path = "../punktfunk-core", features = ["quic", "serde"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"
@@ -36,7 +36,7 @@ rand = "0.9"
 # quinn/tokio/aws-lc-rs never build for this target and `trust`'s three identity/pair/probe
 # entry points are `cfg`'d out with them.
 [target.'cfg(target_family = "wasm")'.dependencies]
-punktfunk-core = { path = "../punktfunk-core" }
+punktfunk-core = { path = "../punktfunk-core", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"
@@ -44,7 +44,7 @@ tracing = "0.1"
 rand = "0.9"
 
 [target.'cfg(any(target_os = "linux", windows))'.dependencies]
-punktfunk-core = { path = "../punktfunk-core", features = ["quic"] }
+punktfunk-core = { path = "../punktfunk-core", features = ["quic", "serde"] }
 # Native Vulkan Video decode (WP-C of the native-decode program, HEVC added by M3
 # WP-2, AV1 by M7): auto's TOP rung on both desktop OSes since M9 — for every codec it
 # speaks, AV1 included — also pinnable via `PUNKTFUNK_DECODER=native-vulkan` —

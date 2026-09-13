@@ -3,16 +3,14 @@ title: Uninstalling
 description: Remove the Punktfunk host or client for every install method — and what each one deliberately leaves behind.
 ---
 
-Every install method has a clean removal path. This page gives each one and what stays on the
-machine afterwards: the Linux packages run no removal scripts of their own, and the Windows
-uninstaller leaves a few things in place on purpose.
+Every install method has a clean removal path — pick yours below. Each section also says what stays
+on the machine afterwards.
 
 > **Your configuration always survives.** Removing Punktfunk never deletes its config directory —
 > `~/.config/punktfunk` on Linux, `%ProgramData%\punktfunk` for the Windows host. It holds the
-> host's identity certificate and key, its management token, your paired devices, the web-console
-> login password, `host.env`, the game library, the logs, and any installed
-> [plugins](/docs/plugins) and their state — which is what lets a reinstall pick up where you left
-> off. Each section below gives the one command that clears it for a clean slate.
+> host's identity, your paired devices, the console password, `host.env`, the game library, logs,
+> and [plugin](/docs/plugins) state — which is what lets a reinstall pick up where you left off.
+> Each section gives the one command that clears it for a clean slate.
 
 Jump to what you installed:
 
@@ -29,9 +27,8 @@ what it leaves behind is the same list below.
 
 ### Stop the services first
 
-The Linux packages ship systemd **user** units, and `systemctl --user enable` writes symlinks into
-your home directory that package removal cannot see. Disable them before you remove anything, or
-you'll be left with dangling links and a unit that fails at every login:
+`systemctl --user enable` writes symlinks into your home directory that package removal can't see —
+disable the units first, or they fail at every login:
 
 ```sh
 systemctl --user disable --now punktfunk-host punktfunk-web
@@ -40,16 +37,15 @@ systemctl --user disable --now punktfunk-host punktfunk-web
 Add `punktfunk-scripting` if you enabled the [plugin runner](/docs/plugins), and
 `punktfunk-kde-session` if you set up the [headless KDE session](/docs/kde#headless-session).
 
-If you turned on linger so the host ran without a login, and nothing else on the box needs it:
+If you turned on linger so the host ran without a login, and nothing else needs it:
 
 ```sh
 sudo loginctl disable-linger "$USER"
 ```
 
-Every Linux package also leaves two system groups it created: `punktfunk-update` (empty; for
+Every Linux package also leaves two system groups: `punktfunk-update` (for
 [one-click updates](/docs/updating)) and `punktfunk` (the virtual Steam Deck pad's usbip nodes).
-Drop `punktfunk` rather than keeping it: it can present arbitrary emulated USB hardware, and with
-the host gone nothing uses it. The per-method sections below give the commands.
+Drop `punktfunk` rather than keeping it — it can present arbitrary emulated USB hardware.
 
 ### Ubuntu (apt)
 

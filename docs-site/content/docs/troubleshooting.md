@@ -1,792 +1,212 @@
 ---
 title: Troubleshooting
-description: Common problems setting up or using a Punktfunk host, and how to fix them.
+description: Find your symptom — each entry is the check and the fix in a line or two, with a link to the full story when you need it.
 ---
 
-## Another streaming host (Sunshine, Apollo, …) is installed
-
-Punktfunk's Moonlight-compatible mode and **Sunshine** / its forks (**Apollo**, **Vibeshine**,
-Vibepollo, LuminalShine, …) bind the *same* GameStream ports, advertise the *same* `_nvstream` mDNS
-name, and on Windows often install a *conflicting virtual-display driver* — and even native-only,
-Punktfunk's management API and their web UI both want **TCP 47990**. The symptoms: `address already
-in use` in the host log, pairing that silently fails, the wrong host answering a client, display
-glitches, or a host that "worked until one day it didn't" (a boot race for 47990: Punktfunk exits
-when it loses, Sunshine just loses its config page).
-
-- **Check:** `punktfunk-host detect-conflicts` lists every Sunshine-family host it finds and exits
-  **1 only if one is running or set to start on its own** — a dormant leftover (files on disk, a
-  disabled service) prints but exits 0. The host logs the same finding at startup (so it's on the
-  console's **Logs** page) and carries it in the status summary; the Windows installer warns
-  before installing on the same rule. `ss -lptn 'sport = :47990'` (Linux) /
-  `netstat -ano | findstr :47990` (Windows) shows who holds the port right now.
-- **Fix:** stop and uninstall the other host (`sudo systemctl disable --now sunshine`; on Windows
-  `sc stop SunshineService`, then its uninstaller and its display driver), then start Punktfunk.
-- **Keeping both for a while?** Leave GameStream compat off and move Punktfunk's management port
-  (`PUNKTFUNK_MGMT_BIND`), and on Windows pick a non-exclusive display topology — the whole recipe,
-  and what maps to what when you migrate, is on
-  [Switching from Sunshine](/docs/switching-from-sunshine).
-
-## The host isn't found on the network
-
-- Make sure the host is actually running — on Linux `systemctl --user status punktfunk-host` (or you
-  see it listening in the terminal); on Windows `punktfunk-host service status`, and if it isn't
-  running see [Windows: the host or the web console won't
-  start](#windows-the-host-or-the-web-console-wont-start).
-- **On an Android phone or TV, check the app's local-network permission.** On Android 17 and newer,
-  Android blocks Punktfunk from touching anything on your LAN — discovery, the connect itself,
-  Wake-on-LAN, the game library — until you allow it. The app asks when you open the host list, and
-  a denial looks exactly like a host that isn't there. Tap **Allow…** under
-  *Local network access is off* at the top of the host list, or enable **Nearby devices** for
-  Punktfunk in Android's app settings.
-- Host and client must be on the **same network/subnet**. Discovery uses mDNS, which doesn't cross
-  routed subnets or most VPNs-without-multicast. As a fallback, add the host by **IP address** in your
-  client.
-- A firewall on the host can block it. The native protocol needs **two** fixed UDP ports open:
-  **9777** (the QUIC control plane) and **5353** (mDNS — this is the one discovery itself runs on).
-  On Linux the packages ship a ready-made `punktfunk-native` rule that opens both, plus TCP 47990 for
-  the library API:
-
-  ```sh
-  sudo ufw allow punktfunk-native                              # ufw (CachyOS, Ubuntu)
-  sudo firewall-cmd --permanent --add-service=punktfunk-native \
-    && sudo firewall-cmd --reload                              # firewalld (Fedora, some Arch spins)
-  ```
-
-  The per-session **data plane** rides a *separate, random* UDP port and usually needs **no** firewall
-  rule (see [Video is slow to start, or fails across
-  subnets](#video-is-slow-to-start-or-fails-across-subnets) for why, and the one case where opening it
-  helps). GameStream/Moonlight (only with `--gamestream`) uses TCP **47984/47989/48010** + UDP
-  **47998/47999/48000** (video/FEC 47998, ENet control 47999, audio 48000) + mDNS UDP **5353** —
-  that's the packages' `punktfunk-gamestream` rule.
-- **On a Windows host, check the network profile.** The installer opens the streaming and console
-  ports on **Private** and **Domain** networks only. If Windows has classified your LAN as **Public**,
-  no client can reach the host — the host logs a warning at startup when it sees this. Set the network
-  to Private in **Windows Settings → Network & internet → your network → Network profile type**.
-  For a trusted network Windows insists on marking Public, the installer's *Allow connections on
-  Public networks* option (unattended: `/MERGETASKS="allowpublicfw"`) opts in — but it only takes
-  effect on a **first** install, so on a PC that already has the host, re-scope the streaming ports
-  from an elevated prompt instead:
-
-  ```powershell
-  punktfunk-host service install --allow-public-network=on
-  ```
-
-  That leaves your GameStream choice and the rest of `host.env` alone. It covers the streaming ports;
-  the web console's own rule for TCP 47992 keeps the scope it was installed with. See
-  [Running as a Service → Windows](/docs/running-as-a-service#windows).
-
-## The Linux host service won't start
-
-`systemctl --user status punktfunk-host` shows it failed instead of running. Two common causes:
-
-- **There's no `host.env` yet.** The packaged unit reads `~/.config/punktfunk/host.env` and won't
-  start until that file exists — no package creates it, they only ship a template to copy:
-
-  ```sh
-  mkdir -p ~/.config/punktfunk
-  # /usr/share/punktfunk/ on Fedora/Arch/Bazzite, /usr/share/punktfunk-host/ on Ubuntu
-  cp /usr/share/punktfunk/host.env.example ~/.config/punktfunk/host.env
-  systemctl --user restart punktfunk-host
-  ```
-
-  On Bazzite copy `host.env.bazzite` instead of `host.env.example`.
-- **`status=203/EXEC`** instead means the unit that ran points at a binary that isn't there —
-  usually an old hand-copied unit in `~/.config/systemd/user/` shadowing the packaged one and still
-  aimed at a source checkout. Remove it, run `systemctl --user daemon-reload`, and start the
-  packaged unit — see [Running as a
-  Service](/docs/running-as-a-service#a-a-desktop-you-log-into).
-
-## The host is asleep and won't wake
-
-Clients wake a saved host by themselves — auto-wake is on by default — but only once they have seen
-it awake, which is how they learn its MAC address, and only if the machine is armed to answer a magic
-packet. The arming is what's usually missing, and a **Linux** host tells you outright: search the web
-console's **Logs** page for `Wake-on-` — `Wake-on-LAN` for a wired card, `Wake-on-WLAN` for a Wi-Fi
-one — and the line either confirms the card is armed or names the interface and the exact command to
-arm it. A Wi-Fi card is armed by a different command than a wired one, and the log line gives the
-right one. Windows and macOS hosts don't run that check, so go straight to the BIOS/UEFI and
-network-card steps in [Arming the machine](/docs/wake-on-lan#arming-the-machine).
-
-## Video is slow to start, or fails across subnets
-
-The native **data plane** (the raw UDP that carries video, separate from the 9777 control plane) uses
-a **random, per-session UDP port** — the host binds `0.0.0.0:0`, then tells the client which port it
-got during the connect handshake. There is no fixed data port.
-
-Video flows host → client, but the **client sends the first packet**: a small *hole-punch* datagram to
-that port. This is deliberate. It lets the host learn the client's real (possibly NAT-translated)
-source address and stream back to it, so a session can cross a NAT or a stateful inter-VLAN firewall
-**without** a forwarded data port. What it means for a host firewall:
-
-- **Same LAN, no host firewall (or the port allowed):** the punch arrives immediately and video starts
-  at once. Nothing to configure.
-- **Same LAN, host firewall that denies inbound** (ufw/nftables/firewalld default): the punch is
-  dropped, so the host waits **~2.5 s**, then falls back to the address the client reported and streams
-  anyway — a stateful firewall admits the return traffic because the host sent first. **Net effect: it
-  works, but each session takes ~2.5 s longer to start.** That slow start is the symptom of a
-  data-plane rule you're missing.
-- **Across subnets / NAT:** the same punch-then-fallback applies, as long as the host's outbound video
-  can reach the client (the path's stateful firewall then admits the return). If the host itself is
-  behind NAT reached only via a forwarded control port, the data path may not establish — this is the
-  case a fixed, forwardable data port would solve.
-
-To remove the ~2.5 s fallback delay, **pin the data port** in [`host.env`](/docs/configuration) and
-open exactly that one port. The punch then lands on a port your firewall lets through, so the host
-answers it at once — no timeout to pay:
-
-```ini
-# ~/.config/punktfunk/host.env (Linux) · %ProgramData%\punktfunk\host.env (Windows)
-PUNKTFUNK_DATA_PORT=9779
-```
-
-```sh
-systemctl --user restart punktfunk-host    # pick the change up (Windows: punktfunk-host service restart)
-sudo ufw allow 9779/udp                    # open exactly that one port
-```
-
-Running `serve` by hand instead? Pass `--data-port 9779` on that command line — but don't start one
-alongside the service, which already holds these ports.
-
-One caveat. A fixed data port serves **one session at a time**; a second concurrent session finds it
-busy and transparently falls back to a random port (logged). Pinning changes nothing about how video
-is addressed — the host still waits for the client's punch and answers whatever source it heard from,
-which is what lets a forwarded port or a port proxy work behind the client's own NAT. On a normal
-single-LAN setup you can also just leave the data port closed and accept the one-time ~2.5 s
-punch-timeout, or not run a host firewall on a trusted LAN at all.
-
-## `nvidia-smi` says it can't communicate with the driver
-
-The NVIDIA kernel module didn't load. With **Secure Boot** enabled (`mokutil --sb-state`), the
-module is signed with a locally generated key that must be enrolled once — or disable Secure Boot in
-firmware, fine for a dedicated box. Import the key, reboot, and on the blue **MOK Manager** screen
-(on the machine's own console, not over SSH) choose *Enroll MOK → Continue → Yes → (the password)
-→ Reboot*:
-
-```sh
-sudo mokutil --import /var/lib/shim-signed/mok/MOK.der     # Ubuntu
-sudo mokutil --import /var/lib/dkms/mok.pub                # Debian (DKMS-built module)
-sudo akmods --force && sudo mokutil --import /etc/pki/akmods/certs/public_key.der   # Fedora (akmod)
-```
-
-After a kernel update the module may need a rebuild — reinstall the driver package. Then confirm
-`nvidia-smi` loads and `cat /sys/module/nvidia_drm/parameters/modeset` prints `Y` (Wayland needs
-KMS; if it doesn't, `echo 'options nvidia-drm modeset=1' | sudo tee /etc/modprobe.d/nvidia-drm.conf`,
-regenerate the initramfs, reboot).
-
-## `systemctl --user status punktfunk-web`: unit not found
-
-The web console is its own package, and the `punktfunk` RPM only *recommends* it
-(`Recommends: punktfunk-web`) — a box with `install_weak_deps=False` in `/etc/dnf/dnf.conf`, a
-`--setopt=install_weak_deps=0` install, or an `rpm-ostree` layering that drops weak deps gets the
-host with no console and no unit to enable. Install it by name:
-
-```sh
-rpm -q punktfunk-web || sudo dnf install punktfunk-web punktfunk-scripting
-systemctl --user enable --now punktfunk-web
-journalctl --user -u punktfunk-web-init | sed -n 's/.*password generated: //p'
-```
-
-`No match for argument` instead means the repo you're on has no console: **COPR** builds host and
-client only (its mock chroot has no `bun`). Use the RPM registry —
-[Fedora](/docs/fedora#2-install-the-host), step 2. The same weak-dep miss happens on Debian/Ubuntu
-after an `apt install --no-install-recommends`; the fix is `sudo apt install punktfunk-web`.
-
-## pacman: error: could not register 'punktfunk' database (database already registered)
-
-The repo block got appended to `/etc/pacman.conf` twice — the add line is an append, so running it
-a second time leaves two `[punktfunk]` sections, and every later pacman run opens with this line.
-It's harmless (pacman ignores the duplicate), but to silence it delete the extra block from
-`/etc/pacman.conf`. (The [current add line](/docs/arch#2-install-the-host) checks first and won't
-append a second copy.)
-
-## The desktop won't start, or "GPU … not supported by EGL"
-
-The NVIDIA **GL/EGL userspace** is missing — the base driver package doesn't always include it.
-
-- **Ubuntu:** `sudo apt install libnvidia-gl-<version>` (matching your driver).
-- Confirm `/usr/share/glvnd/egl_vendor.d/10_nvidia.json` exists and `nvidia-drm modeset` is `Y`.
-
-See [GNOME](/docs/gnome) for the GL/EGL userspace details.
-
-## Black screen / no picture, but the client connects
-
-- You must be on a **Wayland** session, not X11 (check the login-screen session picker).
-- KWin must be **≥ 6.5.6** (`kwin_wayland --version`) for the *headless* appliance session
-  (`kwin_wayland --virtual`); a normal Plasma 6 login needs no particular version, only the screencast
-  grant. GNOME **≥ 48**; gamescope **≥ 3.16.22**. See [KDE](/docs/kde) for the KWin/Wayland
-  requirement and [gamescope](/docs/gamescope) for the gamescope one.
-- If [`host.env`](/docs/configuration) sets `PUNKTFUNK_COMPOSITOR`, **remove it** — the host
-  auto-detects the live compositor, and the pin points it at one backend even when a different
-  session is live (it also disables Gaming ↔ Desktop following).
-
-## A library launch says "Unable to open a connection to X" (Linux)
-
-Steam — or Lutris, or a native X11 game — opens that dialog instead of the game, and the same title
-launches fine once you have started Steam yourself. The host had no `DISPLAY` to hand the child: a
-systemd `--user` host starts before the session exports one, and `systemctl --user
-import-environment` never reaches a unit that is already running. The second attempt works because
-a Steam client that is already up takes the `steam://` URL over its own pipe and never needs X.
-
-Hosts after **0.35.0** read the session's display at each launch, so [update](/docs/updating)
-first. On an older one, add `DISPLAY=:0` to `~/.config/punktfunk/host.env` (`ls /tmp/.X11-unix/`
-names the number) and `systemctl --user restart punktfunk-host`.
-
-## Games from my library open on a physical monitor, not on the stream (Hyprland / sway)
-
-The stream shows your bare desktop while the game is running on a screen at the machine. On
-**Hyprland** and **sway** the virtual display is an *extend* output — it's added beside your real
-monitors, and neither compositor moves anything onto a new output by itself. Both open a new window on
-whatever monitor holds **focus**, so a session that never claims focus launches everything onto the
-monitor you were last using in person.
-
-The host now claims focus for the streamed display at session start and again just before each library
-launch, which is the fix — if you're seeing this, [update](/docs/updating) first, since hosts up to and
-including **0.29.0** never claimed it at all. The host log says which head it took
-(`focused the streamed headless output`), and warns when it couldn't.
-
-If it still happens on a host that has the fix:
-
-- **Are you also using the machine in person?** Focus is per-monitor and live: clicking on a physical
-  monitor while the game is still starting pulls the new window over to it. Launch, then leave the
-  host's own keyboard and mouse alone until the game is up.
-- **A launcher that opens a second window later** (Steam Big Picture, Heroic, some emulator
-  front-ends) places that window wherever focus is at *that* moment, not where the first one went. If
-  this is your normal way to play, set **Virtual displays → Dedicated game sessions** to **Dedicated**
-  — every launch then gets its own headless gamescope with only the game inside, and placement stops
-  being a question of focus at all (needs `gamescope` installed).
-- **Setting the topology to Primary won't do it.** Wayland has no primary output for these two
-  backends to set, so Primary behaves as Extend and the host says so in the log. **Exclusive** *is*
-  implemented here — it switches your physical monitors off for the session and back on afterwards,
-  which does put every window on the stream. See
-  [Virtual displays → Topology](/docs/virtual-displays#topology).
-
-## The screen stays black after switching to Game Mode (Nobara)
-
-On distros whose Game Mode is display-manager autologin under **plasmalogin** (Nobara), a managed
-takeover from a host **0.19.1 or older** could kill the display manager: it trips systemd's start
-limit and the box stays black until someone restarts it. Recover from a VT (Ctrl+Alt+F3) or SSH:
-
-```sh
-systemctl --user unmask --runtime 'gamescope-session-plus@*.service'
-sudo systemctl reset-failed plasmalogin && sudo systemctl restart plasmalogin
-```
-
-Current hosts detect the display-manager flavor and never mask the session unit there — see
-[gamescope → autologin display managers](/docs/gamescope) for the polkit rule that enables the full
-managed takeover on these boxes (without it the host mirrors Game Mode instead).
-
-## Game Mode: black screen on connect, or the stream is stuck at the box's resolution
-
-You connect to a box that autologins into Steam **Gaming Mode** and get a black picture every time
-— or a picture at the box's own resolution instead of the one your client asked for, with the box's
-monitor still lit. Nothing errors: the client connects, the host logs no failure, no unit is failed.
-
-The managed takeover is being refused and the host is falling back to mirroring the box's own
-session. On a box whose panel is off (a headless appliance, a TV that's been switched away) there
-is nothing to mirror, so the fallback is a black screen. Almost always the cause is **group
-membership**: the takeover stops the display manager through a root helper, and that helper serves
-members of the `punktfunk` group only.
-
-```sh
-id -nG | tr ' ' '\n' | grep -x punktfunk      # are you in it?
-journalctl --user -u punktfunk-host | grep -iE "punktfunk. group|takeover unavailable"
-```
-
-The host also checks at startup on any box that will need the takeover, so a fresh
-`systemctl --user restart punktfunk-host` puts the answer at the top of the log. The fix is one
-command and a fresh login:
-
-```sh
-sudo usermod -aG punktfunk "$USER"   # then log out and back in
-```
-
-> **Read the reason the log quotes before doing anything else.** The takeover has three other ways
-> to be refused — no packaged helper (a tarball or source install), no polkit on the box, and
-> polkit denying the action — and the host now prints which one it hit, verbatim from the
-> privileged path. Hosts up to 0.27.0 printed a fixed guess instead ("reinstall the punktfunk
-> package, or install the display-manager polkit rule from the docs"), and on the group case both
-> of those suggestions were dead ends: neither adds anyone to a group.
-
-Two things this is *not*: it isn't the [pad group problem](#the-pad-works-but-arrives-as-an-xbox-360-controller-instead-of-a-steam-deck)
-(same group, different symptom), and it isn't lingering — though a host with no login session of
-its own enables lingering through the same helper, so an unjoined user often sees "enabling
-lingering failed" first. Both are covered in
-[gamescope → autologin display managers](/docs/gamescope#nobara-and-other-autologin-display-managers).
-
-## Session fails right after editing host.env
-
-- Keys are **case-sensitive**: `punktfunk_gamescope_attach=1` sets nothing — use the exact
-  uppercase names.
-- Hardcoded session anchors with the wrong uid (`XDG_RUNTIME_DIR=/run/user/1000` when `id -u`
-  isn't 1000) point the host at another user's PipeWire/D-Bus: audio errors like
-  `pw audio connect … Creation failed`, no capture, and clients reporting the host as
-  unreachable or asleep. **Delete both anchor lines** — a `systemctl --user` service doesn't need
-  them — or fix the uid.
-- `PUNKTFUNK_COMPOSITOR` pins the backend and disables Gaming ↔ Desktop following — remove it on
-  any box that switches sessions.
-- The env file is read at service start: `systemctl --user restart punktfunk-host` after edits.
-
-## Capture fails: "Session creation inhibited" (GNOME)
-
-A **locked** GNOME session blocks screen capture. On an always-on/headless host, disable the lock:
-
-```sh
-gsettings set org.gnome.desktop.screensaver lock-enabled false
-gsettings set org.gnome.desktop.session idle-delay 0
-```
-
-See [GNOME → Headless session](/docs/gnome#headless-session) and
-[Running as a Service](/docs/running-as-a-service).
-
-## My mouse and keyboard are stuck in the stream
-
-Nothing is broken — the stream captures them on purpose, from the moment it starts and again
-whenever you click into it, so your keys and pointer go to the host instead of your own desktop.
-**Ctrl+Alt+Shift+Q** hands them back (**⌃⌥⇧Q** on macOS), and with a pad in your hands
-**L1+R1+Start+Select** does the same on the Linux, Windows and Steam Deck clients. Whatever you
-were holding down is released on the host, so nothing sticks. The rest of the in-stream chords —
-switch mouse mode, disconnect, fullscreen — are in
-[Getting your input back](/docs/input#getting-your-input-back).
-
-## My keyboard types the wrong characters (`#` comes out as `\`)
-
-A German keyboard giving `\` for `#`, `'` for `ä` and `/` for `-`, or `z` and `y` swapped, is a
-**host** layout mismatch — the client is fine.
-
-Punktfunk sends the *physical key you pressed*, not the character, exactly as a keyboard plugged
-into the host would. What that key finally types is decided by the layout the **host session** is
-running, so the host has to be set to the same layout as the keyboard you're typing on. When it
-isn't, every key whose position differs between the two layouts comes out as its neighbour.
-
-On Linux, set the layout the normal way and reconnect:
-
-```sh
-sudo localectl set-x11-keymap de pc105 nodeadkeys   # your layout, model, variant
-```
-
-Punktfunk reads that setting and hands it to the session on the next connect. Two things are worth
-knowing:
-
-- **Wayland desktops don't read it by themselves.** `localectl` writes a file only Xorg opens, so
-  before this release a correctly-configured box could still run a US session. If your compositor
-  is already set to the right layout in its own settings, nothing changes.
-- **Game Mode needs a current `punktfunk-gamescope`.** Gamescope publishes no keyboard layout at
-  all to the apps it runs, so Steam and games saw US whatever the box was set to. Our build fixes
-  that from `+pfhdr8` on — check with `punktfunk-gamescope --version`, and
-  [update](/docs/updating) if it's older.
-
-Nothing here changes which physical key does what in a game: `WASD` stays under the same fingers on
-every layout.
-
-## A controller is detected but games don't see it
-
-- **Linux.** The host user needs to be in the `input` group. On Bazzite:
-
-  ```sh
-  ujust add-user-to-input-group
-  ```
-
-  Then log out and back in. On other distros this is `sudo usermod -aG input $USER` + re-login. See
-  [Bazzite](/docs/bazzite).
-- **Windows, if this PC ever ran 0.22.0 or 0.22.1.** On those two releases the default emulated
-  controller bound one of Windows' own drivers instead of Punktfunk's, so the app responded to your
-  controller normally but no game ever saw it. It's fixed from 0.22.2 on — but you have to update
-  **through the installer**: the setup `.exe`, `winget upgrade`, or the console's **Update now**
-  button (see [Updating](/docs/updating)). Swapping `punktfunk-host.exe` by hand does not fix it,
-  because the stale controller device keeps the driver it was already bound to.
-
-## The pad works, but arrives as an Xbox 360 controller instead of a Steam Deck
-
-Only the **virtual Steam Deck controller** (paddles, trackpads, gyro) is missing here — ordinary
-gamepad input is fine. That pad reaches games as a real USB device over usbip, and the sysfs files
-it attaches through are owned by a group called `punktfunk`, separate from `input`. Four things
-have to line up on the Linux host, and none of them announces itself when it doesn't:
-
-```sh
-getent group punktfunk                         # the group exists at all
-id -nG | tr ' ' '\n' | grep -x punktfunk       # ...and you are in it
-ls -l /sys/devices/platform/vhci_hcd.0/attach  # owned by punktfunk, mode 0660
-lsmod | grep vhci_hcd                          # the transport module is loaded
-```
-
-If the group is missing entirely, the udev rule tried to `chgrp` to a group nobody created, so the
-nodes stayed root-only. That was the case on installs that reached 0.25.0 by **upgrade** on Arch,
-on NixOS, on the Bazzite sysext, and on Steam Deck source installs. Re-running your package
-manager's upgrade (or `update.sh` on a Deck) creates it now; otherwise `sudo groupadd --system
-punktfunk` by hand. Then `sudo usermod -aG punktfunk "$USER"` and **log out and back in** — group
-changes only reach the host's `systemd --user` service on a fresh login, and on a Deck a reboot is
-the reliable way to get one.
-
-Joining the group is optional, and there is a real reason it is not automatic: writing that
-`attach` file materialises an arbitrary emulated USB device. Skip it on a machine you share.
-
-It is not only the pad, though: the same group authorizes the helper that stops the display manager
-for a managed **Gaming Mode** takeover, so on a box that autologins into Game Mode, skipping it also
-costs you [the takeover](#game-mode-black-screen-on-connect-or-the-stream-is-stuck-at-the-boxs-resolution).
-
-## Stream lags, then freezes, with a DualSense pad (Bazzite, SELinux)
-
-On Bazzite (and other SELinux-enforcing Fedora Atomic spins), a **DualSense / DualShock 4**-type
-virtual pad can make the stream lag and then freeze — gamescope at 0 fps, `tx_mbps` collapsing —
-measured live on Bazzite 43. The virtual pad binds the kernel's `hid-playstation` driver, and Valve's
-`ds_inhibit` (inside `steamos-manager`) reacts to *any* such hidraw by walking `/proc/*/fd/` on every
-open/close. SELinux denies `steamos_manager_t` that walk — **~324 `avc: denied` per second** — and
-`setroubleshootd` amplifies the flood into a box-wide fork storm that starves the stream.
-
-Two traps while diagnosing: the AVC lines read `comm="tokio-rt-worker"` — that is **steamos-manager,
-not punktfunk** (check `scontext=…steamos_manager_t…`); and once started, the `setroubleshootd`
-storm **outlives the denials by 15+ minutes**, so the box stays starved after the pad is gone.
-
-- **Fix:** punktfunk ships a `dontaudit` SELinux drop-in that silences the flood (ds_inhibit then
-  simply leaves the pad uninhibited — harmless). The sysext installs it on install/update; on an
-  existing install run `sudo punktfunk-sysext reapply`. On a layered or bootc host:
-  `sudo semodule -i /usr/share/punktfunk/selinux/punktfunk-ds-inhibit.cil` (remove with
-  `sudo semodule -r punktfunk-ds-inhibit`).
-- **Hardening, recommended on any streaming host:** `sudo systemctl mask --now setroubleshootd`.
-  It is purely a desktop alert daemon — nothing depends on it (`systemctl list-dependencies
-  --reverse setroubleshootd` returns only itself) — and masking it makes the box robust against
-  *any* AVC burst. Reversible with `unmask`.
-- **Workaround with a feature loss:** set the *client's* controller type to Xbox 360 (uinput, no
-  `hid-playstation`) — costs adaptive triggers, lightbar and touchpad. The host-side
-  `PUNKTFUNK_GAMEPAD` knob does **not** help: an explicit client choice outranks it.
-
-## A Steam Controller 2 is captured, but Steam's controller list stays empty
-
-The client says everything is fine — the Controllers screen shows **Steam Controller 2, captured,
-streams as-is** — and on the host Steam's **Settings → Controller → Connected Controllers** has
-nothing in it. Buttons do nothing in games, and the trackpads don't move the pointer.
-
-Unlike every other pad Punktfunk presents, the Steam Controller 2 has exactly one consumer:
-**Steam**. No kernel driver claims its product id — mainline `hid-steam` stops at the Deck — and its
-state reports ride a vendor collection, so the pad produces no evdev node for anything else to read.
-If Steam can't open its `hidraw` node, you don't get a degraded controller, you get no controller.
-
-**On a Windows host, stop here — the rest of this section is Linux only.** Windows has no `udev`
-and no permission gate to open: the pad is a UMDF device the `pf_gamepad` driver package serves, so
-Steam reaches it as soon as the devnode enumerates. An empty controller list there means the driver
-package is missing or stale instead. Reinstall it and reconnect:
-
-```powershell
-punktfunk-host.exe driver install --gamepad
-```
-
-The node is root-only until a udev rule says otherwise, and distro `steam-devices` rule sets are
-per-product-id: a host whose copy predates the SC2 (it shipped in 2026) never grants it. Punktfunk
-ships the rule itself from 0.30.0 on. On an older host, add it by hand:
-
-```sh
-sudo tee /etc/udev/rules.d/61-punktfunk-sc2.rules >/dev/null <<'EOF'
-KERNEL=="hidraw*", KERNELS=="*28DE:1302*", GROUP="input", MODE="0660", TAG+="uaccess"
-KERNEL=="hidraw*", KERNELS=="*28DE:1304*", GROUP="input", MODE="0660", TAG+="uaccess"
-KERNEL=="hidraw*", ATTRS{idVendor}=="28de", ATTRS{idProduct}=="1302", GROUP="input", MODE="0660", TAG+="uaccess"
-KERNEL=="hidraw*", ATTRS{idVendor}=="28de", ATTRS{idProduct}=="1304", GROUP="input", MODE="0660", TAG+="uaccess"
-EOF
-sudo udevadm control --reload-rules && sudo udevadm trigger
-```
-
-Then end the session and reconnect, so the pad re-enumerates under the new rule. `1302` is the wired
-controller and `1304` the Puck dongle — the two identities the host presents.
-
-To confirm this is what you're hitting, look at the host log for one line and one absence: the pad
-attaching (`attached via usbip`), and **no** `answering feature GET` afterwards. That pair means the
-kernel enumerated the controller and Steam never opened it. The everything-else checks — the
-`punktfunk` group, `vhci_hcd`, the `attach` node — are in
-[the virtual Steam Deck section](#the-pad-works-but-arrives-as-an-xbox-360-controller-instead-of-a-steam-deck)
-above; if `attached via usbip` is missing from the log entirely, start there instead.
-
-One more thing that is *not* a bug: with Punktfunk capturing, the trackpads stop working as a mouse
-whenever Steam isn't running. Punktfunk turns the controller's built-in mouse-and-keyboard emulation
-("lizard mode") off so it can read the full report stream, so on this pad Steam is what makes the
-trackpads a pointer — exactly as on a Steam Deck in desktop mode.
-
-## Copy and paste between host and client does nothing
-
-The shared clipboard needs **two** separate switches on, and turning on only one looks exactly like
-the feature not existing: the host operator has to allow it with `PUNKTFUNK_CLIPBOARD` in `host.env`
-and restart the host, and you have to turn it on for that one host in your client's **Edit…** sheet.
-Work through
-[Why the toggle does nothing](/docs/clipboard#why-the-toggle-does-nothing-or-is-greyed-out) — it also
-names the clients and host sessions where nothing crosses no matter what you set.
-
-## A plugin's interface doesn't load
-
-The plugin's page in the console opens — title, version, **Open in new tab** — but the panel below
-it stays empty.
-
-Plugin interfaces are served on **TCP 47993**, a separate port from the console's 47992, so that a
-plugin can't act as you with your logged-in session (see
-[Two ports, not one](/docs/web-console#two-ports-not-one)). An empty panel means the browser can't
-load anything from that second port. Two reasons, in order of likelihood:
-
-- **The port isn't open.** Only the console's port is reachable, so the frame has nothing to show.
-  On a host you *upgraded*, this is the usual answer: an already-open firewall does not pick up a
-  port that a later version added, because the rule it saved lists the ports it knew at the time.
-
-  ```sh
-  # ufw (CachyOS, Ubuntu): re-expand the profile, then reload
-  sudo ufw app update punktfunk-web && sudo ufw reload
-
-  # firewalld (Fedora, Bazzite, Nobara): re-read the shipped service definition
-  sudo firewall-cmd --reload
-  ```
-
-  ```powershell
-  # Windows: re-run the service installer, which re-adds both console rules
-  punktfunk-host service install
-  ```
-
-  Check what's actually open with `sudo ufw status verbose` or
-  `sudo firewall-cmd --info-service=punktfunk-web` — you want **47993** listed next to 47992.
-- **The certificate isn't trusted for that port yet.** Browsers keep a self-signed certificate
-  exception *per port*, and a warning page can't be shown inside a panel. The console detects this
-  and offers a link to open the plugin in its own tab: accept the warning there once and come back.
-
-If the panel is empty and the console shows *no* explanation at all, the plugin's own port is
-probably being dropped rather than refused — open 47993 as above.
-
-## Pairing is rejected / the client can't connect
-
-- The host **requires pairing** by default. Arm pairing from the web console, then enter the PIN on
-  the client. See [Pairing & Trust](/docs/pairing).
-- If you re-installed the host, its identity changed — re-pair the client.
-
-## The picture freezes for a moment, over and over (Windows)
-
-A freeze that comes back on a **rhythm** — every few seconds, every minute, always the same gap — is
-not a bandwidth problem, and lowering the bitrate won't touch it. The Windows capture path detects
-that pattern itself and writes the cause and the cure into the log.
-
-Start on the **Status** page: while a session runs, its card shows **Capture health** — the
-capturer's own verdict, refreshed twice a second. `healthy` and `idle` need no action (an idle
-desktop composes nothing, and that is fine). `suspect` means the source stopped while the desktop
-still shows signs of life; `stalled (worker)` / `(transport)` / `(conversion)` / `(presentation)`
-names the leg that lost the frames, and **Last recovery** shows what the host did about it: the
-stall class, each rung it ran with its outcome, and whether real frames came back. A `failed`
-episode ends the video plane with a typed error and the session rebuilds its capture; repeated
-failures back off (the cooldown is in the same block of `GET /api/v1/status`). Only when that
-line does not explain the rhythm, go to the log:
-
-Open the web console's **Logs** page and search for `METRONOMIC`. You'll get one of two lines:
-
-- **…and coincide with Windows monitor hot-plug/re-enumeration events** — a display (or its
-  cable, switch or AVR) is re-probing its link on a timer and Windows reacts every time. Cures,
-  best first: turn that display's **auto input scan/detect** off in its own OSD (on TVs also
-  *instant-on / quick-start* and CEC), unplug its cable at the GPU, fit an HPD-holding adapter or
-  dummy plug, or simply keep the display active while you stream. The console's **Virtual displays**
-  page also has a *Disable monitor devices while streaming (PnP)* toggle that suppresses the
-  Windows-side reaction; the log line's `connected_inactive` field names the displays it suspects.
-- **…with NO coinciding OS display event** — the disturbance is below Windows: a connected but
-  sleeping screen being serviced by the GPU driver, display-poller software (the SteelSeries GG /
-  SignalRGB class), or the desktop present clock — try a different refresh rate. On a laptop
-  panel that the host deactivated, keeping it active with the **primary** topology usually
-  settles it — see [Virtual displays → Topology](/docs/virtual-displays#topology). As a last
-  resort, lowering the GPU-priority defaults (`setx /M PFVD_NO_RT_GPU 1` + a device restart, and
-  `PUNKTFUNK_GPU_PRIORITY_CLASS=high`; the line's `rt_gpu_driver` / `rt_gpu_host` fields show
-  what is engaged) has quieted this pattern on some AMD machines — but it masks the disturbance
-  rather than fixing it, and costs stream latency under load.
-
-Freezes that repeat *without* a steady rhythm are caught too: search the log for
-`REPEATING without a stable period` — that warning carries the same fields and the same cure
-list. Every session also stamps one `GPU-priority posture for this capture session` line near
-its start, so a log shows the levers even before any stall fires.
-
-## Stutter, drops, or high latency
-
-- Lower the **bitrate**. On a busy or Wi-Fi link, the requested bitrate may be too high — the native
-  clients' [speed test](/docs/configuration#bitrate) picks a safe value; with Moonlight, set it
-  manually.
-- Prefer a **wired** connection or 5 GHz Wi-Fi between host and client.
-- Streaming to **many devices at once** shares the GPU encoder. The host serves several
-  concurrent native sessions (up to 4 by default); heavy load is usually bitrate-bound, so
-  lower the bitrate first.
-
-If the stream is *wrong* rather than late — a codec you didn't pick, 8-bit where you expected HDR,
-4:2:0 where you asked for full chroma — the answer is usually that the host declined the request and
-told your client so. [When the client and the host
-disagree](/docs/client-settings#when-the-client-and-the-host-disagree) lists what it does with each
-one.
-
-## Audio stutters, and only the audio (Linux)
-
-Video steady, sound broken up: on a Linux host, look for this line in the host log.
-
-```
-WARN  our audio capture group is being clocked by another node — every hole in this stream is
-      that node's scheduling, not ours … driver="alsa_input.usb-…" expected="punktfunk-speaker-…"
-```
-
-PipeWire schedules audio in groups, and each group runs on one node's clock. The host brings its
-own — the virtual output it records — so this warning means something has linked that output to
-another device and handed it the clock instead. Whatever the named device does with its timing,
-your stream now does too: if it stalls for 30 ms, so does the audio, and the host fills the hole
-with silence.
-
-The usual cause is a loopback from the host's virtual output to a real one (some "listen to this
-device" setups create exactly that). The pathological case is a **sound card reached over the
-network** — a controller forwarded with VirtualHere or USB/IP presents one, and its clock cannot be
-recovered across the link at all; a host in that state synthesized 15 % of everything the user
-heard. Remove the loopback, or turn off that card's audio profile (KDE → Audio → the device →
-Profile → *Off*), and the group goes back to the host's own clock.
-
-Without the warning, audio stutter is the same problem as any other stutter — see above.
-
-## Streamed audio sounds worse than the host does
-
-The host does not capture "the sound card" — it captures a **render endpoint**, and by default it
-picks one that is *silent on the host* so the audio plays on your client only. On a PC with Steam
-installed that silent endpoint is Steam's **Streaming Microphone**, which exists to carry remote
-*voice*. If Windows has it configured as a narrow device — mono, or below 48 kHz — then the whole
-desktop mix is squeezed through that before it is ever encoded, and no amount of bitrate will bring
-it back.
-
-Since 0.25 the host checks for this: it reads each candidate endpoint's real format, prefers a real
-output device over a narrow virtual one, and says so in the log —
-
-```
-WARN  the desktop-audio loopback endpoint mixes at 24000 Hz, so the stream is band-limited …
-INFO  audio loopback capturing device="…" engine_hz=48000 engine_ch=2 engine_bits=32
-```
-
-That `engine_*` line is the endpoint's **own** format, so it tells you directly whether the source
-was ever full quality. To choose the routing yourself, set in `host.env`:
-
-```ini
-# client_only     — default; audio plays on the client only (a silent endpoint)
-# host_and_client — capture a real output device; audio plays on BOTH ends
-# follow_default  — capture whatever YOUR default playback device is, and never change it
-PUNKTFUNK_AUDIO_OUTPUT_MODE=host_and_client
-```
-
-`host_and_client` is also the quickest way to A/B the problem: if the stream sounds right that way
-and wrong on the default, the endpoint was the cause.
-
-Two related knobs:
-
-```ini
-PUNKTFUNK_AUDIO_QUALITY=high    # low | standard | high (default high — stereo 256 kbps)
-PUNKTFUNK_AUDIO_REDUNDANCY=1    # force the loss-resilient audio plane on (default: automatic)
-```
-
-Both are a **request**, not a guarantee: the host budgets audio against the session's video
-bitrate and steps it down on a narrow link, because audio is not managed by adaptive bitrate — so
-whatever it takes is taken off the top. On a roomy link you get 256 kbps plus loss redundancy; as
-the link narrows the host drops redundancy first, then the tier, and never goes below ~96 kbps. The
-session log line says what it settled on:
-
-```
-INFO  punktfunk/1 audio streaming … tier=high kbps=512 redundancy=true
-```
-
-`standard` reproduces the pre-0.25 encoder exactly if you want to A/B it.
-
-If what you want is **no lossy stage at all**, ask for it in the client: its audio-format setting
-has a **Lossless** row per rate, and picking one is the whole opt-in. There is nothing to set on the
-host — the host allows the lossless plane by default. If you want to forbid it on this host
-regardless of what clients ask for, that is the same variable, inverted:
-
-```ini
-PUNKTFUNK_AUDIO_HIRES=0         # refuse the lossless PCM audio plane (default: allowed)
-```
-
-The plane replaces Opus with uncompressed PCM — 44.1 through 176.4 kHz, 16 or 24-bit, stereo
-through 7.1 — and it costs 1.4–8.5 Mbps in stereo (up to 33.9 for 176.4 kHz/24-bit 7.1) against
-Opus's 256 kbps. Like every other audio setting here, that comes off the top of the link, where
-adaptive bitrate can neither see it nor reclaim it. Which is why the client's setting ships off and
-the host's affordability check is unconditional: a session only goes lossless when it can pay for
-it out of a quarter of its video bitrate.
-
-It is also unlikely to fix the problem *this* section is about: a lossless copy of a 24 kHz mono
-mix is still a 24 kHz mono mix, so fix the endpoint first. What it buys is bit-exactness rather
-than audibly better sound — on game content, 256 kbps Opus is already effectively transparent. On
-Windows the host reads the endpoint's own engine rate (the `engine_hz` line above) and refuses to
-pad, so 96 kHz means setting that device to 96 kHz in Windows' own sound properties. A Linux host
-normally owns the sink applications play into and states its rate to the audio graph itself, so
-96 kHz there needs no device configuration at all. Whenever any condition fails — the client didn't
-ask, this host has `PUNKTFUNK_AUDIO_HIRES=0`, the capture path can't genuinely deliver the rate, the
-link can't spare it, or one frame of that format won't fit a datagram at that channel count — the
-session quietly stays on Opus and the log says which one lost. That log line is worth knowing about
-before you go looking in the UI: a declined session and a granted one look the same from the
-settings screen, and the host's journal is where the reason lives.
-
-One trap if the box you are editing is *also* a client: the Linux and Windows clients read a
-`PUNKTFUNK_AUDIO_HIRES` of their own, with a richer grammar — a bare rate such as `96000`, or an
-explicit `96000/24` — so one line in a shared environment sets both halves at once. **`0` is the
-value that means *off* to each of them**, which is why the opt-out line above is written that way;
-anything that isn't `0`/`false`/`off`/`no` reads as *allow* on the host side, so a client-shaped
-`96000/24` also leaves the host's half permissive. The client's spellings are in
-[Configuration → Client-side](/docs/configuration#client-side-native-clients).
-
-## Audio lags behind the picture
-
-The client buffers a little audio to absorb network jitter. Since 0.25 that buffer **corrects
-itself**: if it drifts deeper — a Wi-Fi burst, a stall, or just the two devices' clocks running at
-fractionally different speeds — it trims itself back a few milliseconds at a time, inaudibly.
-Before, it could only grow, so a single hiccup left audio permanently behind the video and the only
-cure was reconnecting.
-
-If audio is still noticeably late:
-
-- **Reconnect once.** It confirms whether the delay was accumulated (gone after a reconnect) or
-  constant (something else).
-- **Check for underruns** rather than guessing. The client logs its buffer depth periodically; a
-  rising `underruns` count means the buffer is being starved, which is a network or CPU problem, not
-  a buffering one.
-- **Wired or 5 GHz Wi-Fi.** Arrival jitter is what the buffer exists to absorb; less jitter lets it
-  run shallower.
-
-## Windows: the host or the web console won't start
-
-The **`PunktfunkHost` service** runs both halves of the Windows host: the streaming host itself and
-the web console. It restarts either one automatically if it stops, so most console outages heal
-themselves within a minute. The service commands need an **elevated** PowerShell or Command Prompt.
-
-1. **Is the service running?**
-
-   ```powershell
-   punktfunk-host service status
-   punktfunk-host service restart
-   ```
-
-   `restart` stops it, waits for it to actually reach *Stopped*, and starts it again.
-2. **Two `punktfunk-host.exe` processes in Task Manager is normal — don't kill one.** The service
-   itself runs as SYSTEM in session 0, where it can neither capture the screen nor inject input, so
-   it launches a second copy into the interactive session and supervises it. One supervises, one
-   streams.
-3. **The console page never loads.** The service restarts the console on any failure, so give it a
-   minute first. If it stays down, the console's own log says why — check
-   `%ProgramData%\punktfunk\logs\web.log` (and `service.log` next to it, which records every console
-   start and exit). Those files are readable only by Administrators and SYSTEM, so open them from an
-   **elevated** PowerShell — `Get-Content -Tail 50 $env:ProgramData\punktfunk\logs\web.log` — then
-   restart the service:
-
-   ```powershell
-   punktfunk-host service restart
-   ```
-
-   Right after a very first install the console can lag the host by a few seconds on purpose: it
-   waits for the host to finish writing its certificate before serving.
-4. **The status icon is missing after an update.** Windows only launches the tray at sign-in, and an
-   upgrade closes the running ones. Put it back without signing out — from your **normal** (not
-   elevated) shell, so it runs as you:
-
-   ```powershell
-   punktfunk-host tray start
-   ```
-
-   `punktfunk-host tray status` says whether one is running and where it is installed. See
-   [Windows Host → Status tray](/docs/windows-host).
-
-## Windows: "Punktfunk Virtual Display" shows Code 10 in Device Manager
-
-Sessions end with *"pf-vdisplay driver interface not found"* and Device Manager shows the
-**Punktfunk Virtual Display** device failed with **Code 10** (`STATUS_DEVICE_POWER_FAILURE`).
-(Installs older than 0.22.2 spell that device name in lower case.)
-
-This means your Windows version is too old. The virtual-display driver requires the **IddCx 1.10**
-driver framework, which first shipped in **Windows 11 22H2 (build 22621)** — on Windows 10
-(including LTSC) and Windows 11 21H2 the driver installs but cannot start. Reinstalling won't help;
-the fix is updating to Windows 11 22H2 or newer. (Current installers refuse to run on older
-Windows for this reason; if you see this, the host was likely installed with an older installer.)
+Find your symptom below. Each entry is the likely cause and the fix in a line or two; the **→**
+link opens the full write-up on its detail page. Nothing here matches?
+[Get the logs](#still-stuck).
+
+## Install & startup
+
+### The Linux host service won't start
+
+Usually no `~/.config/punktfunk/host.env` yet (copy the shipped template), or a stale hand-copied
+unit shadowing the packaged one (`status=203/EXEC`).
+→ [Install & startup](/docs/troubleshooting-startup#the-linux-host-service-wont-start)
+
+### `systemctl --user status punktfunk-web`: unit not found
+
+The console is its own package, only *recommended* by the host — an install that skipped weak deps
+has no console to enable. `sudo apt install punktfunk-web` / `sudo dnf install punktfunk-web`.
+→ [Install & startup](/docs/troubleshooting-startup#systemctl---user-status-punktfunk-web-unit-not-found)
+
+### pacman: error: could not register 'punktfunk' database (database already registered)
+
+The repo block was appended to `/etc/pacman.conf` twice — harmless; delete the extra `[punktfunk]`
+block. → [Install & startup](/docs/troubleshooting-startup#pacman-error-could-not-register-punktfunk-database-database-already-registered)
+
+### `nvidia-smi` says it can't communicate with the driver
+
+The kernel module didn't load — usually Secure Boot blocking the unsigned module. Enroll the MOK
+key (per-distro commands) or disable Secure Boot.
+→ [Install & startup](/docs/troubleshooting-startup#nvidia-smi-says-it-cant-communicate-with-the-driver)
+
+### The desktop won't start, or "GPU … not supported by EGL"
+
+The NVIDIA GL/EGL userspace is missing — install `libnvidia-gl-<version>` matching your driver.
+→ [Install & startup](/docs/troubleshooting-startup#the-desktop-wont-start-or-gpu--not-supported-by-egl)
+
+### Session fails right after editing host.env
+
+Keys are case-sensitive; a wrong-uid `XDG_RUNTIME_DIR` anchor or a stale `PUNKTFUNK_COMPOSITOR` pin
+breaks the session. The env file is only read at service start.
+→ [Install & startup](/docs/troubleshooting-startup#session-fails-right-after-editing-hostenv)
+
+### Windows: the host or the web console won't start
+
+`punktfunk-host service status` / `restart` from an elevated PowerShell. Two `punktfunk-host.exe`
+processes are normal; the console's own log is `web.log`.
+→ [Install & startup](/docs/troubleshooting-startup#windows-the-host-or-the-web-console-wont-start)
+
+### Windows: "Punktfunk Virtual Display" shows Code 10 in Device Manager
+
+The display driver needs **Windows 11 22H2 or newer** — on Windows 10 or 11 21H2 it installs but
+can't start. The fix is updating Windows.
+→ [Install & startup](/docs/troubleshooting-startup#windows-punktfunk-virtual-display-shows-code-10-in-device-manager)
+
+## Connection & discovery
+
+### Another streaming host (Sunshine, Apollo, …) is installed
+
+Both sides want the same ports and the same mDNS name — `punktfunk-host detect-conflicts` tells
+you; stop and uninstall the other host, or move a port to coexist.
+→ [Connection & discovery](/docs/troubleshooting-connect#another-streaming-host-sunshine-apollo--is-installed)
+
+### The host isn't found on the network
+
+Check the host is running, the app's local-network permission (Android 17+), that both ends share a
+subnet (mDNS doesn't cross routers), and the firewall — `punktfunk-native` opens UDP 9777 + 5353.
+→ [Connection & discovery](/docs/troubleshooting-connect#the-host-isnt-found-on-the-network)
+
+### Windows firewall
+
+The installer opens ports on **Private** and **Domain** networks only — a LAN marked **Public**
+makes the host unreachable. Set the network to Private, or re-scope with
+`punktfunk-host service install --allow-public-network=on`.
+→ [Connection & discovery](/docs/troubleshooting-connect#windows-firewall)
+
+### Video is slow to start, or fails across subnets
+
+The data plane rides a random per-session UDP port the client hole-punches; a deny-inbound firewall
+makes every session start ~2.5 s late. Pin `PUNKTFUNK_DATA_PORT` and open that one port.
+→ [Connection & discovery](/docs/troubleshooting-connect#video-is-slow-to-start-or-fails-across-subnets)
+
+### The host is asleep and won't wake
+
+The machine isn't armed for the magic packet — a Linux host's **Troubleshooting** page prints the exact
+command for your interface under `Wake-on-`.
+→ [Connection & discovery](/docs/troubleshooting-connect#the-host-is-asleep-and-wont-wake) ·
+[Wake-on-LAN](/docs/wake-on-lan)
+
+### Pairing is rejected / the client can't connect
+
+Arm pairing in the web console, then enter the PIN on the client. Re-installed the host? Its
+identity changed — re-pair. → [Pairing & Trust](/docs/pairing)
+
+### A plugin's interface doesn't load
+
+Plugin UIs are served on **TCP 47993**, a port a saved firewall rule doesn't know — re-expand the
+`punktfunk-web` rule, or accept the certificate for that port once.
+→ [Connection & discovery](/docs/troubleshooting-connect#a-plugins-interface-doesnt-load)
+
+## Picture & session
+
+### Black screen / no picture, but the client connects
+
+Check you're on Wayland (not X11), the compositor floors (KWin ≥ 6.5.6 headless, GNOME ≥ 48,
+gamescope ≥ 3.16.22), and remove any `PUNKTFUNK_COMPOSITOR` pin.
+→ [Picture & session](/docs/troubleshooting-stream#black-screen--no-picture-but-the-client-connects)
+
+### Capture fails: "Session creation inhibited" (GNOME)
+
+A locked GNOME session blocks capture — disable the lock on an always-on host.
+→ [Picture & session](/docs/troubleshooting-stream#capture-fails-session-creation-inhibited-gnome)
+
+### A library launch says "Unable to open a connection to X" (Linux)
+
+The host had no `DISPLAY` to hand the child — fixed in 0.35.0, so update; older hosts need
+`DISPLAY=:0` in `host.env`.
+→ [Picture & session](/docs/troubleshooting-stream#a-library-launch-says-unable-to-open-a-connection-to-x-linux)
+
+### Games from my library open on a physical monitor, not on the stream (Hyprland / sway)
+
+New windows follow focus on these compositors — current hosts claim focus for the streamed display;
+update first, or use **Dedicated** game sessions.
+→ [Picture & session](/docs/troubleshooting-stream#games-from-my-library-open-on-a-physical-monitor-not-on-the-stream-hyprland--sway)
+
+### The screen stays black after switching to Game Mode (Nobara)
+
+A pre-0.19.1 takeover could trip the display manager's start limit — unmask the session unit and
+restart plasmalogin.
+→ [Picture & session](/docs/troubleshooting-stream#the-screen-stays-black-after-switching-to-game-mode-nobara)
+
+### Game Mode: black screen on connect, or the stream is stuck at the box's resolution
+
+The managed takeover was refused — almost always because you're not in the `punktfunk` group:
+`sudo usermod -aG punktfunk "$USER"`, then log out and back in.
+→ [Picture & session](/docs/troubleshooting-stream#game-mode-black-screen-on-connect-or-the-stream-is-stuck-at-the-boxs-resolution)
+
+### The picture freezes for a moment, over and over (Windows)
+
+A rhythmic freeze isn't bandwidth — it's a display re-probing its link or something below Windows.
+The **Status** card's Capture health and the `METRONOMIC` log line name the leg and the cure.
+→ [Picture & session](/docs/troubleshooting-stream#the-picture-freezes-for-a-moment-over-and-over-windows)
+
+### Stutter, drops, or high latency
+
+Lower the bitrate first, prefer wired or 5 GHz Wi-Fi, and remember many sessions share one encoder.
+→ [Picture & session](/docs/troubleshooting-stream#stutter-drops-or-high-latency)
+
+## Input & controllers
+
+### My mouse and keyboard are stuck in the stream
+
+That's capture, not a bug — **Ctrl+Alt+Shift+Q** (⌃⌥⇧Q on macOS) or **L1+R1+Start+Select** hands
+them back. → [Input & controllers](/docs/troubleshooting-input#my-mouse-and-keyboard-are-stuck-in-the-stream)
+
+### My keyboard types the wrong characters (`#` comes out as `\`)
+
+A host layout mismatch — Punktfunk sends physical keys, and the host session's layout decides what
+they type. Set it with `localectl` and reconnect.
+→ [Input & controllers](/docs/troubleshooting-input#my-keyboard-types-the-wrong-characters--comes-out-as-)
+
+### A controller is detected but games don't see it
+
+Linux: join the `input` group and re-login. Windows: a host that ever ran 0.22.0/0.22.1 must update
+**through the installer**, not by swapping the exe.
+→ [Input & controllers](/docs/troubleshooting-input#a-controller-is-detected-but-games-dont-see-it)
+
+### The pad works, but arrives as an Xbox 360 controller instead of a Steam Deck
+
+The virtual Deck pad needs the `punktfunk` group plus `vhci_hcd` — four checks, then re-login.
+→ [Input & controllers](/docs/troubleshooting-input#the-pad-works-but-arrives-as-an-xbox-360-controller-instead-of-a-steam-deck)
+
+### Stream lags, then freezes, with a DualSense pad (Bazzite, SELinux)
+
+`steamos-manager`'s ds_inhibit trips SELinux into an AVC storm — punktfunk ships a `dontaudit`
+drop-in (`sudo punktfunk-sysext reapply`), and masking `setroubleshootd` hardens any host.
+→ [Input & controllers](/docs/troubleshooting-input#stream-lags-then-freezes-with-a-dualsense-pad-bazzite-selinux)
+
+### A Steam Controller 2 is captured, but Steam's controller list stays empty
+
+Only Steam reads that pad, and it needs the `hidraw` node — pre-0.30.0 Linux hosts need a udev
+rule; on Windows reinstall the gamepad driver.
+→ [Input & controllers](/docs/troubleshooting-input#a-steam-controller-2-is-captured-but-steams-controller-list-stays-empty)
+
+### Copy and paste between host and client does nothing
+
+Two switches, both needed: `PUNKTFUNK_CLIPBOARD` on the host, and the per-host toggle in the
+client's Edit sheet. → [Shared clipboard](/docs/clipboard#why-the-toggle-does-nothing-or-is-greyed-out)
+
+## Audio
+
+### Audio stutters, and only the audio (Linux)
+
+Something linked the host's virtual output to another device and handed it the clock — the log's
+`clocked by another node` warning names it. Remove the loopback or that card's profile.
+→ [Audio](/docs/troubleshooting-audio#audio-stutters-and-only-the-audio-linux)
+
+### Streamed audio sounds worse than the host does
+
+The default endpoint is a *silent* one — possibly a narrow voice device like Steam's Streaming
+Microphone. `PUNKTFUNK_AUDIO_OUTPUT_MODE=host_and_client` is both the fix and the A/B test.
+→ [Audio](/docs/troubleshooting-audio#streamed-audio-sounds-worse-than-the-host-does)
+
+### Audio lags behind the picture
+
+The jitter buffer self-corrects — reconnect once, then check the client's `underruns` count.
+→ [Audio](/docs/troubleshooting-audio#audio-lags-behind-the-picture)
 
 ## Still stuck?
 
@@ -803,19 +223,12 @@ log, health checks and your client's log in one file — follow [Reporting an Is
    can attach to a bug report. The button beside it hands the same text to your phone or tablet's
    share sheet, or copies it to the clipboard on a desktop.
 
-The same output also lands outside the console — on Linux in the journal
-(`journalctl --user -u punktfunk-host`), on Windows in `%ProgramData%\punktfunk\logs\host.log` (plus
-`service.log` for the service that supervises it). Those *do* follow the log level: raise it with
-`RUST_LOG=debug` in [`host.env`](/docs/configuration) and restart the host. `RUST_LOG=info` is
-already the default, so setting it changes nothing. The Windows files are readable only by
-Administrators and SYSTEM — a normal editor is refused even on an admin account, because Windows
-hands it a filtered token — so open them from an **elevated** PowerShell, or stay on the **Logs**
-page above, which needs no elevation.
+The same output lands outside the console — `journalctl --user -u punktfunk-host` (Linux),
+`%ProgramData%\punktfunk\logs\host.log` (Windows, elevated-readable only; `service.log` sits next to
+it). Those follow the log level: `RUST_LOG=debug` in [`host.env`](/docs/configuration) + a restart.
 
-None of that covers the **client** side. If the picture, the decoder or the presenter is what
-failed, the Windows client keeps its own log at `%LOCALAPPDATA%\punktfunk\logs\client.log` (rotated
-to `.old` at the next start once it passes 10 MB, one generation kept) — that's the only place a
-receive, decode or present failure is recorded.
+On the **client** side, the Windows client keeps `%LOCALAPPDATA%\punktfunk\logs\client.log` —
+the only place a receive, decode or present failure is recorded.
 
-For a performance problem rather than a failure, attach a **recording** instead of a log: see
+For a performance problem, attach a **recording** instead of a log:
 [Recording a capture for a bug report](/docs/stats#recording-a-capture-for-a-bug-report).

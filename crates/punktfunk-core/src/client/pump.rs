@@ -76,6 +76,7 @@ pub(super) async fn run_pump(args: WorkerArgs) {
         mic_stats,
         hot_tids,
         clock_offset,
+        rtt_us,
         decode_lat,
         live_bitrate,
         access_grants,
@@ -104,6 +105,7 @@ pub(super) async fn run_pump(args: WorkerArgs) {
         crate::audio::plan_audio_budget(
             negotiated.bitrate_kbps,
             negotiated.audio_channels,
+            crate::audio::AudioLayout::from_wire(negotiated.audio_layout).unwrap_or_default(),
             crate::audio::AudioTier::default(),
             host_caps & crate::quic::HOST_CAP_AUDIO_RED != 0,
         )
@@ -152,6 +154,21 @@ pub(super) async fn run_pump(args: WorkerArgs) {
         pad_audio_arrivals,
         pad_audio_caps,
     ));
+
+    // Smoothed path round trip for the overlay, sampled while the connection lives.
+    let rtt_conn = conn.clone();
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(Duration::from_millis(250));
+        loop {
+            tokio::select! {
+                _ = tick.tick() => {
+                    let us = rtt_conn.rtt().as_micros().min(u128::from(u32::MAX)) as u32;
+                    rtt_us.store(us, Ordering::Relaxed);
+                }
+                _ = rtt_conn.closed() => break,
+            }
+        }
+    });
 
     // 0xCB mic uplink. A frame with more than [`MIC_BACKLOG_MAX`] successors is
     // shed: a stall costs a dropout, not session-long lag ([`MIC_QUEUE`]).

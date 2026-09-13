@@ -1177,6 +1177,108 @@ public final class PunktfunkConnection: @unchecked Sendable {
         _ = punktfunk_connection_report_decode_us(h, us)
     }
 
+    // MARK: - Stats overlay
+
+    /// One stats-overlay line and how to paint it (the core's `hud::Role` codes).
+    public struct HudLine: Sendable, Equatable {
+        public enum Role: UInt8, Sendable { case primary = 0, detail, muted, warn }
+        public let role: Role
+        public let text: String
+        public init(role: Role, text: String) {
+            self.role = role
+            self.text = text
+        }
+
+        /// Parse the core's `<role>\t<text>\n` lines. A line with no tab is dropped.
+        public static func decode(_ s: String) -> [HudLine] {
+            s.split(separator: "\n").compactMap { line in
+                guard let tab = line.firstIndex(of: "\t") else { return nil }
+                let role = UInt8(line[..<tab]).flatMap(Role.init(rawValue:)) ?? .primary
+                return HudLine(role: role, text: String(line[line.index(after: tab)...]))
+            }
+        }
+    }
+
+    /// What only the app knows about the window being drawn: the floor policy, its own audio
+    /// ring, the profile, and Apple-only diagnostic lines (Advanced Detailed).
+    public struct HudFacts: Sendable {
+        public var onGlass = true
+        public var shaveOsFloor = false
+        public var audioBufferMs: UInt32 = 0
+        public var avOffsetMs: Int32 = 0
+        public var profile: String?
+        public var extras: [HudLine] = []
+        public init() {}
+    }
+
+    /// One frame left the decoder (`receivedNs` = the AU's reassembly stamp; both client
+    /// `CLOCK_REALTIME`). Cheap; dropped after close.
+    public func hudDecoded(ptsNs: UInt64, receivedNs: Int64, decodedNs: Int64) {
+        abiLock.lock()
+        defer { abiLock.unlock() }
+        guard let h = handle, !closeRequested else { return }
+        _ = punktfunk_connection_hud_decoded(
+            h, ptsNs, UInt64(max(0, receivedNs)), UInt64(max(0, decodedNs)))
+    }
+
+    /// One frame reached the screen at `displayedNs` (client `CLOCK_REALTIME`).
+    public func hudDisplayed(ptsNs: UInt64, decodedNs: Int64, displayedNs: Int64) {
+        abiLock.lock()
+        defer { abiLock.unlock() }
+        guard let h = handle, !closeRequested else { return }
+        _ = punktfunk_connection_hud_displayed(
+            h, ptsNs, UInt64(max(0, decodedNs)), UInt64(max(0, displayedNs)))
+    }
+
+    /// One sample of the OS present pipeline's depth (the display link's vend lead), ns.
+    public func hudOsFloor(ns: Int64) {
+        abiLock.lock()
+        defer { abiLock.unlock() }
+        guard let h = handle, !closeRequested, ns > 0 else { return }
+        _ = punktfunk_connection_hud_os_floor(h, UInt64(ns))
+    }
+
+    /// Close the overlay's window, once a second; `hudLines` formats what it kept.
+    public func hudDrain() {
+        abiLock.lock()
+        defer { abiLock.unlock() }
+        guard let h = handle, !closeRequested else { return }
+        _ = punktfunk_connection_hud_drain(h)
+    }
+
+    /// The last drained window as overlay lines at `tier`, in the Advanced vocabulary when
+    /// `advanced`. Empty after close.
+    public func hudLines(tier: StatsVerbosity, advanced: Bool, facts: HudFacts) -> [HudLine] {
+        abiLock.lock()
+        defer { abiLock.unlock() }
+        guard let h = handle, !closeRequested else { return [] }
+        let index = UInt32(StatsVerbosity.allCases.firstIndex(of: tier) ?? 2)
+        let extras = facts.extras.map { "\($0.role.rawValue)\t\($0.text)\n" }.joined()
+        return (facts.profile ?? "").withCString { profile in
+            extras.withCString { extrasPtr in
+                var f = PunktfunkHudFacts()
+                f.struct_size = UInt32(MemoryLayout<PunktfunkHudFacts>.size)
+                f.on_glass = facts.onGlass
+                f.shave_os_floor = facts.shaveOsFloor
+                f.audio_buffer_ms = facts.audioBufferMs
+                f.av_offset_ms = facts.avOffsetMs
+                f.profile = facts.profile == nil ? nil : profile
+                f.extras = extrasPtr
+                var cap = 4096
+                while true {
+                    var buf = [CChar](repeating: 0, count: cap)
+                    var needed: UInt = 0
+                    let rc = punktfunk_connection_hud_text(
+                        h, index, advanced, &f, &buf, UInt(buf.count), &needed)
+                    if rc == statusOK { return HudLine.decode(String(cString: buf)) }
+                    // A line longer than the buffer: grow once to the size the core asked for.
+                    guard Int(needed) > cap else { return [] }
+                    cap = Int(needed)
+                }
+            }
+        }
+    }
+
     /// Whether `reportDecodeUs` is worth calling this session: true only when the adaptive-bitrate
     /// controller is armed (Automatic bitrate, non-PyroWave). Query once — constant for the session
     /// — and skip the per-frame decode measurement entirely when it's false. False after close.

@@ -625,7 +625,7 @@ struct HandoffWindow {
     /// `DecoderBeginFrame` busy retries and the time they cost.
     begin_retries: u32,
     begin_wait: Duration,
-    blt_us: Vec<u64>,
+    blt_us: Vec<u32>,
     debug: bool,
 }
 
@@ -650,7 +650,7 @@ impl HandoffWindow {
             self.acquire_stalls += 1;
         }
         if let Some(us) = blt_us {
-            self.blt_us.push(u64::from(us));
+            self.blt_us.push(us);
         }
     }
 
@@ -658,8 +658,8 @@ impl HandoffWindow {
         if self.frames == 0 || self.start.elapsed() < Duration::from_secs(1) {
             return;
         }
-        let (blt_p50_us, _) = crate::session::window_percentiles(&mut self.blt_us);
-        let blt_max_us = self.blt_us.iter().copied().max().unwrap_or(0);
+        let blt = punktfunk_core::hud::Summary::of(&mut self.blt_us);
+        let (blt_p50_us, blt_max_us) = (blt.p50_us, blt.max_us);
         let stalled = self.begin_retries > 0 || self.acquire_stalls > 0;
         // Both arms carry the same fields: `tracing` levels are not runtime values.
         if self.debug || stalled {

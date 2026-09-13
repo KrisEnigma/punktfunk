@@ -38,29 +38,27 @@ pub const fn interface_guid_fields() -> (u32, u16, u16, [u8; 8]) {
 /// Bumped on any incompatible change to either plane. Exchanged via [`control::IOCTL_GET_INFO`];
 /// host and driver assert a match at startup.
 ///
-/// v8 scopes the driver to the process that asks: a monitor, its encoder and its cursor channel
-/// answer only to the owner whose `IOCTL_ADD` created them (a foreign `target_id` or
-/// `session_id` is `STATUS_NOT_FOUND`), `IOCTL_CLEAR_ALL` departs the caller's own, and an
-/// owner's monitors depart when its last control handle closes or it goes silent for the
-/// watchdog window. Nothing on the wire changed; the floor rises because a host sharing the
-/// driver with a second host relies on it. `IOCTL_SET_RENDER_ADAPTER` stays adapter-wide by
-/// IddCx design, so a pin that would move another live owner's GPU is refused.
+/// v9 widens [`encode::au::AuSlot`] from 32 to 48 bytes with the driver's encode-submit and
+/// publish QPC, so the host can split present → arrival into pool, encode and hand-off. A layout
+/// change, so not additive; host and driver ship in one installer.
 ///
-/// v7 was NOT additive: the pixel ring is gone. The driver encodes what DWM composes and
-/// publishes access units into the host's section ([`encode::IOCTL_SET_ENCODE`],
-/// [`encode::IOCTL_ENCODE_CTL`]); `IOCTL_SET_FRAME_CHANNEL` no longer exists. Host and driver
-/// ship in one installer. Evidence: `design/windows-video-plane-overhaul.md` §2.3.
+/// v8 scopes the driver to the process that asks: a monitor, its encoder and its cursor channel
+/// answer only to the owner whose `IOCTL_ADD` created them, `IOCTL_CLEAR_ALL` departs the
+/// caller's own, and an owner's monitors depart when its last control handle closes or it goes
+/// silent for the watchdog window. `IOCTL_SET_RENDER_ADAPTER` stays adapter-wide by IddCx
+/// design. v7 replaced the pixel ring with driver-side encode into the host's section
+/// ([`encode::IOCTL_SET_ENCODE`]); `IOCTL_SET_FRAME_CHANNEL` no longer exists.
 ///
 /// [`control::AddRequest`] luminance tail and [`control::AddReply::cursor_excluded`] are
 /// prefix-compatible (no bump): a short read/write sees zeros = unknown. A hardware-cursor
 /// declare is irrevocable on the adapter — DWM excludes the pointer from every later monitor
 /// until the adapter resets — so the driver blends the pointer when the client draws none.
-pub const PROTOCOL_VERSION: u32 = 8;
+pub const PROTOCOL_VERSION: u32 = 9;
 
-/// Oldest driver this host still drives. Equal to [`PROTOCOL_VERSION`]: a v7 driver lets a
-/// second host on the box reach this host's monitors, and v7 itself replaced the video
-/// transport outright.
-pub const MIN_DRIVER_PROTOCOL_VERSION: u32 = 8;
+/// Oldest driver this host still drives. Equal to [`PROTOCOL_VERSION`]: a v8 driver writes
+/// 32-byte slots into a table this host lays out at 48, v7 lets a second host reach this
+/// host's monitors, and v6 speaks a video transport that no longer exists.
+pub const MIN_DRIVER_PROTOCOL_VERSION: u32 = 9;
 
 /// `CTL_CODE(FILE_DEVICE_UNKNOWN = 0x22, func, METHOD_BUFFERED = 0, FILE_ANY_ACCESS = 0)`.
 pub const fn ctl_code(func: u32) -> u32 {
@@ -1495,14 +1493,14 @@ pub mod encode {
 
         /// Header magic (`"PFAU"` LE), stamped by the host before the handle is delivered.
         pub const AU_MAGIC: u32 = 0x5541_4650;
-        /// AU-section layout version; moves with `PROTOCOL_VERSION` v7.
-        pub const AU_VERSION: u32 = 7;
+        /// AU-section layout version; moved with `PROTOCOL_VERSION` v7 and v9.
+        pub const AU_VERSION: u32 = 8;
         /// Slots in the table. Fixed: the host allocates exactly this many.
         pub const AU_SLOTS: u32 = 16;
         /// [`AuHeader`] size, and therefore where the slot table starts.
         pub const AU_HEADER_SIZE: usize = 128;
         /// [`AuSlot`] size.
-        pub const AU_SLOT_SIZE: usize = 32;
+        pub const AU_SLOT_SIZE: usize = 48;
         /// Byte offset of the slot table inside the section.
         pub const SLOT_TABLE_OFFSET: usize = AU_HEADER_SIZE;
         /// Byte offset of the heap: past the header and the whole table, still 64-byte aligned so
@@ -1608,6 +1606,8 @@ pub mod encode {
         /// `au_seq` domain from
         /// [`SetEncodeRequest::wire_seq_base`](super::SetEncodeRequest::wire_seq_base);
         /// `source_seq` names the frame it encodes, which is how a dropped frame stays visible.
+        /// `qpc_submit` and `qpc_published` are the driver's own clocks on the way through: with
+        /// `qpc_pts` they split present → arrival into the pool wait, the encode and the hand-off.
         #[repr(C)]
         #[derive(Clone, Copy, Pod, Zeroable, Debug, PartialEq, Eq)]
         pub struct AuSlot {
@@ -1625,6 +1625,11 @@ pub mod encode {
             pub flags: u32,
             /// [`FREE`], [`PUBLISHED`] or [`READING`].
             pub state: u32,
+            /// QPC when the driver handed the frame to its encoder. `0` from a driver that
+            /// predates the stamp.
+            pub qpc_submit: u64,
+            /// QPC when the driver wrote this record.
+            pub qpc_published: u64,
         }
 
         /// Heap bytes for a session: four frames at `max_bitrate_kbps`, doubled for burst, rounded
@@ -1785,8 +1790,10 @@ pub mod encode {
             assert!(offset_of!(AuSlot, qpc_pts) == 16);
             assert!(offset_of!(AuSlot, flags) == 24);
             assert!(offset_of!(AuSlot, state) == 28);
+            assert!(offset_of!(AuSlot, qpc_submit) == 32);
+            assert!(offset_of!(AuSlot, qpc_published) == 40);
 
-            assert!(HEAP_OFFSET == 640 && HEAP_OFFSET % 64 == 0);
+            assert!(HEAP_OFFSET == 896 && HEAP_OFFSET % 64 == 0);
             assert!(SLOT_TABLE_OFFSET % 8 == 0);
         };
     }
@@ -3200,9 +3207,9 @@ mod tests {
             req
         );
         assert_eq!(bytes[8..12], 2560u32.to_le_bytes());
-        // v8 scoped the driver to its owners and v7 replaced the video transport; each makes
-        // the floor the version itself.
-        assert_eq!(PROTOCOL_VERSION, 8);
+        // v9 widened the AU slot, v8 scoped the driver to its owners, v7 replaced the video
+        // transport; each makes the floor the version itself.
+        assert_eq!(PROTOCOL_VERSION, 9);
         assert_eq!(MIN_DRIVER_PROTOCOL_VERSION, PROTOCOL_VERSION);
     }
 
@@ -3907,7 +3914,7 @@ mod tests {
         assert_eq!(offset_of!(AuHeader, driver_status_detail), 92);
         assert_eq!(offset_of!(AuHeader, _reserved), 96);
 
-        assert_eq!(size_of::<AuSlot>(), 32);
+        assert_eq!(size_of::<AuSlot>(), 48);
         assert_eq!(offset_of!(AuSlot, offset), 0);
         assert_eq!(offset_of!(AuSlot, len), 4);
         assert_eq!(offset_of!(AuSlot, wire_seq), 8);
@@ -3915,11 +3922,13 @@ mod tests {
         assert_eq!(offset_of!(AuSlot, qpc_pts), 16);
         assert_eq!(offset_of!(AuSlot, flags), 24);
         assert_eq!(offset_of!(AuSlot, state), 28);
+        assert_eq!(offset_of!(AuSlot, qpc_submit), 32);
+        assert_eq!(offset_of!(AuSlot, qpc_published), 40);
 
         assert_eq!(au::slot_offset(0), 128);
-        assert_eq!(au::slot_offset(15), 128 + 15 * 32);
+        assert_eq!(au::slot_offset(15), 128 + 15 * 48);
         assert_eq!(au::slot_offset(au::AU_SLOTS as usize), au::HEAP_OFFSET);
-        assert_eq!(au::HEAP_OFFSET, 640);
+        assert_eq!(au::HEAP_OFFSET, 896);
         assert_eq!(&au::AU_MAGIC.to_le_bytes(), b"PFAU");
         // The retired ring header's magic — a v6 section must never read as an AU one.
         assert_ne!(au::AU_MAGIC, 0x4456_4650);

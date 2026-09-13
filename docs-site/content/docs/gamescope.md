@@ -50,9 +50,6 @@ from Steam while a stream is up.
 
 That needs no privilege at all: the drop-in is a user-level unit override, written under
 `$XDG_RUNTIME_DIR` so it cannot outlive the login session, and a reboot clears it regardless.
-Versions before this one stopped the display manager for the stream's duration — which needed a
-root helper, the `punktfunk` group, and lingering, and left the box with nothing able to start a
-desktop session, so Steam's own "Switch to Desktop" hung until a reboot.
 
 > **Join the `punktfunk` group on any box you stream Game Mode from.** The guided installer
 > defaults to yes on Bazzite and Nobara; on any other distro it asks, and `--punktfunk-group`
@@ -79,10 +76,9 @@ desktop session, so Steam's own "Switch to Desktop" hung until a reboot.
 > symptom side is [Game Mode: black screen on
 > connect](/docs/troubleshooting#game-mode-black-screen-on-connect-or-the-stream-is-stuck-at-the-boxs-resolution).
 
-The display-manager flavor is no longer an input — SDDM, plasmalogin and the rest all get the
-idled session above, and none of them is stopped. The root helper described below is therefore no
-longer part of a normal takeover; it is kept for the restore path, and for a box where an older
-host left a display manager stopped:
+The display-manager flavor is not an input — SDDM, plasmalogin and the rest all get the idled
+session above, and none of them is stopped. A root helper still ships for the restore path, and for
+a box where an older host left a display manager stopped:
 
 - The packages ship it: a root helper
   (`/usr/libexec/punktfunk/pf-dm-helper`, or `/usr/lib/punktfunk/pf-dm-helper` from the Arch

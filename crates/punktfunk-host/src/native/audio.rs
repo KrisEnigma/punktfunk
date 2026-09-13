@@ -94,8 +94,9 @@ impl NativeAudioEnc {
     fn new(
         channels: u8,
         tier: punktfunk_core::audio::AudioTier,
+        layout: punktfunk_core::audio::AudioLayout,
     ) -> Result<NativeAudioEnc, opus::Error> {
-        let l = punktfunk_core::audio::layout_for(channels, false);
+        let l = punktfunk_core::audio::layout_for(channels, layout);
         let bitrate = l.bitrate_for(tier);
         if channels == 2 {
             let mut e = opus::Encoder::new(
@@ -226,7 +227,7 @@ pub(super) fn audio_thread(
     let mut enc = if pcm_plane {
         None
     } else {
-        match NativeAudioEnc::new(want, tier) {
+        match NativeAudioEnc::new(want, tier, plane.layout) {
             Ok(e) => Some(e),
             Err(e) => {
                 tracing::warn!(error = %e, "opus encoder init failed — session continues without audio");
@@ -324,6 +325,7 @@ pub(super) fn audio_thread(
                 budget.kbps
             },
             redundancy,
+            layout = ?plane.layout,
             "punktfunk/1 audio streaming"
         );
     }

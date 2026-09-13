@@ -120,6 +120,12 @@ data class Settings(
      */
     val statsVerbosity: StatsVerbosity = StatsVerbosity.NORMAL,
     /**
+     * Which vocabulary the stats overlay speaks: off (the default) shows the figures Moonlight's
+     * overlay also shows, on shows capture to glass and every stage. Device-wide; a profile never
+     * carries it.
+     */
+    val advancedStats: Boolean = false,
+    /**
      * Touch input model — how touchscreen fingers drive the host. [TouchMode.TRACKPAD] (default):
      * the cursor stays put on touch-down and moves by the finger's relative delta (swipe to nudge,
      * lift and re-swipe to walk it across), tap to click where it is. [TouchMode.POINTER]: the

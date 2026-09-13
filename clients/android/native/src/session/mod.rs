@@ -50,10 +50,9 @@ pub(crate) struct SessionHandle {
     // build (CI's workspace clippy/build) those readers are cfg'd out, so it's intentionally unused.
     #[cfg_attr(not(target_os = "android"), allow(dead_code))]
     pub client: Arc<NativeClient>,
-    /// Live decode stats, written by the decode thread and drained ~1 Hz by `nativeVideoStats`.
-    /// Session-lifetime (not per `VideoThread`) so the HUD's enable gate set via
-    /// `nativeSetVideoStatsEnabled` survives surface teardown/recreate and can land before
-    /// `nativeStartVideo` — enabling resets the window, so no stale data leaks across restarts.
+    /// The overlay's Android facts plus a handle on the connector's window, read ~1 Hz by
+    /// `nativeVideoStatsLines`. Session-lifetime (not per `VideoThread`) so the decoder label
+    /// survives surface teardown and recreate.
     pub stats: Arc<crate::stats::VideoStats>,
     video: Mutex<Option<VideoThread>>,
     /// The background keep-alive's AU drain: the decode thread is down (its Surface is gone) but

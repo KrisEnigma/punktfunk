@@ -486,6 +486,8 @@ fn connect(req: ConnectRequest) -> jlong {
         // actually happened, and `crate::audio` opens the device from those, never from these.
         audio_rate_hz,
         audio_bits,
+        // Legacy coupling: libopus here decodes either, and nothing on Android needs the other.
+        punktfunk_core::audio::AudioLayout::Legacy,
         // Codecs this device decodes (`VideoDecoders.decodableCodecBits`): H.264 + HEVC always,
         // AV1 on a real `video/av01` decoder, PyroWave on a GPU that passes the probe — the one
         // bit here naming no MediaCodec, since it decodes as Vulkan compute in `crate::pyro`.
@@ -550,9 +552,10 @@ fn connect(req: ConnectRequest) -> jlong {
         None,
     ) {
         Ok(client) => {
+            let client = Arc::new(client);
             let handle = SessionHandle {
-                client: Arc::new(client),
-                stats: Arc::new(crate::stats::VideoStats::new()),
+                stats: Arc::new(crate::stats::VideoStats::new(client.hud_shared())),
+                client,
                 video: Mutex::new(None),
                 drain: Mutex::new(None),
                 #[cfg(target_os = "android")]
