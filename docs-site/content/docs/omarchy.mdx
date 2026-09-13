@@ -256,8 +256,9 @@ Punktfunk is the remote desktop on this box. Leave Sunshine off unless you are m
 The packages can share a machine during a trial, but the services do not run together unchanged:
 
 - **The management ports collide.** Sunshine's web UI and Punktfunk's management API both default
-  to TCP 47990. Stop Sunshine, or [move Punktfunk's management API](/docs/configuration) before
-  starting both.
+  to TCP 47990. The installer moves ours to 47991 when Sunshine is running or enabled, and
+  `punktfunk-omarchy setup` opens the moved port in ufw. A port you
+  [move by hand](/docs/configuration) opens on the next `punktfunk-omarchy setup`.
 - **The GameStream plane collides.** Moonlight compatibility uses 47984/47989/48010 and
   47998/47999/48000 — exactly Sunshine's TCP and UDP ports. Ours are **off by default**; leave them
   off unless you are migrating, and only one host can bind them.
