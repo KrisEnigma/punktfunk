@@ -110,8 +110,8 @@ defaults_case debian-ssh2 "$DEB" headless '' 'Full controller (joins the punktfu
 # No desktop installed either → the host is pinned to gamescope, the backend that brings its own session.
 defaults_case debian-ssh3 "$DEB" headless '' 'would set PUNKTFUNK_COMPOSITOR=gamescope'
 
-# Active Sunshine-family host (detect-conflicts exit 1) → Moonlight compat defaults on.
-# A dormant leftover is not enough — that is the same split detect-conflicts uses.
+# Active Sunshine-family host (detect-conflicts exit 1) → Moonlight compat stays off: both
+# hosts bind the Moonlight ports.
 cat > "$gsbin/punktfunk-host" <<'EOF'
 #!/bin/sh
 if [ "${1:-}" = detect-conflicts ]; then
@@ -121,7 +121,7 @@ fi
 echo 0.0.0-test
 EOF
 chmod +x "$gsbin/punktfunk-host"
-defaults_case debian-gs "$DEB" desktop "$gsbin" 'Third-party clients (Moonlight, Artemis): yes  (Sunshine/Apollo already on this box)'
+defaults_case debian-gs "$DEB" desktop "$gsbin" 'Third-party clients (Moonlight, Artemis): no'
 defaults_case debian-gs2 "$DEB" desktop "$gsbin" 'Full controller (joins the punktfunk group — grants usbip attach): yes'
 
 # `ujust` and `rpm-ostree` are NOT couch-box tells. Bluefin and Aurora ship ujust; Silverblue
