@@ -190,21 +190,38 @@ pub fn build(facts: &Facts, choices: &Choices) -> Plan {
         );
     }
 
-    // Before the Omarchy hand-off, which starts the host and ends the run: next to Sunshine the
-    // host's first bind must already be on the moved mgmt port.
+    // What the Omarchy hand-off does not do lands before it: it starts the host and ends the
+    // run. Next to Sunshine the first bind must already be on the moved mgmt port.
     if choices.components.host {
         plan.push(
             Phase::Conflicts,
             "Checking for Sunshine / Apollo / Vibeshine",
             conflict_steps(facts, choices),
         );
+        plan.push(
+            Phase::Options,
+            "Options (host.env — everything here is off by default and reversible)",
+            option_steps(facts, choices),
+        );
+        // Linger is configuration, not start, so --no-start still honours it. It also creates
+        // the user manager on a seatless box, so it must land before the unit enable below.
+        if choices.linger {
+            plan.push(
+                Phase::Linger,
+                "Starting at boot with nobody logged in",
+                vec![Step {
+                    action: StepAction::Linger,
+                    ends_run: false,
+                }],
+            );
+        }
     }
 
     if facts.omarchy {
         plan.push(Phase::Omarchy, "Omarchy", omarchy_steps(facts, choices));
     }
 
-    // A client listens on nothing fixed, so skip groups, firewall, linger, and start.
+    // A client listens on nothing fixed, so skip groups, firewall, and start.
     if !choices.components.host {
         return plan;
     }
@@ -214,25 +231,7 @@ pub fn build(facts: &Facts, choices: &Choices) -> Plan {
         "Controller access",
         group_steps(facts, choices),
     );
-    plan.push(
-        Phase::Options,
-        "Options (host.env — everything here is off by default and reversible)",
-        option_steps(facts, choices),
-    );
     plan.push(Phase::Firewall, "Firewall", firewall_steps(facts, choices));
-
-    // Linger is configuration, not start, so --no-start still honours it. It also creates
-    // the user manager on a seatless box, so it must land before the unit enable below.
-    if choices.linger {
-        plan.push(
-            Phase::Linger,
-            "Starting at boot with nobody logged in",
-            vec![Step {
-                action: StepAction::Linger,
-                ends_run: false,
-            }],
-        );
-    }
     if choices.start {
         plan.push(
             Phase::Start,
