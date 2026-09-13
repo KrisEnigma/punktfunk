@@ -2644,6 +2644,196 @@ mod tests {
         );
     }
 
+    /// LTR anchors on hardware: the wave smokes' moving pattern, a loss every `PF_WAVE_GAP` frames
+    /// (default 40) answered `PF_WAVE_LAG` frames later (default 2) through
+    /// `invalidate_ref_frames`. The full stream and the view without the lost frames land in
+    /// `PUNKTFUNK_SMOKE_DIR` with `.idx` sidecars, for `gpu_parity`'s field hashers. HEVC, or
+    /// H.264 with `PF_WAVE_CODEC=h264`; shape `PF_WAVE_SMOKE=WxH:8:fps:mbps`, `PF_WAVE_SOAK` losses.
+    ///
+    /// `cargo test -p pf-encode-win --lib amf_ltr_anchor_soak -- --ignored --nocapture`
+    #[test]
+    #[ignore = "requires an AMD GPU with AMF — run manually on an AMD Windows box (.173)"]
+    fn amf_ltr_anchor_soak() {
+        use crate::smoke_pattern::{scroll_pattern, write_capture};
+        use windows::Win32::Graphics::Direct3D11::{
+            D3D11_BIND_SHADER_RESOURCE, D3D11_SUBRESOURCE_DATA,
+        };
+        try_factory().expect("AMF runtime");
+        let device = amd_d3d11_device().expect("an AMD adapter");
+        let shape = std::env::var("PF_WAVE_SMOKE").unwrap_or_else(|_| "256x256:8:60:2".into());
+        let mut parts = shape.split(':');
+        let (w, h) = parts
+            .next()
+            .and_then(|s| s.split_once('x'))
+            .map(|(w, h)| (w.parse::<u32>().unwrap(), h.parse::<u32>().unwrap()))
+            .expect("PF_WAVE_SMOKE=WxH[:8[:fps[:mbps]]]");
+        assert_ne!(parts.next(), Some("10"), "the soak feeds NV12");
+        let fps: u32 = parts.next().map_or(60, |f| f.parse().unwrap());
+        let mbps: u64 = parts.next().map_or(2, |m| m.parse().unwrap());
+        let count = |k: &str, d: usize| {
+            std::env::var(k)
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(d)
+        };
+        let (losses, gap, lag) = (
+            count("PF_WAVE_SOAK", 12),
+            count("PF_WAVE_GAP", 40),
+            count("PF_WAVE_LAG", 2),
+        );
+        assert!(lag >= 1 && lag < gap, "PF_WAVE_LAG=1..PF_WAVE_GAP");
+        let h264 = std::env::var("PF_WAVE_CODEC").is_ok_and(|v| v == "h264");
+        let (codec, ext) = if h264 {
+            (Codec::H264, "h264")
+        } else {
+            (Codec::H265, "h265")
+        };
+        let mut enc = AmfEncoder::open(
+            codec,
+            PixelFormat::Nv12,
+            w,
+            h,
+            fps,
+            mbps * 1_000_000,
+            8,
+            ChromaFormat::Yuv420,
+            None,
+        )
+        .expect("AMF open");
+        enc.prepare(&device).expect("prepare");
+        assert!(
+            enc.caps().supports_rfi,
+            "the driver declined LTR: nothing to soak"
+        );
+        // BT.601 limited range, chroma from the top-left pixel of each 2x2 block.
+        let texture = |i: usize| {
+            let (w, h) = (w as usize, h as usize);
+            let bgra = scroll_pattern(w, h, i);
+            let rgb = |x: usize, y: usize| {
+                let o = (y * w + x) * 4;
+                let c = |k: usize| i32::from(bgra[o + k]);
+                (c(2), c(1), c(0))
+            };
+            let mut nv12 = vec![0u8; w * h * 3 / 2];
+            for y in 0..h {
+                for x in 0..w {
+                    let (r, g, b) = rgb(x, y);
+                    nv12[y * w + x] = (((66 * r + 129 * g + 25 * b + 128) >> 8) + 16) as u8;
+                }
+            }
+            for y in 0..h / 2 {
+                for x in 0..w / 2 {
+                    let (r, g, b) = rgb(2 * x, 2 * y);
+                    let o = w * h + y * w + 2 * x;
+                    nv12[o] = (((-38 * r - 74 * g + 112 * b + 128) >> 8) + 128) as u8;
+                    nv12[o + 1] = (((112 * r - 94 * g - 18 * b + 128) >> 8) + 128) as u8;
+                }
+            }
+            let desc = D3D11_TEXTURE2D_DESC {
+                Width: w as u32,
+                Height: h as u32,
+                MipLevels: 1,
+                ArraySize: 1,
+                Format: DXGI_FORMAT_NV12,
+                SampleDesc: DXGI_SAMPLE_DESC {
+                    Count: 1,
+                    Quality: 0,
+                },
+                Usage: D3D11_USAGE_DEFAULT,
+                BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
+                CPUAccessFlags: 0,
+                MiscFlags: 0,
+            };
+            let init = D3D11_SUBRESOURCE_DATA {
+                pSysMem: nv12.as_ptr() as *const _,
+                SysMemPitch: w as u32,
+                SysMemSlicePitch: 0,
+            };
+            let mut tex: Option<ID3D11Texture2D> = None;
+            // SAFETY: `init` points at `nv12`, alive across the call; the UV plane follows the Y
+            // plane at the same pitch, the layout D3D11 reads NV12 initial data in.
+            unsafe { device.CreateTexture2D(&desc, Some(&init), Some(&mut tex)) }
+                .expect("NV12 frame texture");
+            tex.expect("NV12 frame texture")
+        };
+        // Loss k is frame 1 + k * gap; its ask comes `lag` frames later, before that frame.
+        let base = lag + 1;
+        let last = base + losses * gap;
+        let (mut lost, mut anchors, mut idrs) = (Vec::new(), Vec::new(), Vec::new());
+        let mut aus: Vec<EncodedFrame> = Vec::new();
+        for i in 0..=last {
+            if i >= base && (i - base) % gap == 0 && (i - base) / gap < losses {
+                let l = (i - lag) as i64;
+                lost.push(i - lag);
+                if enc.invalidate_ref_frames(l, l) {
+                    anchors.push(i);
+                } else {
+                    enc.request_keyframe();
+                    idrs.push(i);
+                }
+            }
+            let frame = CapturedFrame {
+                provenance: Default::default(),
+                width: w,
+                height: h,
+                pts_ns: i as u64,
+                format: PixelFormat::Nv12,
+                payload: FramePayload::D3d11(pf_frame::dxgi::D3d11Frame {
+                    texture: texture(i),
+                    device: device.clone(),
+                    pyro: None,
+                }),
+                cursor: None,
+            };
+            enc.submit_indexed(&frame, i as u32).expect("submit");
+            while let Some(au) = enc.poll().expect("poll") {
+                aus.push(au);
+            }
+        }
+        enc.flush().expect("flush");
+        while let Some(au) = enc.poll().expect("drain") {
+            aus.push(au);
+        }
+        aus.sort_by_key(|a| a.pts_ns);
+        assert_eq!(aus.len(), last + 1, "one AU per frame");
+        for (i, au) in aus.iter().enumerate() {
+            assert_eq!(
+                au.recovery_anchor,
+                anchors.contains(&i),
+                "AU {i}: anchors where answered"
+            );
+            assert!(
+                !idrs.contains(&i) || au.keyframe,
+                "AU {i}: a declined ask is an IDR"
+            );
+        }
+        let csv = |v: &[usize]| {
+            v.iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+        println!(
+            "amf_ltr_anchor_soak: {w}x{h} {fps} fps {mbps} Mbps {codec:?} lag={lag} gap={gap} \
+             interval={} lost={} anchors={} idrs={}",
+            enc.ltr_mark_interval,
+            csv(&lost),
+            csv(&anchors),
+            csv(&idrs)
+        );
+        if let Ok(dir) = std::env::var("PUNKTFUNK_SMOKE_DIR") {
+            let full: Vec<&[u8]> = aus.iter().map(|a| a.data.as_slice()).collect();
+            let view: Vec<&[u8]> = aus
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| !lost.contains(i))
+                .map(|(_, a)| a.data.as_slice())
+                .collect();
+            write_capture(&format!("{dir}/amf-anchor.{ext}"), &full).expect("write");
+            write_capture(&format!("{dir}/amf-anchor-dropS.{ext}"), &view).expect("write");
+        }
+    }
+
     /// Live `applied_bitrate_bps`: None before lazy open, open rate after submit, new rate after
     /// retarget. Skips without AMD.
     #[test]
