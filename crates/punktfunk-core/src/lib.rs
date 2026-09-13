@@ -42,6 +42,9 @@ pub mod crypto;
 pub mod discovery;
 pub mod error;
 pub mod fec;
+// The stats overlay every client draws: window, snapshot, formatter. The ABI exports it from `abi`.
+/// cbindgen:ignore
+pub mod hud;
 pub mod input;
 pub mod packet;
 pub mod phase;
@@ -74,7 +77,7 @@ pub use stats::Stats;
 /// Not [`WIRE_VERSION`]. The C surface can grow without a wire byte changing.
 /// Pin the integer in `abi.rs` (`abi_version_is_pinned`). Per-bump notes live
 /// in `CHANGELOG.md`.
-pub const ABI_VERSION: u32 = 29;
+pub const ABI_VERSION: u32 = 30;
 
 /// punktfunk/1 wire version. `Hello`/`Welcome` carry it; hosts equality-check it.
 ///

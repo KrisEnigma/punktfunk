@@ -90,6 +90,7 @@ import io.unom.punktfunk.Settings
 import io.unom.punktfunk.TouchMode
 import io.unom.punktfunk.SettingsCategory
 import io.unom.punktfunk.SettingsScreen
+import io.unom.punktfunk.HudLine
 import io.unom.punktfunk.StatsOverlay
 import io.unom.punktfunk.StatsVerbosity
 import io.unom.punktfunk.StreamStartBanner
@@ -471,47 +472,42 @@ internal fun StreamScene(verbosity: StatsVerbosity = StatsVerbosity.DETAILED, lo
             ),
     ) {
         hero?.let { Image(it, null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop) }
-        // The full 38-double unified layout — NativeBridge.nativeVideoStats' KDoc is the
-        // authoritative index list: [fps, mbps, e2eP50, e2eP95, latValid, skew, w, h, hz,
-        // lostTotal, bitDepth, colorPrimaries, colorTransfer, chromaFormatIdc, hostNetP50,
-        // decodeP50, hostP50, netP50, lost, skipped, fec, frames, dispValid, displayP50,
-        // e2eDispP50, e2eDispP95, paceP50, latchP50, presents, presenterActive, feedP50, codecP50,
-        // skippedOverflow, audioBufferMs, audioAvOffsetMs, audioCodec, audioRateHz, audioBits].
-        // OsdScaled as in StreamScreen, so the tv- shots carry the TV overlay scale.
-        // 10/9/16/1 = a 10-bit BT.2020 PQ (HDR) 4:2:0 feed so the DETAILED HUD renders its
-        // video-feed line; the display stage is valid (dispValid 1) so the headline is the
-        // directly-measured capture→displayed pair, less the excluded OS present floor (the 0.3
-        // latch p50) — 1.5/2.3 shown from 1.8/2.6 raw — and the Phase-2 stage terms
-        // (host 0.6 + network 0.3 + decode 0.4 + display 0.2) tile the shaved headline, with the
-        // `os present +0.3 excluded` line naming what came off; the decoder label shows the ranked
-        // low-latency decoder. Light per-window loss (lost 2 · skipped 1 · FEC 5) so the
-        // counter line (`lost` alone at NORMAL, all three at DETAILED) and the compact loss flag
-        // both render.
-        OsdScaled { StatsOverlay(
-            doubleArrayOf(
-                fps, mbps, 1.3, 2.1, 1.0, 1.0, w.toDouble(), h.toDouble(), hz.toDouble(), lost,
-                10.0, 9.0, 16.0, 1.0, 0.9, 0.4, 0.6, 0.3,
-                lost, skipped, fec, fps,
-                1.0, 0.5, 1.8, 2.6,
-                // Presenter samples: the 0.3 latch p50 is the excluded OS floor; presents ≈ fps.
-                0.2, 0.3, hz * 236.0 / 240.0, 1.0,
-                // feed + codec = 0.4 (logged, no longer drawn), and no overflow — the one
-                // `skipped` above is benign newest-wins pacing, not a decoder falling behind.
-                0.1, 0.3, 0.0,
-                // The audio plane: a 28 ms ring placed 4 ms behind the picture — a converged sync
-                // loop, i.e. inside the deadband it deliberately leaves alone.
-                28.0, 4.0,
-                // The resolved audio format: codec 0 = Opus at 48 kHz/16-bit, which is what an
-                // ordinary session runs and what these shots are of. The HUD's format line only
-                // renders for the lossless plane (codec 2), so this triple deliberately adds
-                // nothing to the capture — the scene shows the shape almost every user sees.
-                0.0, 48_000.0, 16.0,
-            ),
-            verbosity = verbosity,
-            decoderLabel = "c2.qti.hevc.decoder · low-latency",
-            codecLabel = "HEVC",
-            modifier = Modifier.align(Alignment.TopStart).padding(12.dp),
-        ) }
+        // The Standard view (the default) as `punktfunk_core::hud` formats this window: a 10-bit
+        // HDR HEVC feed on the ranked low-latency decoder, light loss (2 of 240 lost, 1 skipped)
+        // and a converged audio ring. OsdScaled as in StreamScreen, so the tv- shots carry the
+        // TV overlay scale.
+        OsdScaled { StatsOverlay(shotLines(verbosity, w, h, hz, fps, mbps, loss), Modifier.align(Alignment.TopStart).padding(12.dp)) }
+    }
+}
+
+/** [StreamScene]'s overlay lines, the Standard vocabulary at [verbosity]. */
+private fun shotLines(
+    verbosity: StatsVerbosity,
+    w: Int,
+    h: Int,
+    hz: Int,
+    fps: Double,
+    mbps: Double,
+    loss: Boolean,
+): List<HudLine> {
+    fun f(format: String, vararg v: Any) = String.format(java.util.Locale.ROOT, format, *v)
+    val lostPct = if (loss) " · lost 0.8%" else ""
+    val compact = HudLine(0, f("%.0f fps · %.1f Mb/s · decode 0.4 ms", fps, mbps) + lostPct)
+    val normal = listOf(
+        HudLine(0, "$w×$h@$hz · HEVC 10-bit · c2.qti.hevc.decoder · low-latency · HDR"),
+        HudLine(1, f("received %.0f fps · decoded %.0f · presented %.0f · %.1f Mb/s", fps, fps, fps - 1, mbps)),
+        HudLine(1, "host 0.6 ms · decode 0.4 ms · display 0.2 ms (avg)"),
+        HudLine(if (loss) 3 else 1, if (loss) "lost 0.8% · skipped 0.4% · rtt 1.2 ms" else "lost 0.0% · skipped 0.0% · rtt 1.2 ms"),
+    )
+    val detailed = normal + listOf(
+        HudLine(1, "host min/max 0.4/1.1 ms"),
+        HudLine(2, "audio buffer 28 ms · a/v +4 ms"),
+    )
+    return when (verbosity) {
+        StatsVerbosity.OFF -> emptyList()
+        StatsVerbosity.COMPACT -> listOf(compact)
+        StatsVerbosity.NORMAL -> normal
+        StatsVerbosity.DETAILED -> detailed
     }
 }
 

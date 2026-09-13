@@ -27,6 +27,12 @@ pub(super) struct FrameMsg {
     /// Trust this, not a re-read of `is_armed()`: a capture that arms mid-flight must not fold
     /// zeroed splits into the first window's percentiles.
     pub(super) was_measured: bool,
+    /// The Windows driver encoded this AU: `encode_us` is its present → arrival lump.
+    pub(super) driver: bool,
+    /// The driver stamped its slot, so `queue_us` is its pool wait, `encode_us` its encode and
+    /// `ipc_us` the hand-off from publish to the host's take.
+    pub(super) split: bool,
+    pub(super) ipc_us: u32,
 }
 
 /// Whole AU, or one slice-boundary chunk of a streamed AU (seal/pace while the encoder still runs).
@@ -51,6 +57,9 @@ pub(super) struct ChunkMsg {
     pub(super) wait_us: u32,
     pub(super) repeat: bool,
     pub(super) was_measured: bool,
+    pub(super) driver: bool,
+    pub(super) split: bool,
+    pub(super) ipc_us: u32,
 }
 
 /// Open streamed AU: incremental sealer plus pace aggregation across per-chunk flushes.
@@ -163,6 +172,9 @@ fn handle_chunk(
             wait_us: c.wait_us,
             repeat: c.repeat,
             was_measured: c.was_measured,
+            driver: c.driver,
+            split: c.split,
+            ipc_us: c.ipc_us,
         },
         PaceStat {
             spread_us: s.spread_us.saturating_add(stat.spread_us),
@@ -182,6 +194,9 @@ pub(super) struct SendStats {
     pub(super) bringup: Arc<crate::bringup::Trace>,
     /// Data-socket clone for the kernel-queue probe behind the `wire egress` line.
     pub(super) wire_sock: Option<std::net::UdpSocket>,
+    /// Frames the Windows driver dropped at its pool, session-cumulative. Written by the
+    /// encode thread from the driver's telemetry; stays 0 off the driver.
+    pub(super) driver_dropped: Arc<AtomicU64>,
 }
 
 /// Whether this session may accept a mid-stream `Reconfigure`.
@@ -237,7 +252,15 @@ pub(super) fn send_loop(
     let mut encode_us: Vec<u32> = Vec::new();
     let mut pace_us: Vec<u32> = Vec::new();
     let (mut paced_frames, mut immediate_frames) = (0u64, 0u64);
-    let mut sid: Option<u32> = None;
+    let mut sid: Option<(u64, u32)> = None;
+    // Capture → fully sent per AU, and the driver path's present → arrival lump.
+    let (mut host_v, mut driver_v): (Vec<u32>, Vec<u32>) = (Vec::new(), Vec::new());
+    let mut driver_path = false;
+    // The driver's own split of that lump, once it stamps its slots.
+    let (mut pool_v, mut denc_v, mut ipc_v): (Vec<u32>, Vec<u32>, Vec<u32>) =
+        (Vec::new(), Vec::new(), Vec::new());
+    let mut driver_split = false;
+    let mut last_driver_dropped = stats.driver_dropped.load(Ordering::Relaxed);
     let (mut cap_v, mut submit_v, mut wait_v, mut queue_v): (
         Vec<u32>,
         Vec<u32>,
@@ -245,9 +268,6 @@ pub(super) fn send_loop(
         Vec<u32>,
     ) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     let (mut new_frames, mut repeat_frames) = (0u64, 0u64);
-    let mut last_frames_dropped = 0u64;
-    let mut last_packets_dropped = 0u64;
-    let mut last_fec_recovered = 0u64;
     let mut streamed: Option<StreamedOpen> = None;
     loop {
         if stop.load(Ordering::SeqCst) {
@@ -322,15 +342,17 @@ pub(super) fn send_loop(
                         if msg.flags & FLAG_PROBE as u32 == 0 {
                             stats.bringup.finish("first_packet");
                         }
+                        let probe = msg.flags & FLAG_PROBE as u32 != 0;
+                        let host_us = (now_ns().saturating_sub(msg.capture_ns) / 1000)
+                            .min(u32::MAX as u64) as u32;
                         // Stamp 0xCF now against the same capture anchor the wire pts carries.
                         if let Some(tc) = &timing_conn {
-                            if msg.flags & FLAG_PROBE as u32 == 0 {
-                                let host_us = (now_ns().saturating_sub(msg.capture_ns) / 1000)
-                                    .min(u32::MAX as u64)
-                                    as u32;
+                            if !probe {
                                 let t = punktfunk_core::quic::HostTiming {
                                     pts_ns: msg.capture_ns,
                                     host_us,
+                                    // On the driver: queue = its pool wait, encode = its encode,
+                                    // and the client's residual is hand-off + copy + seal.
                                     stages: Some(punktfunk_core::quic::HostStages {
                                         queue_us: msg.queue_us,
                                         encode_us: msg.encode_us,
@@ -359,13 +381,32 @@ pub(super) fn send_loop(
                         if perf || stats.rec.is_armed() {
                             encode_us.push(msg.encode_us);
                             pace_us.push(stat.spread_us);
+                            if !probe {
+                                host_v.push(host_us);
+                            }
                             if msg.was_measured {
-                                cap_v.push(msg.cap_us);
-                                submit_v.push(msg.submit_us);
-                                wait_v.push(msg.wait_us);
-                                if !msg.repeat {
-                                    queue_v.push(msg.queue_us);
+                                // The driver path's stages: its split when stamped, else its
+                                // lump; then the copy and the send. A zero pool is unmeasured.
+                                if msg.driver {
+                                    driver_path = true;
+                                    if msg.split {
+                                        driver_split = true;
+                                        if msg.queue_us > 0 {
+                                            pool_v.push(msg.queue_us);
+                                        }
+                                        denc_v.push(msg.encode_us);
+                                        ipc_v.push(msg.ipc_us);
+                                    } else {
+                                        driver_v.push(msg.encode_us);
+                                    }
+                                } else {
+                                    cap_v.push(msg.cap_us);
+                                    submit_v.push(msg.submit_us);
+                                    if !msg.repeat {
+                                        queue_v.push(msg.queue_us);
+                                    }
                                 }
+                                wait_v.push(msg.wait_us);
                             }
                             if msg.repeat {
                                 repeat_frames += 1;
@@ -411,8 +452,12 @@ pub(super) fn send_loop(
             let s = session.stats();
             let secs = last_perf.elapsed().as_secs_f64();
             let tx_mbps = (s.bytes_sent - last_bytes) as f64 * 8.0 / secs / 1_000_000.0;
+            // One window of seal timing feeds both the perf line and the recorder. It runs only
+            // while one of them reads it.
+            let seal_perf = session.take_seal_perf();
+            session.set_seal_perf(perf || stats.rec.is_armed());
             if perf {
-                let sp = session.take_seal_perf().unwrap_or_default();
+                let sp = seal_perf.unwrap_or_default();
                 tracing::info!(
                     tx_mbps = format!("{tx_mbps:.0}"),
                     send_dropped = s.packets_send_dropped - last_send_dropped,
@@ -435,60 +480,107 @@ pub(super) fn send_loop(
                     "perf"
                 );
             }
+            let driver_dropped = stats.driver_dropped.load(Ordering::Relaxed);
             if stats.rec.is_armed() {
-                let session_id = *sid.get_or_insert_with(|| {
-                    let (w, h, hz) = unpack_mode(stats.mode.load(Ordering::Relaxed));
-                    stats
-                        .rec
-                        .register_session("native", w, h, hz, stats.codec, &stats.client)
+                let capture_gen = stats.rec.generation();
+                let session_id = match sid {
+                    Some((g, id)) if g == capture_gen => id,
+                    _ => {
+                        let (w, h, hz) = unpack_mode(stats.mode.load(Ordering::Relaxed));
+                        let id = stats.rec.register_session(
+                            "native",
+                            w,
+                            h,
+                            hz,
+                            stats.codec,
+                            &stats.client,
+                        );
+                        sid = Some((capture_gen, id));
+                        id
+                    }
+                };
+                let stage = |name: &str, v: &mut Vec<u32>| crate::stats_recorder::StageTiming {
+                    name: name.into(),
+                    p50_us: percentile(v, 0.50) as f32,
+                    p99_us: percentile(v, 0.99) as f32,
+                };
+                let stages = if driver_split {
+                    vec![
+                        stage("pool", &mut pool_v),
+                        stage("encode", &mut denc_v),
+                        stage("ipc", &mut ipc_v),
+                        stage("copy", &mut wait_v),
+                        stage("send", &mut pace_us),
+                    ]
+                } else if driver_path {
+                    vec![
+                        stage("driver", &mut driver_v),
+                        stage("copy", &mut wait_v),
+                        stage("send", &mut pace_us),
+                    ]
+                } else {
+                    vec![
+                        stage("queue", &mut queue_v),
+                        stage("capture", &mut cap_v),
+                        stage("submit", &mut submit_v),
+                        stage("encode", &mut wait_v),
+                        stage("send", &mut pace_us),
+                    ]
+                };
+                let host = (!host_v.is_empty()).then(|| {
+                    (
+                        percentile(&mut host_v, 0.50) as f32,
+                        percentile(&mut host_v, 0.99) as f32,
+                    )
                 });
+                let (fec_us, seal_us, sock_us) = match seal_perf.filter(|p| p.frames > 0) {
+                    Some(p) => {
+                        let per_frame = |ns: u64| Some(ns as f32 / p.frames as f32 / 1000.0);
+                        (
+                            per_frame(p.fec_ns),
+                            per_frame(p.seal_ns),
+                            per_frame(p.sock_ns),
+                        )
+                    }
+                    None => (None, None, None),
+                };
                 let sample = crate::stats_recorder::StatsSample {
                     t_ms: 0,
                     session_id,
-                    stages: vec![
-                        crate::stats_recorder::StageTiming {
-                            name: "queue".into(),
-                            p50_us: percentile(&mut queue_v, 0.50) as f32,
-                            p99_us: percentile(&mut queue_v, 0.99) as f32,
-                        },
-                        crate::stats_recorder::StageTiming {
-                            name: "capture".into(),
-                            p50_us: percentile(&mut cap_v, 0.50) as f32,
-                            p99_us: percentile(&mut cap_v, 0.99) as f32,
-                        },
-                        crate::stats_recorder::StageTiming {
-                            name: "submit".into(),
-                            p50_us: percentile(&mut submit_v, 0.50) as f32,
-                            p99_us: percentile(&mut submit_v, 0.99) as f32,
-                        },
-                        crate::stats_recorder::StageTiming {
-                            name: "encode".into(),
-                            p50_us: percentile(&mut wait_v, 0.50) as f32,
-                            p99_us: percentile(&mut wait_v, 0.99) as f32,
-                        },
-                        crate::stats_recorder::StageTiming {
-                            name: "send".into(),
-                            p50_us: percentile(&mut pace_us, 0.50) as f32,
-                            p99_us: percentile(&mut pace_us, 0.99) as f32,
-                        },
-                    ],
+                    stages,
+                    fec_us,
+                    seal_us,
+                    sock_us,
                     fps: (new_frames as f64 / secs) as f32,
                     repeat_fps: (repeat_frames as f64 / secs) as f32,
                     mbps: tx_mbps as f32,
                     bitrate_kbps: stats.bitrate_kbps.load(Ordering::Relaxed),
-                    frames_dropped: s.frames_dropped.saturating_sub(last_frames_dropped) as u32,
-                    packets_dropped: s.packets_dropped.saturating_sub(last_packets_dropped) as u32,
-                    send_dropped: s.packets_send_dropped.saturating_sub(last_send_dropped) as u32,
-                    fec_recovered: s.fec_recovered_shards.saturating_sub(last_fec_recovered) as u32,
+                    frames_dropped: driver_path
+                        .then(|| driver_dropped.saturating_sub(last_driver_dropped) as u32),
+                    packets_dropped: None,
+                    send_dropped: Some(
+                        s.packets_send_dropped.saturating_sub(last_send_dropped) as u32
+                    ),
+                    fec_recovered: None,
+                    host_p50_us: host.map(|h| h.0),
+                    host_p99_us: host.map(|h| h.1),
+                    rtt_us: timing_conn
+                        .as_ref()
+                        .map(|c| c.rtt().as_micros().min(u128::from(u32::MAX)) as u32),
                 };
                 stats.rec.push_sample(session_id, sample);
             }
+            last_driver_dropped = driver_dropped;
+            host_v.clear();
+            driver_v.clear();
+            driver_path = false;
+            pool_v.clear();
+            denc_v.clear();
+            ipc_v.clear();
+            driver_split = false;
             last_perf = std::time::Instant::now();
             last_bytes = s.bytes_sent;
             last_send_dropped = s.packets_send_dropped;
-            last_frames_dropped = s.frames_dropped;
-            last_packets_dropped = s.packets_dropped;
-            last_fec_recovered = s.fec_recovered_shards;
             encode_us.clear();
             pace_us.clear();
             cap_v.clear();

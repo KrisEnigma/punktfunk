@@ -1023,6 +1023,7 @@ mod tests {
         // ignoring it.
         assert_eq!(parse_session_line(r#"{"window":{"w":1600}}"#), None);
         assert_eq!(parse_session_line("stats: 1280×800@60 · 60 fps"), None);
+        assert_eq!(parse_session_line(r#"stats-json: {"received":60}"#), None);
         assert_eq!(parse_session_line(""), None);
         assert_eq!(parse_session_line(r#"{"other":1}"#), None);
     }

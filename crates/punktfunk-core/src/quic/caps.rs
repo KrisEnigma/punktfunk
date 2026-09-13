@@ -298,6 +298,7 @@ mod tests {
             audio_bits: BITS_16,
             audio_frame_us: 0,
             host_caps2: 0,
+            audio_layout: 0,
         };
         let got = Welcome::decode(&w.encode()).unwrap();
         assert_eq!(got.host_caps & HOST_CAP_CLIPBOARD, HOST_CAP_CLIPBOARD);

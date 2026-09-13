@@ -100,7 +100,12 @@ impl StreamState {
     pub(super) fn capture_tick(&mut self) -> Result<Option<Tick>> {
         let measure = self.perf || self.stats.is_armed();
         let t_cap = std::time::Instant::now();
-        self.capturer.observe_encoder(self.enc.telemetry());
+        let telemetry = self.enc.telemetry();
+        if let Some(t) = &telemetry {
+            self.driver_dropped
+                .store(t.dropped_total, Ordering::Relaxed);
+        }
+        self.capturer.observe_encoder(telemetry);
         let cap_result = self.capturer.try_latest();
         let cap_us = if measure {
             t_cap.elapsed().as_micros() as u32
@@ -437,7 +442,13 @@ impl StreamState {
             let last = c.last;
             let (cap_ns, sub_ns, deadline) = *self.inflight.front().expect("inflight non-empty");
             let wait_total_us = t_wait.elapsed().as_micros() as u32;
-            let encode_us = (now_ns().saturating_sub(sub_ns) / 1000) as u32;
+            // On the driver the host submits nothing: the stages are the driver's own stamps,
+            // or its present → arrival lump, and the tick's queue age means nothing.
+            let d = if st.owed {
+                driver_stages(&*self.enc)
+            } else {
+                AuStages::host((now_ns().saturating_sub(sub_ns) / 1000) as u32, st.queue_us)
+            };
             // The driver stamps each AU with its own present time; the tick's clock
             // would give every AU of a burst the same one.
             let capture_ns = if st.owed && c.pts_ns > 0 {
@@ -453,13 +464,16 @@ impl StreamState {
                 flags,
                 frame_index: self.au_seq,
                 deadline,
-                encode_us,
-                queue_us: st.queue_us,
+                encode_us: d.encode_us,
+                queue_us: d.queue_us,
+                ipc_us: d.ipc_us,
+                split: d.split,
                 cap_us: st.cap_us,
                 submit_us: st.submit_us,
                 wait_us: if st.measure { wait_total_us } else { 0 },
                 repeat: st.repeat,
                 was_measured: st.measure,
+                driver: st.owed,
             };
             if self.frame_tx.send(SendMsg::Chunk(msg)).is_err() {
                 return Polled::SendGone;
@@ -473,7 +487,7 @@ impl StreamState {
                     if self.sent % 120 == 0 {
                         tracing::info!(
                             first_slice_us = first_chunk_us,
-                            encode_us,
+                            encode_us = d.encode_us,
                             "streamed AU (sampled): first slice handed to send at \
                              first_slice_us; encode finished at encode_us"
                         );
@@ -514,7 +528,12 @@ impl StreamState {
             au.chunk_aligned,
         );
         self.send_hdr_meta(au.keyframe, resend_meta);
-        let encode_us = (now_ns().saturating_sub(sub_ns) / 1000) as u32;
+        // As in the chunked arm: the driver's stamps, not a host submit that never happened.
+        let d = if st.owed {
+            driver_stages(&*self.enc)
+        } else {
+            AuStages::host((now_ns().saturating_sub(sub_ns) / 1000) as u32, st.queue_us)
+        };
         // As in the chunked arm: the driver's per-AU present time over the tick's clock.
         let capture_ns = if st.owed && au.pts_ns > 0 {
             au.pts_ns
@@ -527,13 +546,16 @@ impl StreamState {
             flags,
             frame_index: self.au_seq,
             deadline,
-            encode_us,
-            queue_us: st.queue_us,
+            encode_us: d.encode_us,
+            queue_us: d.queue_us,
+            ipc_us: d.ipc_us,
+            split: d.split,
             cap_us: st.cap_us,
             submit_us: st.submit_us,
             wait_us,
             repeat: st.repeat,
             was_measured: st.measure,
+            driver: st.owed,
         };
         self.bringup.mark("first_au");
         if self.frame_tx.send(SendMsg::Frame(msg)).is_err() {
@@ -754,11 +776,14 @@ impl StreamState {
                 deadline,
                 encode_us,
                 queue_us: 0,
+                ipc_us: 0,
+                split: false,
                 cap_us: 0,
                 submit_us: 0,
                 wait_us: 0,
                 repeat: false,
                 was_measured: false,
+                driver: false,
             };
             if self.frame_tx.send(SendMsg::Frame(msg)).is_err() {
                 break;
@@ -766,6 +791,47 @@ impl StreamState {
             self.au_seq = self.au_seq.wrapping_add(1);
             self.sent += 1;
         }
+    }
+}
+
+/// What one AU's `queue_us`/`encode_us` mean on its message: the host's own stamps, or the
+/// driver's. `split` = the driver stamped its slot, so `queue_us` is its pool wait, `encode_us`
+/// its encode and `ipc_us` the hand-off; otherwise `encode_us` is present → arrival in one lump.
+struct AuStages {
+    queue_us: u32,
+    encode_us: u32,
+    ipc_us: u32,
+    split: bool,
+}
+
+impl AuStages {
+    fn host(encode_us: u32, queue_us: u32) -> AuStages {
+        AuStages {
+            queue_us,
+            encode_us,
+            ipc_us: 0,
+            split: false,
+        }
+    }
+}
+
+/// The driver's stages for the AU just taken. All zero before its first AU.
+fn driver_stages(enc: &dyn crate::encode::Encoder) -> AuStages {
+    let us = |d: std::time::Duration| d.as_micros().min(u128::from(u32::MAX)) as u32;
+    let t = enc.telemetry();
+    match t.as_ref().and_then(|t| t.driver_split) {
+        Some(s) => AuStages {
+            queue_us: s.pool.map_or(0, us),
+            encode_us: us(s.encode),
+            ipc_us: us(s.ipc),
+            split: true,
+        },
+        None => AuStages {
+            queue_us: 0,
+            encode_us: t.and_then(|t| t.present_to_arrival).map_or(0, us),
+            ipc_us: 0,
+            split: false,
+        },
     }
 }
 

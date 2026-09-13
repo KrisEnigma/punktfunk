@@ -167,16 +167,9 @@ fun StreamScreen(session: ActiveSession, onSessionEnded: (SessionEndReason) -> U
     // the native window, so re-showing never renders stale data. A 3-finger tap — or the Select + X
     // pad chord, which is the only route a TV or a passthrough-touch session has — cycles the
     // verbosity tier live (Off → Compact → Normal → Detailed → Off); the default comes from
-    // Settings. The tier only changes how many lines `StatsOverlay` draws — switching between the
-    // visible tiers keeps sampling running (the effect keys on `statsOn`, not the tier) so it never
-    // blanks the numbers for a poll interval.
-    var stats by remember { mutableStateOf<DoubleArray?>(null) }
-    var decoderLabel by remember { mutableStateOf("") }
-    var codecLabel by remember { mutableStateOf("") }
-    // The panel's LIVE refresh rate, re-read each poll — the HUD flags a session whose panel sits
-    // below the stream rate (an OEM governor that ignored both the mode pin and the surface hint).
-    var panelHz by remember { mutableStateOf(0f) }
-    var panelModeHz by remember { mutableStateOf(0f) }
+    // Settings. The tier is read at each poll, so switching between visible tiers never blanks the
+    // numbers (the effect keys on `statsOn`, not the tier); the new tier shows at the next poll.
+    var statsLines by remember { mutableStateOf<List<HudLine>>(emptyList()) }
     val statsOn = ui.statsVerbosity != StatsVerbosity.OFF
     // Touch model is fixed per session (re-keys the gesture handler below if it ever changes).
     // Passthrough needs a host that injects touch; without the bit every contact would vanish, so
@@ -255,20 +248,21 @@ fun StreamScreen(session: ActiveSession, onSessionEnded: (SessionEndReason) -> U
     LaunchedEffect(handle, statsOn) {
         NativeBridge.nativeSetVideoStatsEnabled(handle, statsOn)
         if (statsOn) {
-            // Codec is resolved at the handshake (Welcome) — fixed for the session, so read its
-            // label once up front (before the first snapshot renders the video-feed line).
-            if (codecLabel.isEmpty()) codecLabel = NativeBridge.nativeVideoCodecLabel(handle)
             while (true) {
                 delay(1000)
-                stats = NativeBridge.nativeVideoStats(handle)
+                // The panel's LIVE rate, re-read each poll: a governor that ignored the mode pin
+                // leaves the panel below the stream, which the overlay names as a warning line.
                 val display = runCatching { context.display }.getOrNull()
-                panelHz = display?.refreshRate ?: 0f
-                panelModeHz = display?.mode?.refreshRate ?: 0f
-                // The decoder is fixed for the session; fetch its label once it's resolved.
-                if (decoderLabel.isEmpty()) decoderLabel = NativeBridge.nativeVideoDecoderLabel(handle)
+                statsLines = decodeHudLines(
+                    NativeBridge.nativeVideoStatsLines(
+                        handle, ui.statsVerbosity.ordinal, initialSettings.advancedStats,
+                        display?.refreshRate ?: 0f, display?.mode?.refreshRate ?: 0f,
+                        session.profileName,
+                    ),
+                )
             }
         } else {
-            stats = null // drop the last snapshot so a re-show never flashes stale numbers
+            statsLines = emptyList() // drop the last window so a re-show never flashes stale numbers
         }
     }
 
@@ -679,16 +673,9 @@ fun StreamScreen(session: ActiveSession, onSessionEnded: (SessionEndReason) -> U
             )
             // Live stats HUD (FPS / throughput / capture→client latency), drawn over the video but
             // BEFORE the transparent gesture layer below, so it shows through and never eats touches.
-            if (statsOn) {
-                stats?.let {
-                    val placement = Modifier.align(Alignment.TopStart).padding(12.dp)
-                    OsdScaled {
-                        StatsOverlay(
-                            it, ui.statsVerbosity, decoderLabel, codecLabel, session.profileName,
-                            panelHz, panelModeHz, placement,
-                        )
-                    }
-                }
+            if (statsOn && statsLines.isNotEmpty()) {
+                val placement = Modifier.align(Alignment.TopStart).padding(12.dp)
+                OsdScaled { StatsOverlay(statsLines, placement) }
             }
             // The Access chip — what this session is allowed to do, said in the preset vocabulary
             // ("Controller only · 1 h 58 m left"), shown while the stats HUD is on. It rides the

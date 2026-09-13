@@ -1,8 +1,6 @@
-// The stats overlay's verbosity tier — a port of the Android client's 3-tier overlay semantics
-// so the two clients feel identical: Off → Compact (one-line pill) → Normal (headline stats) →
-// Detailed (plus the latency stage equation). Persisted under `DefaultsKey.statsVerbosity`;
-// the in-stream cycle surfaces (⌃⌥⇧S, the three-finger tap) advance it with
-// `store(current.next())`, and every UI reader observes the same default via @AppStorage.
+// The stats overlay's tier: Off → Compact → Normal → Detailed, the four every client cycles.
+// `DefaultsKey.statsVerbosity` stores the tier a session STARTS at; the in-stream cycle (⌃⌥⇧S,
+// the three-finger tap, Select + X) moves only the live session.
 //
 // Lives in PunktfunkKit (not the app) because the kit's input paths (TouchMouse's three-finger
 // tap, InputCapture's captured-state ⌃⌥⇧S) cycle it directly.
@@ -43,8 +41,7 @@ public enum StatsVerbosity: String, CaseIterable, Sendable {
         StatsVerbosity(rawValue: EffectiveSettings.storedStatsVerbosity(.standard)) ?? .normal
     }
 
-    /// Persist a tier (the cycle surfaces write through here; the Settings pickers write the
-    /// same key via @AppStorage).
+    /// Persist a tier (the Settings pickers write the same key via @AppStorage).
     public static func store(_ tier: StatsVerbosity) {
         UserDefaults.standard.set(tier.rawValue, forKey: DefaultsKey.statsVerbosity)
     }
@@ -56,13 +53,16 @@ public enum StatsVerbosity: String, CaseIterable, Sendable {
         StatsVerbosity(rawValue: SessionSettings.current.statsVerbosity) ?? .normal
     }
 
-    /// Advance the in-stream overlay one tier (⌃⌥⇧S, the three-finger tap, the Stream menu).
-    ///
-    /// It writes the GLOBAL, as every client's cycle always has, and the app pushes that back into
-    /// the live session — so from the moment the user cycles, the session follows the global
-    /// rather than the profile's start-of-session tier. That is the honest reading of an explicit
-    /// live override, and it keeps one observable source (`@AppStorage`) driving the overlay.
+    /// Advance the live session's overlay one tier (⌃⌥⇧S, the three-finger tap, the Stream menu).
+    /// Session-local, as on every client: the stored default stays the tier the next session
+    /// starts at. The app follows `.punktfunkStatsCycled`.
     public static func cycle() {
-        store(session.next())
+        let next = session.next()
+        SessionSettings.setStatsVerbosity(next.rawValue)
+        // Observers are views; the gamepad surfaces call from their own queues.
+        DispatchQueue.main.async {
+            NotificationCenter.default.post(
+                name: .punktfunkStatsCycled, object: nil, userInfo: ["tier": next.rawValue])
+        }
     }
 }

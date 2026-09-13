@@ -979,46 +979,8 @@ fn where_answers(h: &KnownHost, timeout: std::time::Duration) -> Option<String> 
         .find_map(|(a, hit)| hit.then(|| a.clone()))
 }
 
-/// On-stream stats overlay tier (design/stats-unification.md). Each tier is a strict
-/// superset of the previous. Ctrl+Alt+Shift+S cycles Off → Compact → Normal → Detailed.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum StatsVerbosity {
-    Off,
-    /// One glanceable line: fps · end-to-end ms · Mb/s.
-    Compact,
-    /// Stream mode plus the end-to-end latency percentiles and loss counters.
-    Normal,
-    /// Everything: decoder path, HDR tags, and the per-stage latency equation.
-    Detailed,
-}
-
-impl StatsVerbosity {
-    pub const ALL: [StatsVerbosity; 4] = [
-        StatsVerbosity::Off,
-        StatsVerbosity::Compact,
-        StatsVerbosity::Normal,
-        StatsVerbosity::Detailed,
-    ];
-
-    pub fn next(self) -> StatsVerbosity {
-        match self {
-            StatsVerbosity::Off => StatsVerbosity::Compact,
-            StatsVerbosity::Compact => StatsVerbosity::Normal,
-            StatsVerbosity::Normal => StatsVerbosity::Detailed,
-            StatsVerbosity::Detailed => StatsVerbosity::Off,
-        }
-    }
-
-    pub fn label(self) -> &'static str {
-        match self {
-            StatsVerbosity::Off => "Off",
-            StatsVerbosity::Compact => "Compact",
-            StatsVerbosity::Normal => "Normal",
-            StatsVerbosity::Detailed => "Detailed",
-        }
-    }
-}
+/// Overlay tier. Lives in the core so every client formats with the same enum.
+pub use punktfunk_core::hud::StatsVerbosity;
 
 /// How a touchscreen drives the host (Android `TouchMode`, Apple `TouchInputMode`).
 /// Stored stringly in [`Settings::touch_mode`]; parsed with [`TouchMode::from_name`].
@@ -1268,6 +1230,10 @@ pub struct Settings {
     /// [`Settings::stats_verbosity`], which falls back to `show_stats`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stats_verbosity: Option<StatsVerbosity>,
+    /// Overlay vocabulary: off = the Standard figures Moonlight also shows, on = the Advanced
+    /// capture→glass view. Device-wide; a profile never carries it.
+    #[serde(default)]
+    pub advanced_stats: bool,
     /// Enter fullscreen when a stream starts. `--fullscreen` (Gaming Mode) ignores this.
     pub fullscreen_on_stream: bool,
     /// Gamepad-UI backdrop palette (`"violet"` default). Presentation only — never
@@ -1481,6 +1447,7 @@ impl Default for Settings {
             allow_vrr: true,
             show_stats: true,
             stats_verbosity: None,
+            advanced_stats: false,
             fullscreen_on_stream: true,
             ui_palette: default_ui_palette(),
             follow_os_theme: true,

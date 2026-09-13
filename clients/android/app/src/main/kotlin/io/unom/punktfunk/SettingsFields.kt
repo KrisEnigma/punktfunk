@@ -61,6 +61,7 @@ internal object SettingsFields {
             { s, v -> s.copy(statsVerbosity = v) },
             overlay({ it.statsVerbosity }, { o, v -> o.copy(statsVerbosity = v) }),
             console = Console(EnumKind(StatsVerbosity.entries) { it.name.lowercase() })),
+        field("advancedStats", "advanced_stats", BoolKind, { it.advancedStats }, { s, v -> s.copy(advancedStats = v) }),
         field("touchMode", "touch_mode", TouchModeKind, { it.touchMode }, { s, v -> s.copy(touchMode = v) },
             overlay({ it.touchMode }, { o, v -> o.copy(touchMode = v) }),
             console = Console(EnumKind(TouchMode.entries) { it.name.lowercase() })),

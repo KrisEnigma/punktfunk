@@ -46,11 +46,6 @@ const FRAME_PARK_CAP: usize = 16;
 /// flight, so anything beyond this is stale (codec flushed / HUD toggled) and gets evicted.
 const IN_FLIGHT_CAP: usize = 64;
 
-/// Cap on received AUs awaiting their 0xCF host timing (Phase 2 host/network split): the timing
-/// datagram trails its AU by at most the wire, so a match lands within a frame or two — anything
-/// this deep is a lost datagram (or an old host that never sends any) and gets evicted.
-const PENDING_SPLIT_CAP: usize = 256;
-
 /// Cap on rendered frames parked in [`DisplayTracker`] awaiting their `OnFrameRendered` render
 /// timestamp: the callback trails its release by at most a vsync or two, so anything this deep
 /// means the platform stopped delivering render callbacks (allowed under load, per the docs) and
