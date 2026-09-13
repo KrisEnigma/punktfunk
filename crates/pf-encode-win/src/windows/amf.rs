@@ -2654,7 +2654,7 @@ mod tests {
     #[test]
     #[ignore = "requires an AMD GPU with AMF — run manually on an AMD Windows box (.173)"]
     fn amf_ltr_anchor_soak() {
-        use crate::smoke_pattern::{scroll_pattern, write_capture};
+        use crate::smoke_pattern::{scroll_pattern_nv12, write_capture};
         use windows::Win32::Graphics::Direct3D11::{
             D3D11_BIND_SHADER_RESOURCE, D3D11_SUBRESOURCE_DATA,
         };
@@ -2705,30 +2705,9 @@ mod tests {
             enc.caps().supports_rfi,
             "the driver declined LTR: nothing to soak"
         );
-        // BT.601 limited range, chroma from the top-left pixel of each 2x2 block.
         let texture = |i: usize| {
             let (w, h) = (w as usize, h as usize);
-            let bgra = scroll_pattern(w, h, i);
-            let rgb = |x: usize, y: usize| {
-                let o = (y * w + x) * 4;
-                let c = |k: usize| i32::from(bgra[o + k]);
-                (c(2), c(1), c(0))
-            };
-            let mut nv12 = vec![0u8; w * h * 3 / 2];
-            for y in 0..h {
-                for x in 0..w {
-                    let (r, g, b) = rgb(x, y);
-                    nv12[y * w + x] = (((66 * r + 129 * g + 25 * b + 128) >> 8) + 16) as u8;
-                }
-            }
-            for y in 0..h / 2 {
-                for x in 0..w / 2 {
-                    let (r, g, b) = rgb(2 * x, 2 * y);
-                    let o = w * h + y * w + 2 * x;
-                    nv12[o] = (((-38 * r - 74 * g + 112 * b + 128) >> 8) + 128) as u8;
-                    nv12[o + 1] = (((112 * r - 94 * g - 18 * b + 128) >> 8) + 128) as u8;
-                }
-            }
+            let nv12 = scroll_pattern_nv12(w, h, i);
             let desc = D3D11_TEXTURE2D_DESC {
                 Width: w as u32,
                 Height: h as u32,

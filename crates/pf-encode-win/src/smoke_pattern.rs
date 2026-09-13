@@ -46,6 +46,33 @@ pub fn scroll_pattern(w: usize, h: usize, frame: usize) -> Vec<u8> {
     px
 }
 
+/// The pattern as NV12, `w * h * 3 / 2` bytes: BT.601 limited range, chroma from the top-left
+/// pixel of each 2x2 block. For encoders that take no BGRA.
+pub fn scroll_pattern_nv12(w: usize, h: usize, frame: usize) -> Vec<u8> {
+    let bgra = scroll_pattern(w, h, frame);
+    let rgb = |x: usize, y: usize| {
+        let o = (y * w + x) * 4;
+        let c = |k: usize| i32::from(bgra[o + k]);
+        (c(2), c(1), c(0))
+    };
+    let mut nv12 = vec![0u8; w * h * 3 / 2];
+    for y in 0..h {
+        for x in 0..w {
+            let (r, g, b) = rgb(x, y);
+            nv12[y * w + x] = (((66 * r + 129 * g + 25 * b + 128) >> 8) + 16) as u8;
+        }
+    }
+    for y in 0..h / 2 {
+        for x in 0..w / 2 {
+            let (r, g, b) = rgb(2 * x, 2 * y);
+            let o = w * h + y * w + 2 * x;
+            nv12[o] = (((-38 * r - 74 * g + 112 * b + 128) >> 8) + 128) as u8;
+            nv12[o + 1] = (((112 * r - 94 * g - 18 * b + 128) >> 8) + 128) as u8;
+        }
+    }
+    nv12
+}
+
 /// Write `aus` to `path` with the `.idx` sidecar a `PUNKTFUNK_DUMP_VIDEO` capture carries
 /// (`offset len flags complete` per access unit), so a field hasher splits any codec's stream
 /// by access unit.
@@ -58,4 +85,18 @@ pub fn write_capture(path: &str, aus: &[&[u8]]) -> std::io::Result<()> {
     }
     std::fs::write(path, &data)?;
     std::fs::write(format!("{path}.idx"), idx)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn the_nv12_pattern_is_bt601_limited_range() {
+        let nv12 = super::scroll_pattern_nv12(4, 2, 0);
+        assert_eq!(nv12.len(), 12);
+        assert_eq!(
+            (nv12[0], nv12[8], nv12[9]),
+            (82, 90, 240),
+            "pure red at the origin"
+        );
+    }
 }
