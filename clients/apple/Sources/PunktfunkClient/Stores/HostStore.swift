@@ -98,9 +98,13 @@ final class HostStore: ObservableObject {
         hosts.append(host)
     }
 
+    /// Also drops what the device kept for it: the default-host pointer, the library position
+    /// and the favorites.
     func remove(_ host: StoredHost) {
         hosts.removeAll { $0.id == host.id }
         clearDefaultHostIfItNames(host)
+        LibraryScrollMemory.forget(hostID: host.id.uuidString)
+        LibraryFavorites.shared.forget(hostID: host.id.uuidString)
     }
 
     /// Replace a saved host in place (the edit sheet) — matched by id, so identity/pin/last-connected

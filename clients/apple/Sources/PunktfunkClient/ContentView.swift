@@ -98,6 +98,11 @@ struct ContentView: View {
     @State private var awaitingApproval: ApprovalRequest?
     @State private var speedTestTarget: StoredHost?
     @State private var libraryTarget: LibraryTarget?
+    #if os(iOS)
+    /// The touch UI's tab. A written `libraryTarget` lands on the Library tab.
+    @State private var touchTab: TouchTab = .hosts
+    @AppStorage(DefaultsKey.libraryShelf) private var libraryShelfID = ""
+    #endif
     /// Wakes a sleeping host and waits for it to come back online before connecting (drives the
     /// "Waking…" phase of the connect overlay). Available on every platform now that the iOS/tvOS
     /// multicast entitlement is granted (see PunktfunkConnection.wakeOnLANAvailable).
@@ -571,20 +576,6 @@ struct ContentView: View {
             // grid's title belongs to the system background.
             .gamepadPaletteInk(gamepadUIActive)
         }
-        #else
-        // iOS: the cover is the TOUCH UI's presentation only. In gamepad mode the library is one
-        // of GamepadHomeView's in-place layers (the console shell — no bottom-up cover), so the
-        // proxy hides the target from the cover while that mode owns it; every writer (Y on a
-        // tile, `returnToLibrary`) keeps writing the same `libraryTarget` either way, and a
-        // controller arriving or leaving mid-browse hands the open library to whichever
-        // presentation the new mode owns.
-        .fullScreenCover(item: touchLibraryTarget) { shelf in
-            NavigationStack {
-                LibraryView(
-                    store: store, target: shelf, onLaunch: { launchTitle(shelf, $0) },
-                    onConnect: { connectFromShelf(shelf) })
-            }
-        }
         #endif
         #endif
     }
@@ -710,13 +701,16 @@ struct ContentView: View {
     }
     #endif
 
-    /// The iOS library cover's item: `libraryTarget`, hidden while the gamepad shell presents
-    /// the library in place (see the cover's comment).
-    private var touchLibraryTarget: Binding<LibraryTarget?> {
-        Binding(
-            get: { gamepadUIActive ? nil : libraryTarget },
-            set: { libraryTarget = $0 })
+    #if os(iOS)
+    /// In the touch UI a shelf is a tab, not a presentation: a written `libraryTarget` becomes the
+    /// Library tab's shelf and clears, so the gamepad shell never inherits it as an open layer.
+    private func showShelfInTab() {
+        guard !gamepadUIActive, let shelf = libraryTarget else { return }
+        libraryShelfID = shelf.id
+        touchTab = .library
+        libraryTarget = nil
     }
+    #endif
 
     /// The pairing sheet's item. On iOS it hides while the gamepad shell presents the pair screen
     /// in place — the same proxy the library uses, and for the same reason: every writer keeps
@@ -985,18 +979,42 @@ struct ContentView: View {
                 }
                 #endif
             } else {
-                HomeView(
-                    store: store, model: model, discovery: discovery,
-                    showAddHost: $showAddHost, pairingTarget: $pairingTarget,
-                    speedTestTarget: $speedTestTarget, libraryTarget: $libraryTarget,
-                    showSettings: $showSettings,
-                    connect: { connect($0, profile: $1) }, connectDiscovered: connectDiscovered,
-                    onPaired: handlePaired, onLaunchTitle: launchTitle,
-                    onConnectShelf: connectFromShelf, wake: { wakeOnly($0) })
+                #if os(iOS)
+                TabView(selection: $touchTab) {
+                    touchHome
+                        .tabItem { Label("Hosts", systemImage: "desktopcomputer") }
+                        .tag(TouchTab.hosts)
+                    LibraryTabView(
+                        store: store, onLaunch: launchTitle, onConnectShelf: connectFromShelf,
+                        onConnectHost: { connect($0, profile: .inherit, fromLibrary: true) },
+                        showHosts: { touchTab = .hosts })
+                        .tabItem { Label("Library", systemImage: "square.grid.2x2") }
+                        .tag(TouchTab.library)
+                }
+                // On appear too: `returnToLibrary` writes the shelf while the stream is still up.
+                .onAppear(perform: showShelfInTab)
+                .onChange(of: libraryTarget) { _, _ in showShelfInTab() }
+                #else
+                touchHome
+                #endif
             }
         }
         #endif
     }
+
+    #if !os(macOS)
+    /// The host list of the touch and remote UIs.
+    private var touchHome: some View {
+        HomeView(
+            store: store, model: model, discovery: discovery,
+            showAddHost: $showAddHost, pairingTarget: $pairingTarget,
+            speedTestTarget: $speedTestTarget, libraryTarget: $libraryTarget,
+            showSettings: $showSettings,
+            connect: { connect($0, profile: $1) }, connectDiscovered: connectDiscovered,
+            onPaired: handlePaired, onLaunchTitle: launchTitle,
+            onConnectShelf: connectFromShelf, wake: { wakeOnly($0) })
+    }
+    #endif
 
     // MARK: - Session
 

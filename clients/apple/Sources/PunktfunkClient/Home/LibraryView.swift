@@ -74,9 +74,16 @@ struct LibraryView: View {
     /// The collection the gamepad shelf is drilled into (its label), or nil — reported so a host
     /// screen (GamepadLibraryScreen's pinned title) can read `host · preset · collection`.
     var onCollectionChanged: ((String?) -> Void)?
+    /// The Library tab's presentation (design §2.5): sections, search and Customize, no Close.
+    var inTab = false
+    /// Stream a saved host's desktop, launching nothing: the tab's Desktops section.
+    var onConnectHost: ((StoredHost) -> Void)?
     #if DEBUG
     /// Shot harness: a canned phase in place of the fetch (`ShotGallery.swift`).
     var shotPhase: ShotLibraryPhase?
+    /// Shot harness: a section layout and favorites that never touch the device's own.
+    var shotLayout: String?
+    var shotFavorites: [String]?
     #endif
     /// The same, for this view's own navigation title (the sheet/cover presentations).
     @State private var collectionLabel: String?
@@ -91,6 +98,10 @@ struct LibraryView: View {
     /// The shared "what is up on this host" answer, which this screen both READS (the menu's
     /// Resume row) and FEEDS: its own `/status` fetch below is the freshest one anybody has.
     @ObservedObject private var nowPlayingStore = NowPlayingStore.shared
+    @ObservedObject private var favorites = LibraryFavorites.shared
+    @AppStorage(DefaultsKey.librarySections) private var sectionsRaw = ""
+    @State private var search = ""
+    @State private var showCustomize = false
 
     /// The host this shelf belongs to — every fetch, every poster URL and the launch itself address
     /// it, and a pinned shelf is the same host seen through one of its cards.
@@ -142,9 +153,9 @@ struct LibraryView: View {
 
     var body: some View {
         content
-            .navigationTitle("\(shelfTitle) — Library")
+            .navigationTitle(inTab ? shelfTitle : "\(shelfTitle) — Library")
             #if os(iOS)
-            .navigationBarTitleDisplayMode(.inline)
+            .navigationBarTitleDisplayMode(inTab ? .large : .inline)
             #endif
             .toolbar {
                 #if os(macOS)
@@ -159,16 +170,27 @@ struct LibraryView: View {
                 if !gamepadUIActive {
                     ToolbarItem(placement: .primaryAction) { sortMenu }
                 }
+                #if os(iOS)
+                if inTab {
+                    ToolbarItem(placement: .primaryAction) { customizeButton }
+                }
+                #endif
                 #endif
                 // A gamepad-only user can't swipe-to-dismiss the sheet this view is presented in
                 // (ContentView's `.sheet(item: $libraryTarget)`) — give it a focusable, dpad-reachable
                 // Close action. tvOS already has its own pushed-navigation back (Menu button).
                 #if !os(tvOS)
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Close") { dismiss() }
+                if !inTab {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("Close") { dismiss() }
+                    }
                 }
                 #endif
             }
+            #if os(iOS)
+            .modifier(TitleSearch(active: inTab, text: $search))
+            .sheet(isPresented: $showCustomize) { LibrarySectionsPanel() }
+            #endif
             .task { await load() }
             .onDisappear {
                 // Hand the loader off before clearing it, so its pooled connections are closed
@@ -223,7 +245,9 @@ struct LibraryView: View {
     }
 
     @ViewBuilder private var content: some View {
-        if loading && games.isEmpty {
+        if inTab {
+            tabBody
+        } else if loading && games.isEmpty {
             consoleField(
                 ProgressView("Loading library…")
                     .frame(maxWidth: .infinity, maxHeight: .infinity))
@@ -311,20 +335,15 @@ struct LibraryView: View {
     }
     #endif
 
-    /// The grid's sections: the catalog collated by the shared rules — launchers lead (design
-    /// D4), then one section per group under the chosen grouping (none = one section of games),
-    /// each in the chosen sort. Headers only when there is more than one section, so an
-    /// ungrouped, launcher-less library renders exactly as it always did.
-    private var sections: [(label: String, games: [GameEntry])] {
+    /// A catalog collated by the shared rules: launchers lead (design D4), then one section per
+    /// group under the chosen grouping (none = one section of games), each in the chosen sort.
+    private func sections(of items: [GameEntry]) -> [(label: String, games: [GameEntry])] {
         let groupBy: LibraryGroupBy?
         switch groupByRaw {
         case "platform": groupBy = .platform
         case "store": groupBy = .store
         default: groupBy = nil
         }
-        // One `ordered` for the whole build: it is a computed property that re-sorts the catalog
-        // on every read, and the group map below reads it once per entry.
-        let items = ordered
         return LibraryCollation.collate(items, sort: LibrarySortKey(stored: sortRaw), groupBy: groupBy)
             .map { group in
                 // The ungrouped bucket names itself "All"; on this grid it has always been "Games".
@@ -333,49 +352,65 @@ struct LibraryView: View {
             }
     }
 
+    /// The plain grid's sections. Headers only when there is more than one.
+    private var sections: [(label: String, games: [GameEntry])] {
+        sections(of: ordered)
+    }
+
     private var grid: some View {
         let sections = self.sections
-        let showsHeaders = sections.count > 1
         return ScrollViewReader { proxy in
-            ScrollView {
-                VStack(alignment: .leading, spacing: 18) {
-                    ForEach(Array(sections.enumerated()), id: \.offset) { _, section in
-                        if showsHeaders { sectionHeader(section.label) }
-                        tiles(section.games)
-                    }
+            keyNavigation(sections: sections, proxy: proxy) {
+                ScrollView {
+                    gridBlock(sections, showsHeaders: sections.count > 1, proxy: proxy)
+                        .padding(.vertical)
                 }
-                .padding()
-                // Put the player back where they were. Leaving a stream re-presents this view from
-                // scratch, so a long library always came back at the top — meaning the round trip
-                // "browse → play → quit → browse" lost your place every single time. The last title
-                // opened from this shelf is remembered per host and scrolled back to once, without
-                // animation, so it is simply already there rather than visibly moving.
-                .onAppear {
-                    guard !restoredScroll, let last = LibraryScrollMemory.last(forHost: host.id.uuidString),
-                          ordered.contains(where: { $0.id == last })
-                    else { return }
-                    restoredScroll = true
-                    proxy.scrollTo(last, anchor: .center)
-                }
-                #if os(iOS) || os(macOS)
-                // The grid's own width, reported without affecting layout — a GeometryReader
-                // SIBLING inside a ScrollView would claim the whole viewport. It's what tells the
-                // keyboard cursor how many columns `.adaptive` actually produced, so it is only
-                // measured where that cursor exists.
-                .background {
-                    GeometryReader { geo in
-                        Color.clear
-                            .onAppear { gridWidth = geo.size.width }
-                            .onChange(of: geo.size.width) { _, w in gridWidth = w }
-                    }
-                }
-                #endif
             }
-            #if os(iOS) || os(macOS)
-            // Hardware keyboard: arrows pick a title, Return launches it — a field ask from an
-            // iPad user on a Magic Keyboard. The gamepad UI's coverflow has had this via the
-            // controller all along; this is the same thing for the plain grid, which is what an
-            // iPad with a keyboard and NO pad actually sees.
+        }
+    }
+
+    /// Headed poster sections: put back where the player was, and measured for the keyboard
+    /// cursor. Leaving a stream re-presents this view, so the last title opened from this shelf
+    /// is scrolled back to once, without animation.
+    private func gridBlock(
+        _ sections: [(label: String, games: [GameEntry])], showsHeaders: Bool,
+        proxy: ScrollViewProxy
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 18) {
+            ForEach(Array(sections.enumerated()), id: \.offset) { _, section in
+                if showsHeaders { sectionHeader(section.label) }
+                tiles(section.games)
+            }
+        }
+        .padding(.horizontal)
+        .onAppear {
+            guard !restoredScroll, let last = LibraryScrollMemory.last(forHost: host.id.uuidString),
+                  sections.contains(where: { $0.games.contains { $0.id == last } })
+            else { return }
+            restoredScroll = true
+            proxy.scrollTo(last, anchor: .center)
+        }
+        #if os(iOS) || os(macOS)
+        // Measured without taking part in layout: it tells the keyboard cursor how many columns
+        // `.adaptive` produced.
+        .background {
+            GeometryReader { geo in
+                Color.clear
+                    .onAppear { gridWidth = geo.size.width }
+                    .onChange(of: geo.size.width) { _, w in gridWidth = w }
+            }
+        }
+        #endif
+    }
+
+    /// Arrow keys pick a title in the grid and Return launches it: an iPad on a Magic Keyboard
+    /// with no pad sees this grid.
+    @ViewBuilder private func keyNavigation(
+        sections: [(label: String, games: [GameEntry])], proxy: ScrollViewProxy,
+        @ViewBuilder content: () -> some View
+    ) -> some View {
+        #if os(iOS) || os(macOS)
+        content()
             .gamepadKeyNavigation(
                 active: onLaunch != nil,
                 onMove: { direction in
@@ -388,9 +423,172 @@ struct LibraryView: View {
                     guard let launch = launchAndRemember, let id = keyCursor else { return }
                     launch(id)
                 })
-            #endif
+        #else
+        content()
+        #endif
+    }
+
+    // MARK: - The Library tab
+
+    /// The Library tab: the stored sections in order, each hidden while it has nothing to show.
+    private var tabBody: some View {
+        let groups = gameSections
+        return ScrollViewReader { proxy in
+            keyNavigation(sections: groups, proxy: proxy) {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 26) {
+                        staleNote
+                        ForEach(sectionLayout.visible) { section in
+                            tabSection(section, groups: groups, proxy: proxy)
+                        }
+                        shelfState
+                    }
+                    .padding(.vertical)
+                }
+            }
         }
     }
+
+    @ViewBuilder private func tabSection(
+        _ section: LibrarySection, groups: [(label: String, games: [GameEntry])],
+        proxy: ScrollViewProxy
+    ) -> some View {
+        switch section {
+        case .desktops:
+            let paired = store.hosts.filter { $0.pinnedSHA256 != nil }
+            if let onConnectHost, !paired.isEmpty {
+                row(section) {
+                    ForEach(paired) { host in
+                        LibraryDesktopTile(
+                            host: host, isOnline: store.probedOnline.contains(host.id),
+                            nowPlaying: nowPlayingStore.title(for: host),
+                            action: { onConnectHost(host) })
+                    }
+                }
+            }
+        case .recent:
+            let played = recentTitles
+            if !played.isEmpty {
+                row(section) {
+                    ForEach(played) { game in
+                        tile(game, caption: lastPlayedCaption(game), scope: "recent")
+                            .frame(width: rowTileWidth)
+                    }
+                }
+            }
+        case .favorites:
+            let marked = favoriteTitles
+            if !marked.isEmpty {
+                row(section) {
+                    ForEach(marked) { game in
+                        tile(game, scope: "favorites").frame(width: rowTileWidth)
+                    }
+                }
+            }
+        case .launchers:
+            let launchers = shelfGames.filter(\.isLauncher)
+            if !launchers.isEmpty {
+                row(section) {
+                    ForEach(launchers) { game in
+                        tile(game, scope: "launchers").frame(width: rowTileWidth)
+                    }
+                }
+            }
+        case .games:
+            if !groups.isEmpty {
+                gridBlock(groups, showsHeaders: true, proxy: proxy)
+            }
+        }
+    }
+
+    /// A headed horizontal row.
+    private func row<Content: View>(
+        _ section: LibrarySection, @ViewBuilder content: () -> Content
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            sectionHeader(section.label)
+                .padding(.horizontal)
+            ScrollView(.horizontal, showsIndicators: false) {
+                LazyHStack(alignment: .top, spacing: 14) {
+                    content()
+                }
+                .padding(.horizontal)
+            }
+        }
+    }
+
+    /// Loading, error or empty, in place of the shelf's sections. Desktops still show above it.
+    @ViewBuilder private var shelfState: some View {
+        if games.isEmpty {
+            Group {
+                if loading {
+                    ProgressView("Loading library…")
+                } else if let errorText {
+                    errorState(errorText)
+                } else {
+                    emptyState
+                }
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.top, 24)
+        }
+    }
+
+    private var sectionLayout: LibrarySectionLayout {
+        #if DEBUG
+        if let shotLayout { return LibrarySectionLayout(stored: shotLayout) }
+        #endif
+        return LibrarySectionLayout(stored: sectionsRaw)
+    }
+
+    private var rowTileWidth: CGFloat { 132 }
+
+    /// The shelf the search leaves, launchers included, in the host's order.
+    private var shelfGames: [GameEntry] {
+        guard !search.isEmpty else { return games }
+        return games.filter { $0.title.localizedStandardContains(search) }
+    }
+
+    /// The Games section: the searched shelf without its launchers, which have their own row;
+    /// anything running leads, as on the plain grid.
+    private var gameSections: [(label: String, games: [GameEntry])] {
+        let titles = shelfGames.filter { !$0.isLauncher }
+        return sections(of: running.isEmpty ? titles : LibraryOrder.display(titles, running: Set(running.keys)))
+    }
+
+    /// Played titles, newest first, at most twelve: the shared Recent order, cut at the first
+    /// title never played.
+    private var recentTitles: [GameEntry] {
+        let titles = shelfGames.filter { !$0.isLauncher }
+        let order = LibraryCollation.collate(titles, sort: .recent, groupBy: nil).first?.indices ?? []
+        return Array(order.map { titles[$0] }
+            .filter { ($0.stats?.lastPlayedUnixMs ?? 0) > 0 }
+            .prefix(12))
+    }
+
+    private var favoriteIDs: [String] {
+        #if DEBUG
+        if let shotFavorites { return shotFavorites }
+        #endif
+        return favorites.ids(for: host.id.uuidString)
+    }
+
+    /// Favorited titles, in the shelf's current sort.
+    private var favoriteTitles: [GameEntry] {
+        let marked = Set(favoriteIDs)
+        let titles = shelfGames
+        return LibraryCollation.collate(titles, sort: LibrarySortKey(stored: sortRaw), groupBy: nil)
+            .flatMap(\.indices).map { titles[$0] }
+            .filter { marked.contains($0.id) }
+    }
+
+    #if os(iOS)
+    private var customizeButton: some View {
+        Button { showCustomize = true } label: {
+            Label("Customize", systemImage: "slider.horizontal.3")
+        }
+    }
+    #endif
 
     #if os(iOS) || os(macOS)
     /// The keyboard cursor's model over the two grid sections. Rebuilt per press from the live
@@ -417,34 +615,79 @@ struct LibraryView: View {
     private func tiles(_ entries: [GameEntry]) -> some View {
         LazyVGrid(columns: columns, spacing: 18) {
             ForEach(entries) { game in
-                Group {
-                    if let launch = launchAndRemember {
-                        Button { launch(game.id) } label: {
-                            GameCard(
-                                game: game, artLoader: artLoader, selected: isKeyCursor(game),
-                                isRunning: running[game.id] != nil)
-                        }
-                        .buttonStyle(.plain)
-                    } else {
-                        GameCard(
-                            game: game, artLoader: artLoader, selected: isKeyCursor(game),
-                            isRunning: running[game.id] != nil)
-                    }
-                }
-                .id(game.id)
-                // Right-click / long-press a poster for that TITLE's own actions — the same
-                // gesture a host card answers to, one level down. `.contextMenu` doesn't exist
-                // on tvOS, which is also the one platform with no clipboard to copy into.
-                #if !os(tvOS)
-                .contextMenu {
-                    if LinkClipboard.isAvailable {
-                        Button("Copy Link") { copyLink(game) }
-                    }
-                }
-                #endif
+                tile(game, caption: sortCaption(game))
             }
         }
     }
+
+    /// One poster: a tap launches it, a long-press or right-click offers the title's own acts.
+    /// `scope` keeps a row's copy of a title from sharing the grid's scroll id.
+    private func tile(_ game: GameEntry, caption: String? = nil, scope: String = "") -> some View {
+        Group {
+            if let launch = launchAndRemember {
+                Button { launch(game.id) } label: { card(game, caption: caption) }
+                    .buttonStyle(.plain)
+            } else {
+                card(game, caption: caption)
+            }
+        }
+        .id(scope.isEmpty ? game.id : "\(scope):\(game.id)")
+        // `.contextMenu` doesn't exist on tvOS, which also has no clipboard to copy into.
+        #if !os(tvOS)
+        .contextMenu { titleMenu(game) }
+        #endif
+    }
+
+    private func card(_ game: GameEntry, caption: String?) -> GameCard {
+        GameCard(
+            game: game, artLoader: artLoader, selected: isKeyCursor(game),
+            isRunning: running[game.id] != nil, caption: caption)
+    }
+
+    /// A title's own acts, one level below a host card's.
+    @ViewBuilder private func titleMenu(_ game: GameEntry) -> some View {
+        if inTab, game.id != LibraryCollation.desktopID {
+            let marked = favoriteIDs.contains(game.id)
+            Button(
+                marked ? "Remove from Favorites" : "Add to Favorites",
+                systemImage: marked ? "heart.slash" : "heart"
+            ) {
+                favorites.toggle(game.id, host: host.id.uuidString)
+            }
+        }
+        if LinkClipboard.isAvailable {
+            Button("Copy Link", systemImage: "link") { copyLink(game) }
+        }
+    }
+
+    /// What a tile says under its title for the active sort (design P6): when it was last
+    /// played under Recent, how long under Most played, nothing otherwise.
+    private func sortCaption(_ game: GameEntry) -> String? {
+        switch LibrarySortKey(stored: sortRaw) {
+        case .recent: return lastPlayedCaption(game)
+        case .playTime: return playTimeCaption(game)
+        default: return nil
+        }
+    }
+
+    private func lastPlayedCaption(_ game: GameEntry) -> String? {
+        guard let ms = game.stats?.lastPlayedUnixMs, ms > 0 else { return nil }
+        let date = Date(timeIntervalSince1970: TimeInterval(ms) / 1000)
+        return Self.relativeDate.localizedString(for: date, relativeTo: Date())
+    }
+
+    /// Under a minute says nothing: a launch that never really ran is not play time.
+    private func playTimeCaption(_ game: GameEntry) -> String? {
+        guard let ms = game.stats?.playTimeMs, ms >= 60_000 else { return nil }
+        return Duration.milliseconds(Int64(clamping: ms)).formatted(
+            .units(allowed: [.hours, .minutes], width: .abbreviated, maximumUnitCount: 1))
+    }
+
+    private static let relativeDate: RelativeDateTimeFormatter = {
+        let formatter = RelativeDateTimeFormatter()
+        formatter.unitsStyle = .short
+        return formatter
+    }()
 
     /// Put this title's self-emitted `punktfunk://` link on the clipboard: the shelf's host,
     /// the pinned card's preset when a pin opened it, and the game's own `launch=` id — so
@@ -857,6 +1100,8 @@ struct GameCard: View {
     /// second copy for a while now, but nothing ever told the player that — so choosing a game
     /// they were already playing looked identical to starting one, and read as a relaunch.
     var isRunning = false
+    /// A line under the title for what the current sort or section is about.
+    var caption: String? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -883,6 +1128,28 @@ struct GameCard: View {
                 .font(.geist(12, relativeTo: .caption))
                 .lineLimit(2)
                 .foregroundStyle(.secondary)
+            if let caption {
+                Text(caption)
+                    .font(.geist(11, relativeTo: .caption2))
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+            }
         }
     }
 }
+
+#if os(iOS)
+/// The Library tab's title search. The other presentations of this view have none.
+private struct TitleSearch: ViewModifier {
+    let active: Bool
+    @Binding var text: String
+
+    func body(content: Content) -> some View {
+        if active {
+            content.searchable(text: $text, prompt: "Search titles")
+        } else {
+            content
+        }
+    }
+}
+#endif

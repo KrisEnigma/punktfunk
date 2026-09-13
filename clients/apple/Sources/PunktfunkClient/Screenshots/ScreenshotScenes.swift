@@ -138,6 +138,13 @@ enum ShotScenes {
             },
         ]
         #endif
+        #if os(iOS)
+        // The Library tab with every section filled: Desktops, Recently Played, Favorites,
+        // Launchers and Games.
+        scenes.append(ShotScene(name: "15b-library-sections", orientation: .natural, colorScheme: .dark) {
+            AnyView(ShotLibrarySections())
+        })
+        #endif
         scenes.append(ShotScene(name: "10-edithost", orientation: .natural, colorScheme: .dark) {
             AnyView(ShotEditHost())
         })
@@ -269,17 +276,26 @@ enum ShotMock {
     /// (drawn at capture time), so the shot stays offline; the Steam launcher entry stays artless
     /// by design and renders its brand mark.
     static let games: [GameEntry] = {
+        // Relative to the capture, so the Recently Played captions read the same every run.
+        let now = UInt64(Date().timeIntervalSince1970 * 1000)
+        let hour: UInt64 = 3_600_000
         let json = """
         [
           {"id": "custom:aurora", "store": "custom", "title": "Aurora Drift",
            "platform": "PS3", "release_year": 2009, "developer": "Nine Lanterns",
-           "genres": ["Racing"], "art": {"portrait": "shot://art/aurora"}},
+           "genres": ["Racing"], "art": {"portrait": "shot://art/aurora"},
+           "stats": {"last_played_unix_ms": \(now - 50 * hour), "play_time_ms": 9000000,
+                     "last_run_ms": 1800000, "launch_count": 6}},
           {"id": "steam:starfall", "store": "steam", "title": "Starfall Vale",
            "platform": "PC", "release_year": 2024, "developer": "Meridian Foundry",
            "genres": ["Action", "Adventure"],
-           "art": {"portrait": "shot://art/starfall"}},
+           "art": {"portrait": "shot://art/starfall"},
+           "stats": {"last_played_unix_ms": \(now - 2 * hour), "play_time_ms": 50400000,
+                     "last_run_ms": 5400000, "launch_count": 31}},
           {"id": "heroic:neon", "store": "heroic", "title": "Neon Circuit",
-           "platform": "PC", "art": {"portrait": "shot://art/neon"}},
+           "platform": "PC", "art": {"portrait": "shot://art/neon"},
+           "stats": {"last_played_unix_ms": \(now - 21 * 24 * hour), "play_time_ms": 2100000,
+                     "last_run_ms": 2100000, "launch_count": 2}},
           {"id": "gog:ember", "store": "gog", "title": "Ember Peaks",
            "art": {"portrait": "shot://art/ember"}},
           {"id": "steam:launcher", "store": "steam", "title": "Steam", "art": {},

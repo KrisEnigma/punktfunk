@@ -97,11 +97,13 @@ extension ShotMock {
     static var libraryTileVariants: [GalleryVariant] {
         let byID = Dictionary(
             (games + tileExtras).map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
-        func tile(_ id: String, running: Bool = false, selected: Bool = false) -> AnyView {
+        func tile(
+            _ id: String, running: Bool = false, selected: Bool = false, caption: String? = nil
+        ) -> AnyView {
             guard let game = byID[id] else { return AnyView(EmptyView()) }
             return AnyView(GameCard(
                 game: game, artLoader: ShotPosterArt.source, selected: selected,
-                isRunning: running))
+                isRunning: running, caption: caption))
         }
         func desktop(_ title: String) -> AnyView {
             AnyView(GameCard(game: LibraryCollation.desktopEntry(title: title), artLoader: nil))
@@ -116,6 +118,15 @@ extension ShotMock {
             GalleryVariant(name: "Long title") { tile("custom:collection") },
             GalleryVariant(name: "Desktop tile") { desktop("Desktop") },
             GalleryVariant(name: "Resume tile") { desktop("Resume Hollow Knight") },
+            GalleryVariant(name: "Caption, recent") { tile("steam:starfall", caption: "2 hr. ago") },
+            GalleryVariant(name: "Caption, most played") { tile("custom:aurora", caption: "14 hr") },
+            GalleryVariant(name: "Desktops row") {
+                AnyView(LibraryDesktopTile(host: host, isOnline: true, nowPlaying: nil, action: {}))
+            },
+            GalleryVariant(name: "Desktops row, playing") {
+                AnyView(LibraryDesktopTile(
+                    host: host, isOnline: true, nowPlaying: "Hollow Knight", action: {}))
+            },
         ]
     }
 
@@ -265,6 +276,31 @@ struct ShotHostPage: View {
     }
 }
 
+#if os(iOS)
+/// The Library tab on the mock catalog, every section filled, inside the real tab bar. The
+/// layout and favorites are the scene's own, so a capture never writes the device's.
+struct ShotLibrarySections: View {
+    @StateObject private var store = ShotMock.hostStore()
+
+    var body: some View {
+        TabView(selection: .constant(TouchTab.library)) {
+            Color.clear
+                .tabItem { Label("Hosts", systemImage: "desktopcomputer") }
+                .tag(TouchTab.hosts)
+            NavigationStack {
+                LibraryView(
+                    store: store, target: LibraryTarget(host: ShotMock.host), onLaunch: { _ in },
+                    onConnect: {}, inTab: true, onConnectHost: { _ in },
+                    shotPhase: .catalog(ShotMock.games, running: ["steam:starfall"]),
+                    shotLayout: "", shotFavorites: ["custom:aurora", "gog:ember"])
+            }
+            .tabItem { Label("Library", systemImage: "square.grid.2x2") }
+            .tag(TouchTab.library)
+        }
+    }
+}
+#endif
+
 /// The touch grid on the mock catalog with one title up — what the Library tab grows from.
 struct ShotLibraryTouch: View {
     @StateObject private var store = ShotMock.hostStore()
@@ -297,6 +333,18 @@ struct ShotLibraryTouch: View {
     ShotGalleryView(title: "Library states", variants: ShotMock.libraryStateVariants)
         .preferredColorScheme(.dark)
 }
+
+#if os(iOS)
+#Preview("Library tab") {
+    ShotLibrarySections()
+        .preferredColorScheme(.dark)
+}
+
+#Preview("Customize") {
+    LibrarySectionsPanel()
+        .preferredColorScheme(.dark)
+}
+#endif
 
 #Preview("Library") {
     ShotLibraryTouch()

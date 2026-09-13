@@ -262,6 +262,13 @@ public enum DefaultsKey {
     /// (Collections), not a mode of the shelf, so there is no cross-client key for it. The sort it
     /// composes with is the shared `librarySort`. Presentation only.
     public static let libraryGroupBy = "punktfunk.libraryGroupBy"
+    /// The Library tab's sections, in order: ids joined by commas, `-` before one switched off
+    /// (`LibrarySectionLayout`). Empty means every section in its default order. Device-only,
+    /// no cross-client key yet.
+    public static let librarySections = "punktfunk.librarySections"
+    /// The shelf the Library tab last showed: a `LibraryTarget.id` (`<host uuid>` or
+    /// `<host uuid>#<preset id>`). A shelf whose host is gone falls back to the default host.
+    public static let libraryShelf = "punktfunk.libraryShelf"
     /// macOS: take the window fullscreen while streaming and restore it on the host list. On by default.
     public static let fullscreenWhileStreaming = "punktfunk.fullscreenWhileStreaming"
     /// LEGACY (pre-tiered overlay): the old boolean stats-overlay toggle. Kept ONLY as the

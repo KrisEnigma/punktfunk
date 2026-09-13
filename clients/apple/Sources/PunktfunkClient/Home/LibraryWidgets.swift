@@ -281,3 +281,53 @@ struct PosterImage: View {
         }
     }
 }
+
+/// A saved host's desktop in the Library tab's Desktops row: its mark and name, a presence dot,
+/// and what a tap does — `Desktop`, or `Resume <title>` while the host has a game up.
+struct LibraryDesktopTile: View {
+    let host: StoredHost
+    let isOnline: Bool
+    let nowPlaying: String?
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            VStack(alignment: .leading, spacing: 4) {
+                HStack {
+                    Group {
+                        if let mark = osIconImage(for: host.osChain) {
+                            mark.resizable().scaledToFit()
+                        } else {
+                            Image(systemName: "desktopcomputer").resizable().scaledToFit()
+                        }
+                    }
+                    .frame(width: 22, height: 22)
+                    .foregroundStyle(Color.brand)
+                    Spacer(minLength: 0)
+                    Circle()
+                        .fill(isOnline ? Color.green : Color.secondary.opacity(0.4))
+                        .frame(width: 7, height: 7)
+                }
+                Spacer(minLength: 0)
+                Text(host.displayName)
+                    .font(.geist(15, .bold, relativeTo: .headline))
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+                Text(nowPlaying.map { "Resume \($0)" } ?? "Desktop")
+                    .font(.geist(12, relativeTo: .caption))
+                    .foregroundStyle(nowPlaying == nil ? AnyShapeStyle(.secondary) : AnyShapeStyle(Color.green))
+                    .lineLimit(1)
+            }
+            .padding(12)
+            .frame(width: 190, height: 108, alignment: .leading)
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .strokeBorder(.quaternary, lineWidth: 1)
+            }
+        }
+        .buttonStyle(.plain)
+        .accessibilityElement(children: .combine)
+    }
+}
+
