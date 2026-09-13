@@ -826,8 +826,10 @@ impl NvencD3d11Encoder {
     }
 
     /// Frames a forced intra refresh wave takes on this session; 0 when the wave is off.
+    /// AV1 never waves: NVENC codes every AV1 frame to load its entropy state from the
+    /// last, so a sweep cannot heal a loss. AV1 answers with an anchor or an IDR.
     fn wave_cycle(&self) -> u32 {
-        if !crate::rfi::wave_enabled() {
+        if !crate::rfi::wave_enabled() || self.codec == Codec::Av1 {
             return 0;
         }
         crate::rfi::wave_cycle(
@@ -2922,8 +2924,8 @@ mod tests {
         // `PF_WAVE_IDR=1`: two frames into every wave an IDR is forced, which flushes it.
         let spoil = std::env::var("PF_WAVE_SPOIL").is_ok_and(|v| v == "1");
         let idr = std::env::var("PF_WAVE_IDR").is_ok_and(|v| v == "1");
-        // `PF_WAVE_CODEC=av1`: the AV1 wave's bookkeeping; the dump is `.obu`, which the
-        // hash maps do not read yet.
+        // `PF_WAVE_CODEC=av1` runs with `PF_WAVE_ANCHOR=1`: NVENC AV1 never waves. The dump is
+        // `.obu` with its `.idx`, for `field_av1`.
         let av1 = std::env::var("PF_WAVE_CODEC").is_ok_and(|v| v == "av1");
         let (codec, ext) = if av1 {
             (Codec::Av1, "obu")
@@ -2949,6 +2951,10 @@ mod tests {
             "PUNKTFUNK_NVENC_IR_ALWAYS=1 makes every ask a wave; PF_WAVE_ANCHOR=1 wants anchors"
         );
         assert!(!(anchor && (spoil || idr)), "PF_WAVE_ANCHOR runs alone");
+        assert!(
+            !av1 || anchor,
+            "NVENC AV1 never waves: soak it with PF_WAVE_ANCHOR=1"
+        );
         let mut parts = shape.split(':');
         let (w, h) = parts
             .next()
@@ -3030,14 +3036,18 @@ mod tests {
                 "the RTX box invalidates references"
             );
             let cycle = enc.wave_cycle() as usize;
-            assert!(cycle >= 2, "the wave is on");
+            assert!(cycle >= 2 || anchor, "the wave is on");
             // Wave k starts at lag + 1 + k * period; its lost frame is `lag` before that. A
             // spoiled wave is followed by the queued one, so its period holds two cycles.
             assert!(
                 cycle > 3 || !spoil,
                 "the spoiling loss lands inside the sweep"
             );
-            let period = if spoil { 2 * cycle + gap } else { cycle + gap };
+            let period = if spoil {
+                2 * cycle + gap
+            } else {
+                cycle.max(lag) + gap
+            };
             let base = lag + 1;
             let last = base + waves * period;
             let mut lost = Vec::new();
