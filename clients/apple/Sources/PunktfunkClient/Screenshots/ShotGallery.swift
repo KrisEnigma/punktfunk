@@ -79,13 +79,13 @@ extension ShotMock {
             GalleryVariant(name: "Playing") { card(livingRoom, playing: "Hollow Knight") },
             GalleryVariant(name: "Bound preset") { card(office, bound: couchProfileID) },
             GalleryVariant(name: "Pinned preset card") { card(battlestation, pinned: hdrPreset) },
-            GalleryVariant(name: "Most recent") { card(battlestation, recent: true) },
+            GalleryVariant(name: "Default host") { card(battlestation, isDefault: true) },
             GalleryVariant(name: "Connecting") { card(battlestation, connecting: true) },
             GalleryVariant(name: "Offline, MAC known") { card(workshop, online: false) },
             GalleryVariant(name: "Offline") { card(bedroom, online: false) },
             GalleryVariant(name: "Not paired") { card(unpaired) },
             GalleryVariant(name: "Everything at once") {
-                card(crowded, recent: true, bound: hdrProfileID,
+                card(crowded, isDefault: true, bound: hdrProfileID,
                      playing: "Starfall Vale: Definitive Edition")
             },
             GalleryVariant(name: "Discovered") { discovered(pairing: false) },
@@ -172,18 +172,80 @@ extension ShotMock {
     private static let galleryStore = hostStore()
 
     private static func card(
-        _ host: StoredHost, online: Bool = true, connecting: Bool = false, recent: Bool = false,
+        _ host: StoredHost, online: Bool = true, connecting: Bool = false, isDefault: Bool = false,
         bound: String? = nil, pinned: StreamPreset? = nil, playing: String? = nil
     ) -> AnyView {
-        let menu = HostPresetMenu(
-            profiles: [hdrPreset, couchPreset], boundID: bound,
-            pinnedIDs: pinned.map { [$0.id] } ?? [], connectWith: { _ in }, setDefault: { _ in },
-            togglePin: { _ in }, copyLink: { _ in })
-        return AnyView(HostCardView(
-            host: host, isOnline: online, isConnecting: connecting, isMostRecent: recent,
-            isBusy: false, onConnect: {}, onPair: {}, onForget: {}, onRemove: {},
-            presetMenu: menu, pinnedPreset: pinned, nowPlaying: playing))
+        AnyView(HostCardView(
+            host: host, isOnline: online, isConnecting: connecting, isDefaultHost: isDefault,
+            isBusy: false, actions: stubActions(host, online: online, bound: bound, pinned: pinned),
+            pinnedPreset: pinned, nowPlaying: playing))
     }
+
+    /// A card's or a page's acts with nothing behind them, gated the way the grid gates them.
+    static func stubActions(
+        _ host: StoredHost, online: Bool, bound: String? = nil, pinned: StreamPreset? = nil
+    ) -> HostActions {
+        let paired = host.pinnedSHA256 != nil
+        return HostActions(
+            connect: {}, pair: {}, edit: {}, forget: {}, remove: {},
+            browseLibrary: paired ? {} : nil, speedTest: paired ? {} : nil,
+            sendLogs: paired ? {} : nil,
+            wake: pinned == nil && !online && !host.wakeMacs.isEmpty ? {} : nil,
+            copyLink: {}, showDetails: pinned == nil ? {} : nil,
+            power: pinned == nil && paired && online ? powerGrant : [],
+            presets: HostPresetMenu(
+                profiles: [hdrPreset, couchPreset], boundID: bound ?? host.profileID,
+                pinnedIDs: pinned.map { [$0.id] } ?? [], connectWith: { _ in },
+                setDefault: { _ in }, togglePin: { _ in }))
+    }
+
+    /// What a host with the Host-power grant offers: sleep, then the two that ask first.
+    static let powerGrant = [
+        HostAction(id: "power.sleep", title: "Sleep"),
+        HostAction(id: "power.reboot", title: "Restart", danger: true),
+        HostAction(id: "power.shutdown", title: "Shut Down", danger: true),
+    ]
+
+    /// The host page in the states it has to hold: a paired host with a game up and power
+    /// granted, an asleep one with a known MAC, and one never paired.
+    static var hostPageVariants: [GalleryVariant] {
+        func page(_ id: UUID) -> AnyView {
+            let frame = RoundedRectangle(cornerRadius: 12, style: .continuous)
+            return AnyView(NavigationStack { hostPage(id) }
+                .frame(height: 760)
+                .clipShape(frame)
+                .overlay { frame.strokeBorder(.quaternary, lineWidth: 1) })
+        }
+        return [
+            GalleryVariant(name: "Paired, playing, power granted") { page(battlestationID) },
+            GalleryVariant(name: "Offline, MAC known") { page(workshopID) },
+            GalleryVariant(name: "Not paired") { page(studioID) },
+        ]
+    }
+
+    /// One host page on the page store, with the grid's gating and no network behind it.
+    static func hostPage(_ id: UUID) -> HostDetailView {
+        HostDetailView(store: pageStore, hostID: id) { host in
+            stubActions(host, online: pageStore.probedOnline.contains(host.id))
+        }
+    }
+
+    static let studioID = UUID(uuidString: "5B0D1E00-0000-4000-8000-000000000007")!
+
+    /// The grid's hosts plus one never paired. Built once: it also tells `NowPlayingStore` that
+    /// Battlestation has a game up, and doing that from a view's body would re-render forever.
+    private static let pageStore: HostStore = {
+        let store = hostStore()
+        store.hosts.append(StoredHost(
+            id: studioID, name: "Studio PC", address: "192.168.1.58", port: 9777,
+            osChain: "windows/11"))
+        store.debugSetProbedOnline([battlestationID, livingRoomID, officeID, studioID])
+        if let battlestation = store.hosts.first(where: { $0.id == battlestationID }) {
+            NowPlayingStore.shared.adopt(
+                [running("steam:starfall")].compactMap { $0 }, for: battlestation)
+        }
+        return store
+    }()
 
     private static func discovered(pairing: Bool) -> AnyView {
         let advert = HostDiscovery.debugAdvert(
@@ -193,6 +255,13 @@ extension ShotMock {
             requiresPairing: pairing, allowsTofu: !pairing,
             osChain: pairing ? "windows/11" : "linux/steamos")
         return AnyView(DiscoveredCardView(discovered: advert, isBusy: false, onConnect: {}))
+    }
+}
+
+/// The host page for a paired host with a game up and the power grant.
+struct ShotHostPage: View {
+    var body: some View {
+        NavigationStack { ShotMock.hostPage(ShotMock.battlestationID) }
     }
 }
 
@@ -211,6 +280,11 @@ struct ShotLibraryTouch: View {
 
 #Preview("Host cards") {
     ShotGalleryView(title: "Host cards", variants: ShotMock.hostCardVariants)
+        .preferredColorScheme(.dark)
+}
+
+#Preview("Host page") {
+    ShotGalleryView(title: "Host page", variants: ShotMock.hostPageVariants)
         .preferredColorScheme(.dark)
 }
 

@@ -74,6 +74,9 @@ enum ShotScenes {
             ShotScene(name: "14-gallery-host-cards", orientation: .natural, colorScheme: .dark) {
                 AnyView(ShotGalleryView(title: "Host cards", variants: ShotMock.hostCardVariants))
             },
+            ShotScene(name: "14c-gallery-host-page", orientation: .natural, colorScheme: .dark) {
+                AnyView(ShotGalleryView(title: "Host page", variants: ShotMock.hostPageVariants))
+            },
             ShotScene(name: "14b-gallery-library-tiles", orientation: .natural, colorScheme: .dark) {
                 AnyView(ShotGalleryView(
                     title: "Library tiles", variants: ShotMock.libraryTileVariants, minWidth: 150))
@@ -84,6 +87,9 @@ enum ShotScenes {
             },
             ShotScene(name: "15-library-touch", orientation: .natural, colorScheme: .dark) {
                 AnyView(ShotLibraryTouch())
+            },
+            ShotScene(name: "16-host-page", orientation: .natural, colorScheme: .dark) {
+                AnyView(ShotHostPage())
             },
         ]
         #if os(iOS) || os(macOS)

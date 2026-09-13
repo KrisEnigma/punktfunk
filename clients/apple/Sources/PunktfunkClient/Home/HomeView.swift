@@ -46,6 +46,10 @@ struct HomeView: View {
     /// "Browse Library…" action.
     /// The host being edited (name / address / port / Wake-on-LAN MAC) — drives the edit sheet.
     @State private var editTarget: StoredHost?
+    /// The host whose page is pushed.
+    @State private var detailTarget: StoredHost.ID?
+    /// The start-screen pointer; the default host's card carries the accent bar.
+    @AppStorage(DefaultsKey.defaultHost) private var defaultHostID = ""
     /// The outcome of the last "Send Logs to Host" — drives its alert.
     @State private var sendLogsResult: (ok: Bool, message: String)?
     /// What each paired host says this device may do to it (`design/host-actions.md` §7).
@@ -160,6 +164,11 @@ struct HomeView: View {
                     try? await Task.sleep(for: .seconds(10))
                 }
             }
+            // The host page, from a card's ⓘ or its menu (design §2.4).
+            .navigationDestination(item: $detailTarget) { id in
+                HostDetailView(
+                    store: store, hostID: id, actions: { hostActions(for: $0, pinned: nil) })
+            }
             #if os(tvOS)
             // Pushed routes — the Settings-app navigation feel (push animation, Menu
             // pops) instead of modal overlays.
@@ -174,6 +183,12 @@ struct HomeView: View {
             }
             .navigationDestination(item: $speedTestTarget) { host in
                 SpeedTestSheet(host: host)
+            }
+            .navigationDestination(item: $editTarget) { host in
+                AddHostSheet(
+                    existing: host,
+                    suggestedMacs: discovery.hosts.first { host.matches($0) }?.macAddresses ?? [],
+                    onSave: { store.update($0) })
             }
             .navigationDestination(item: $libraryTarget) { shelf in
                 LibraryView(
@@ -330,44 +345,45 @@ struct HomeView: View {
     }
 
     private func hostCard(_ host: StoredHost, pinned: StreamPreset?) -> some View {
-        // A pinned card connects with ITS preset; the primary card follows the binding.
-        let selection: PresetSelection = pinned.map { .preset($0.id) } ?? .inherit
-        // …and browsing is that same connect with a title picked first, so a pinned card opens its
-        // OWN shelf: every launch off it carries the card's profile rather than the host's binding.
-        // Gated on a pinned identity, not just the feature toggle: the library plane's
-        // MgmtTransport trust-on-first-use accepts ANY cert for a pin-less host (self-signed, no
-        // SAN — system trust is bypassed), so browsing an unpinned host lets a LAN MITM serve a
-        // forged catalog and harvest the device's pairing identity. Pair first, exactly as the
-        // stream path already refuses an unpinned connect. security-review 2026-08-15 finding 8.
-        let onBrowseLibrary: (() -> Void)? = host.pinnedSHA256 != nil
-            ? { libraryTarget = LibraryTarget(host: host, profile: selection) }
-            : nil
-        return HostCardView(
+        HostCardView(
             host: host,
             isOnline: isOnline(host),
             isConnecting: model.phase == .connecting && model.activeHost?.id == host.id,
-            // The accent ring marks the most recent HOST; pinned cards stay quiet so the grid
-            // doesn't grow several "most recent" bars for one machine.
-            isMostRecent: pinned == nil && host.id == mostRecentHostID,
+            // The bar marks the default HOST; pinned cards stay quiet.
+            isDefaultHost: pinned == nil && host.id == defaultHost,
             isBusy: model.isBusy,
-            onConnect: { connect(host, selection) },
-            onPair: { if !model.isBusy { pairingTarget = host } },
-            onSpeedTest: host.pinnedSHA256 != nil
-                ? { if !model.isBusy { speedTestTarget = host } } : nil,
-            onForget: { store.forgetIdentity(host) },
-            onRemove: { store.remove(host) },
-            onBrowseLibrary: onBrowseLibrary,
-            onWake: { wake(host) },
-            onEdit: { editTarget = host },
-            onSendLogs: host.pinnedSHA256 != nil
-                ? { Task { sendLogsResult = await SendLogs.toHost(host) } } : nil,
-            // A pinned card is a shortcut to one preset, not a second host, so it carries no
-            // host actions — the same rule the console's menu applies.
-            hostActions: pinned == nil ? hostPower.actions(for: host) : [],
-            onHostAction: { action in hostAction(action, on: host) },
-            presetMenu: presetMenu(for: host),
+            actions: hostActions(for: host, pinned: pinned),
             pinnedPreset: pinned,
             nowPlaying: nowPlaying.title(for: host))
+    }
+
+    /// Everything a card and the host page can do for `host`. A pinned card connects and browses
+    /// with ITS preset and carries no host acts: it is a shortcut, not a second host.
+    private func hostActions(for host: StoredHost, pinned: StreamPreset?) -> HostActions {
+        let selection: PresetSelection = pinned.map { .preset($0.id) } ?? .inherit
+        // Library, speed test and logs dial with the pinned identity, and an unpinned host would
+        // accept any certificate. So they wait for a pairing.
+        let paired = host.pinnedSHA256 != nil
+        let wakeable = pinned == nil && !isOnline(host) && !host.wakeMacs.isEmpty
+            && PunktfunkConnection.wakeOnLANAvailable
+        return HostActions(
+            connect: { connect(host, selection) },
+            pair: { if !model.isBusy { pairingTarget = host } },
+            edit: { editTarget = host },
+            forget: { store.forgetIdentity(host) },
+            remove: { store.remove(host) },
+            browseLibrary: paired
+                ? { libraryTarget = LibraryTarget(host: host, profile: selection) } : nil,
+            speedTest: paired ? { if !model.isBusy { speedTestTarget = host } } : nil,
+            sendLogs: paired ? { Task { sendLogsResult = await SendLogs.toHost(host) } } : nil,
+            wake: wakeable ? { wake(host) } : nil,
+            copyLink: LinkClipboard.isAvailable
+                ? { LinkClipboard.copy(DeepLink.forHost(host, profile: pinned?.id).urlString) }
+                : nil,
+            showDetails: pinned == nil ? { detailTarget = host.id } : nil,
+            power: pinned == nil ? hostPower.actions(for: host) : [],
+            runPower: { action in hostAction(action, on: host) },
+            presets: presetMenu(for: host))
     }
 
     /// A host action picked from a card's menu: explain an unavailable one, confirm a
@@ -401,9 +417,6 @@ struct HomeView: View {
             togglePin: { id in
                 let pinned = (host.pinnedProfileIDs ?? []).contains(id)
                 store.setPinned(host.id, profileID: id, pinned: !pinned)
-            },
-            copyLink: { profileID in
-                LinkClipboard.copy(DeepLink.forHost(host, profile: profileID).urlString)
             })
     }
 
@@ -435,11 +448,9 @@ struct HomeView: View {
         discovery.unsaved(among: store.hosts)
     }
 
-    /// The host of the most recent session — its card carries the accent ring.
-    private var mostRecentHostID: UUID? {
-        store.hosts
-            .compactMap { host in host.lastConnected.map { (host.id, $0) } }
-            .max { $0.1 < $1.1 }?.0
+    /// The host Start in opens on: explicit, or the only paired one.
+    private var defaultHost: StoredHost.ID? {
+        StartScreen.defaultHost(id: defaultHostID, hosts: store.hosts).host?.id
     }
 
     // MARK: - Chrome
