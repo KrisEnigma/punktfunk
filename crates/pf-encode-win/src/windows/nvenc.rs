@@ -2932,6 +2932,16 @@ mod tests {
         // `PF_WAVE_ANCHOR=1`: answer each loss with an RFI anchor instead of a wave (leave
         // `PUNKTFUNK_NVENC_IR_ALWAYS` unset); the anchor P must decode exact at once.
         let anchor = std::env::var("PF_WAVE_ANCHOR").is_ok_and(|v| v == "1");
+        // `PF_WAVE_LAG=<n>` (anchors only): the ask trails its loss by n frames, 2 by
+        // default. The n - 1 frames between decode concealed, as over a real round trip.
+        let lag: usize = std::env::var("PF_WAVE_LAG")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(2);
+        assert!(
+            lag >= 1 && (lag == 2 || anchor),
+            "PF_WAVE_LAG=1.. with PF_WAVE_ANCHOR=1"
+        );
         assert_ne!(
             anchor,
             std::env::var("PUNKTFUNK_NVENC_IR_ALWAYS").is_ok_and(|v| v == "1"),
@@ -3020,14 +3030,15 @@ mod tests {
             );
             let cycle = enc.wave_cycle() as usize;
             assert!(cycle >= 2, "the wave is on");
-            // Wave k starts at 3 + k * period; its lost frame is two before that. A spoiled
-            // wave is followed by the queued one, so its period holds two cycles.
+            // Wave k starts at lag + 1 + k * period; its lost frame is `lag` before that. A
+            // spoiled wave is followed by the queued one, so its period holds two cycles.
             assert!(
                 cycle > 3 || !spoil,
                 "the spoiling loss lands inside the sweep"
             );
             let period = if spoil { 2 * cycle + gap } else { cycle + gap };
-            let last = 3 + waves * period;
+            let base = lag + 1;
+            let last = base + waves * period;
             let mut lost = Vec::new();
             let mut starts = Vec::new();
             let mut closes = Vec::new();
@@ -3035,12 +3046,13 @@ mod tests {
             let mut anchors = Vec::new();
             let mut aus = Vec::new();
             for i in 0..=last {
-                let offset = (i >= 3 && (i - 3) / period < waves).then(|| (i - 3) % period);
+                let offset =
+                    (i >= base && (i - base) / period < waves).then(|| (i - base) % period);
                 match offset {
                     Some(0) => {
-                        let l = (i - 2) as i64;
+                        let l = (i - lag) as i64;
                         assert!(enc.invalidate_ref_frames(l, l), "the ask is answered");
-                        lost.push(i - 2);
+                        lost.push(i - lag);
                         if anchor {
                             assert!(enc.pending_anchor && enc.wave.is_none(), "an anchor");
                             anchors.push(i);
