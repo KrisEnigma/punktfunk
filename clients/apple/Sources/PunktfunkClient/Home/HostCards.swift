@@ -258,6 +258,8 @@ enum HostStatus: Equatable {
 struct HostStatusLine: View {
     let status: HostStatus
     let size: CGFloat
+    /// The dot alone: a card that shows its preset drops a plain "Online" beside it.
+    var dotOnly = false
 
     var body: some View {
         HStack(spacing: 6) {
@@ -269,11 +271,16 @@ struct HostStatusLine: View {
             case .online, .notPaired, .playing:
                 dot(Color.green)
             }
-            Text(status.text)
-                .lineLimit(1)
+            if !dotOnly {
+                Text(status.text)
+                    .lineLimit(1)
+            }
         }
         .font(.geist(size, .medium, relativeTo: .footnote))
         .foregroundStyle(status.isPlaying ? AnyShapeStyle(Color.green) : AnyShapeStyle(.secondary))
+        // With the words gone the dot still has to say it.
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(status.text)
     }
 
     private func dot(_ color: Color) -> some View {
@@ -330,7 +337,9 @@ struct HostCardView: View {
                             .foregroundStyle(.primary)
                             .lineLimit(1)
                         HStack(spacing: 8) {
-                            HostStatusLine(status: status, size: m.meta)
+                            HostStatusLine(
+                                status: status, size: m.meta,
+                                dotOnly: shownPreset != nil && status == .online)
                             if let preset = shownPreset {
                                 // Whole even when the status has to shorten: the preset says what a
                                 // tap does, and the host page has the full status.
