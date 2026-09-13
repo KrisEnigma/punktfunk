@@ -150,7 +150,7 @@ enum ShotScenes {
                     hostID: ShotMock.battlestationID, store: ShotMock.pageStore, section: .presets))
             },
             ShotScene(name: "15e-customize-mac", orientation: .natural, colorScheme: .dark) {
-                AnyView(LibrarySectionsPanel(shotLayout: "").frame(width: 320, height: 300))
+                AnyView(LibrarySectionsPanel(shotLayout: "").frame(width: 320, height: 284))
             },
             ShotScene(name: "16c-host-window-connection", orientation: .natural, colorScheme: .dark) {
                 AnyView(MacHostWindow(

@@ -614,7 +614,7 @@ struct LibraryView: View {
         #if os(macOS)
         // A popover on the Mac (design §4): the panel is a short list, not a task.
         .popover(isPresented: $showCustomize) {
-            LibrarySectionsPanel().frame(width: 320, height: 300)
+            LibrarySectionsPanel().frame(width: 320, height: 284)
         }
         #endif
     }
