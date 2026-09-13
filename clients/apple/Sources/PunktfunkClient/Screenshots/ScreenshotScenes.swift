@@ -106,6 +106,11 @@ enum ShotScenes {
             ShotScene(name: "15f-library-filter", orientation: .natural, colorScheme: .dark) {
                 AnyView(ShotLibraryFilter())
             },
+            // The host page as sections beside a sidebar: the iPad's sheet, the Mac's window.
+            ShotScene(name: "16f-host-sections", orientation: .natural, colorScheme: .dark) {
+                AnyView(HostSectionsView(
+                    hostID: ShotMock.battlestationID, store: ShotMock.pageStore, handOff: { _ in }))
+            },
             ShotScene(name: "07-gamepad-settings", orientation: .natural, colorScheme: .dark) {
                 AnyView(ShotGamepadSettings())
             },

@@ -95,6 +95,15 @@ struct HostDetailView: View {
                     // A Mac form draws even a destructive button in the window's tint.
                 Button("Remove Host", role: .destructive) { confirmRemove = true }
                     .tint(.red)
+                    // On the button, so iOS 26 opens the dialog from the row that asked.
+                    .confirmationDialog(
+                        "Remove \(host.displayName)?", isPresented: $confirmRemove,
+                        titleVisibility: .visible
+                    ) {
+                        Button("Remove Host", role: .destructive, action: a.remove)
+                    } message: {
+                        Text("You can add it again later.")
+                    }
                 } footer: {
                     Text("Deletes the host from this device. The host itself is untouched.")
                 }
@@ -103,28 +112,22 @@ struct HostDetailView: View {
         #if os(macOS)
         .formStyle(.grouped)
         #endif
-        .navigationTitle(host.displayName)
+        .navigationTitle(pageTitle(host))
         #if os(iOS)
         .navigationBarTitleDisplayMode(.inline)
         #endif
-        .confirmationDialog(
-            "Forget the identity of \(host.displayName)?", isPresented: $confirmForget,
-            titleVisibility: .visible
-        ) {
-            Button("Forget Identity", role: .destructive, action: a.forget)
-        } message: {
-            Text("The next connect asks for a PIN again.")
-        }
-        .confirmationDialog(
-            "Remove \(host.displayName)?", isPresented: $confirmRemove, titleVisibility: .visible
-        ) {
-            Button("Remove Host", role: .destructive, action: a.remove)
-        } message: {
-            Text("You can add it again later.")
-        }
     }
 
     private func shows(_ section: HostSection) -> Bool { only == nil || only == section }
+
+    /// The host's name, except in the iPad's sheet of sections: its sidebar names the host, so the
+    /// pane names its section.
+    private func pageTitle(_ host: StoredHost) -> String {
+        #if os(iOS)
+        if let only { return only.title }
+        #endif
+        return host.displayName
+    }
 
     private func header(_ host: StoredHost, _ status: HostStatus) -> some View {
         let m = CardMetrics.current
@@ -216,6 +219,14 @@ struct HostDetailView: View {
                     set: { defaultHostID = $0 ? host.id.uuidString : "" }))
                 Button("Forget Identity…", role: .destructive) { confirmForget = true }
                     .tint(.red)
+                    .confirmationDialog(
+                        "Forget the identity of \(host.displayName)?", isPresented: $confirmForget,
+                        titleVisibility: .visible
+                    ) {
+                        Button("Forget Identity", role: .destructive, action: a.forget)
+                    } message: {
+                        Text("The next connect asks for a PIN again.")
+                    }
             }
         } header: {
             Text("Pairing")
