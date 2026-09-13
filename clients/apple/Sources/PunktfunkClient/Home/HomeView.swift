@@ -538,14 +538,12 @@ struct HomeView: View {
     }
     #endif
 
-    /// macOS caps card width (a huge window shouldn't yield huge cards); on iOS the columns FILL
-    /// the width so the cards stay edge-aligned with the title and bars — sized touch-first: one
-    /// column on iPhone portrait, 3–4 generous cards on iPad.
+    /// The columns fill the width everywhere, so no window width leaves a gutter beside the cards:
+    /// adaptive packs as many as fit and widens them to close the gap, which keeps a card under
+    /// twice the minimum. Touch-first on iOS: one column on iPhone portrait, 3–4 on iPad.
     private var gridColumns: [GridItem] {
-        // Wider than before: the monogram card is a horizontal module (tile + address line), so
-        // it needs room for a monospaced "IP:port" without truncating.
         #if os(macOS)
-        [GridItem(.adaptive(minimum: 250, maximum: 320), spacing: 16)]
+        [GridItem(.adaptive(minimum: 250), spacing: 16)]
         #elseif os(tvOS)
         // Tracks CardMetrics' 10-foot sizes — at the 30pt name a 320pt column truncates
         // every hostname longer than ~10 characters.
