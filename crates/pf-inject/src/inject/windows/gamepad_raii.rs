@@ -21,7 +21,7 @@ use pf_driver_proto::gamepad::{PadBootstrap, BOOT_MAGIC, GAMEPAD_PROTO_VERSION};
 use std::ffi::c_void;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::sync::atomic::{fence, AtomicU32, AtomicU64, Ordering};
-use std::sync::OnceLock;
+use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 use windows::core::{w, HRESULT, HSTRING, PCWSTR};
 use windows::Win32::Devices::DeviceAndDriverInstallation::{
@@ -284,6 +284,19 @@ const TRUST_MAILBOX_ENV: &str = "PUNKTFUNK_PAD_CHANNEL_TRUST_MAILBOX";
 /// At [`PROOF_PROBE_INTERVAL`] this is ~5 s — past attach and the eager window.
 const PROOF_FAILURES_BEFORE_WARN: u32 = 20;
 
+/// Mailbox names this process created and still holds. [`crate::pad_pool`] skips an index
+/// only when another process serves it; our own pad inside its unplug grace is not that.
+static CREATED_HERE: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+fn created_names() -> MutexGuard<'static, Vec<String>> {
+    CREATED_HERE.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Whether this process created the mailbox `name` and still holds it.
+pub(crate) fn created_here(name: &str) -> bool {
+    created_names().iter().any(|n| n == name)
+}
+
 /// One pad's sealed host↔driver channel: unnamed DATA, named mailbox, and the
 /// [`Self::pump`] state machine. Drop closes the mailbox; a persistent driver
 /// treats the vanished name as "host gone".
@@ -347,6 +360,7 @@ impl PadChannel {
             (*(base.add(core::mem::offset_of!(PadBootstrap, magic)) as *const AtomicU32))
                 .store(BOOT_MAGIC, Ordering::Release);
         }
+        created_names().push(boot_name.clone());
         Ok(PadChannel {
             data,
             boot,
@@ -364,7 +378,15 @@ impl PadChannel {
             proof_failures: 0,
         })
     }
+}
 
+impl Drop for PadChannel {
+    fn drop(&mut self) {
+        created_names().retain(|n| *n != self.boot_name);
+    }
+}
+
+impl PadChannel {
     pub(super) fn data_base(&self) -> *mut u8 {
         self.data.base()
     }
