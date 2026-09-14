@@ -655,7 +655,7 @@ mod live_probe {
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_patch_level, parse_version, steam_appid_from_launch, MIN_GAMESCOPE,
+        parse_patch_level, parse_version, prepend_path_dir, steam_appid_from_launch, MIN_GAMESCOPE,
         MIN_GAMESCOPE_OVERLAY,
     };
 
