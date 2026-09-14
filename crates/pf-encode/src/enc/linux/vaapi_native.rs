@@ -424,11 +424,12 @@ impl Encoder for NativeVaapiEncoder {
         Some(u64::from(self.params.bitrate_bps))
     }
 
-    fn set_input_crop(&mut self, rect: [u32; 4]) {
+    fn set_input_crop(&mut self, rect: [u32; 4]) -> Result<()> {
         self.crop = Some(rect);
         if let Some(session) = self.session.as_mut() {
             session.set_source_crop(self.crop);
         }
+        Ok(())
     }
 
     fn flush(&mut self) -> Result<()> {

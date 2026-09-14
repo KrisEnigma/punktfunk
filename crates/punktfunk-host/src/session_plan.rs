@@ -328,10 +328,25 @@ pub(crate) fn open_encoder_fitted(
     let mut enc = open(framed.out.0, framed.out.1)?;
     let caps = enc.caps();
     let scaled = framed.out != (framed.crop[2], framed.crop[3]);
-    if (!scaled || caps.downscales_input) && (!framed.is_cropped() || caps.crops_input) {
-        if framed.is_cropped() {
-            enc.set_input_crop(framed.crop);
-        }
+    let armed = if (scaled && !caps.downscales_input) || (framed.is_cropped() && !caps.crops_input)
+    {
+        Err(anyhow::anyhow!(
+            "the backend neither crops nor scales on ingest"
+        ))
+    } else if caps.crops_input {
+        enc.set_input_crop(framed.crop)
+    } else {
+        Ok(())
+    };
+    if let Err(e) = &armed {
+        tracing::warn!(
+            ?captured,
+            crop = ?framed.crop,
+            wanted = ?framed.out,
+            error = %format!("{e:#}"),
+            "this encode backend cannot frame the picture for this client — encoding the source at its own size"
+        );
+    } else {
         tracing::info!(
             ?captured,
             crop = ?framed.crop,
@@ -342,12 +357,6 @@ pub(crate) fn open_encoder_fitted(
         );
         return Ok((enc, framed));
     }
-    tracing::warn!(
-        ?captured,
-        crop = ?framed.crop,
-        wanted = ?framed.out,
-        "crop or downscale is unavailable on this encode backend — encoding the source at its own size"
-    );
     drop(enc);
     Ok((open(captured.0, captured.1)?, full))
 }

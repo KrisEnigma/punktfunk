@@ -272,7 +272,7 @@ impl Encoder for TrackedEncoder {
     fn set_input_ring_depth(&mut self, depth: usize) {
         self.inner.set_input_ring_depth(depth)
     }
-    fn set_input_crop(&mut self, rect: [u32; 4]) {
+    fn set_input_crop(&mut self, rect: [u32; 4]) -> Result<()> {
         self.inner.set_input_crop(rect)
     }
     fn poll(&mut self) -> Result<Option<EncodedFrame>> {
