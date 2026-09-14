@@ -202,6 +202,7 @@ pub struct EncoderCaps {
     pub downscales_input: bool,
     /// [`set_input_crop`](Encoder::set_input_crop) is honoured: one rectangle of each
     /// picture is encoded, scaled when [`downscales_input`](Self::downscales_input) also holds.
+    /// A backend with this cap takes every framing through that call, a pure scale included.
     pub crops_input: bool,
 }
 
@@ -353,9 +354,13 @@ pub trait Encoder: Send {
     /// (torn frames, not UB — it fails silently). Called once after the
     /// capturer is known. Default: no-op (copying or synchronous backends).
     fn set_input_ring_depth(&mut self, _depth: usize) {}
-    /// Encode only `rect` (`x, y, width, height` in source pixels) of every submitted picture.
-    /// Call before the first submit. Ignored unless [`EncoderCaps::crops_input`].
-    fn set_input_crop(&mut self, _rect: [u32; 4]) {}
+    /// Encode `rect` (`x, y, width, height` in source pixels) of every submitted picture,
+    /// scaled to the opened size. Call before the first submit, for any framing other than the
+    /// whole source at its own size, and only when [`EncoderCaps::crops_input`]. An error means
+    /// this encoder cannot take that framing; reopen at the source's size.
+    fn set_input_crop(&mut self, _rect: [u32; 4]) -> Result<()> {
+        Ok(())
+    }
     /// Signal end-of-stream. After this, drain remaining AUs with
     /// [`poll`](Self::poll) until `None` — NVENC buffers frames internally
     /// even at `delay=0`.

@@ -21,7 +21,7 @@ use super::vk_util::{
 };
 use crate::rfi::Wave;
 use crate::{Codec, EncodedFrame, Encoder, EncoderCaps};
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, ensure, Context, Result};
 use ash::vk;
 use pf_frame::{CapturedFrame, FramePayload, PixelFormat};
 use std::collections::VecDeque;
@@ -654,6 +654,8 @@ pub struct VulkanVideoEncoder {
     /// RGB-direct (EFC) config. `Some` ⇒ picture format is BGRA, VCN does CSC; `None` ⇒ compute
     /// CSC. Fixed per session (picture format is baked into the video session).
     rgb: Option<RgbDirect>,
+    /// The host's crop and scale ahead of the CSC ([`Encoder::set_input_crop`]). CSC sessions only.
+    reframe: Option<reframe_stage::Reframe>,
     /// Producer supplied native NV12. Encodes the imported visible-size buffer directly: native
     /// sessions use TRUE-SIZE headers so RADV programs firmware padding and the source is never
     /// read past its extent. CSC/RGB paths keep app-aligned SPS (coded extent 64×16); an
@@ -1552,6 +1554,7 @@ impl VulkanVideoEncoder {
             perf_at: std::time::Instant::now(),
             cpu_expand: Vec::new(),
             rgb: rgb_cfg,
+            reframe: None,
             native_nv12,
             ten_bit,
             intra_refresh,
@@ -2119,8 +2122,13 @@ impl VulkanVideoEncoder {
         }
 
         // Shader samples with clamped 1:1 texelFetch, so a mismatch silently streams a
-        // cropped/edge-padded picture. Refuse into the encoder-rebuild path instead.
-        if frame.width != self.render_w || frame.height != self.render_h {
+        // cropped/edge-padded picture. Refuse into the encoder-rebuild path instead. A reframed
+        // session needs only a capture that holds its crop.
+        let fits = match &self.reframe {
+            Some(r) => r.covers(frame.width, frame.height),
+            None => frame.width == self.render_w && frame.height == self.render_h,
+        };
+        if !fits {
             bail!(
                 "vulkan-encode (csc): frame {}x{} != mode {}x{} — refusing a mismatched CSC \
                  source",
@@ -2263,6 +2271,22 @@ impl VulkanVideoEncoder {
                 let _ = dev.reset_command_buffer(compute_cmd, vk::CommandBufferResetFlags::empty());
                 return Err(e);
             }
+        };
+        // A reframed session converts the scaled crop; the cursor went in at source size.
+        let (cursor_pc, rgb_view) = match &self.reframe {
+            Some(r) => (
+                [0; 4],
+                r.record(
+                    &dev,
+                    compute_cmd,
+                    slot,
+                    self.sampler,
+                    rgb_view,
+                    self.frames[slot].cursor_view,
+                    cursor_pc,
+                ),
+            ),
+            None => (cursor_pc, rgb_view),
         };
         self.bind_rgb(csc_set, rgb_view);
 
@@ -3715,6 +3739,9 @@ impl Encoder for VulkanVideoEncoder {
             supports_rfi: true,
             // Only CSC composites (`prep_cursor`). RGB-direct/EFC and native NV12 have no blend.
             blends_cursor: self.rgb.is_none() && !self.native_nv12,
+            // `set_input_crop` moves an EFC session onto the CSC; a producer's NV12 has no RGB stage.
+            downscales_input: !self.native_nv12,
+            crops_input: !self.native_nv12,
             ..Default::default()
         }
     }
@@ -3887,6 +3914,58 @@ impl Encoder for VulkanVideoEncoder {
         Some(self.pending_bitrate.unwrap_or(self.bitrate))
     }
 
+    fn set_input_crop(&mut self, rect: [u32; 4]) -> Result<()> {
+        ensure!(
+            !self.native_nv12,
+            "vulkan-encode: a producer's NV12 source cannot be reframed"
+        );
+        let [_, _, w, h] = rect;
+        ensure!(
+            w >= self.render_w && h >= self.render_h,
+            "vulkan-encode: a {w}x{h} crop would upscale into the {}x{} session",
+            self.render_w,
+            self.render_h
+        );
+        if self.rgb.is_some() {
+            // EFC bakes an RGB picture format into the session and the reframe feeds the CSC,
+            // so reopen as a CSC session. Called before the first submit: nothing is lost.
+            *self = Self::open_opts_inner(
+                self.codec,
+                self.render_w,
+                self.render_h,
+                self.fps,
+                self.bitrate,
+                false,
+                false,
+                self.ten_bit,
+                vk::Format::B8G8R8A8_UNORM,
+            )?;
+        }
+        if let Some(mut old) = self.reframe.take() {
+            // SAFETY: live device; waiting out every submission means none still reads it.
+            unsafe {
+                self.device.device_wait_idle()?;
+                old.destroy(&self.device);
+            }
+        }
+        // SAFETY: fresh handles on this encoder's live device, released in `Drop` or above.
+        self.reframe = Some(unsafe {
+            reframe_stage::Reframe::new(
+                &self.device,
+                &self.mem_props,
+                rect,
+                (self.render_w, self.render_h),
+                self.frames.len(),
+            )?
+        });
+        tracing::info!(
+            crop = ?rect,
+            out = ?(self.render_w, self.render_h),
+            "vulkan-encode: cropping and scaling ahead of the CSC"
+        );
+        Ok(())
+    }
+
     fn flush(&mut self) -> Result<()> {
         while let Some(slot) = self.in_flight.pop_front() {
             // SAFETY: wait this slot's fence, then read back its own owned bitstream objects.
@@ -4053,6 +4132,14 @@ impl Drop for VkTeardown {
 
 impl Drop for VulkanVideoEncoder {
     fn drop(&mut self) {
+        if let Some(mut stage) = self.reframe.take() {
+            // SAFETY: the device is live until VkTeardown below; waiting out every submission
+            // first means no queued command still reads the stage's images.
+            unsafe {
+                let _ = self.device.device_wait_idle();
+                stage.destroy(&self.device);
+            }
+        }
         drop(VkTeardown {
             instance: Some(self.instance.clone()),
             device: Some(self.device.clone()),
@@ -4076,6 +4163,10 @@ impl Drop for VulkanVideoEncoder {
         });
     }
 }
+
+// The host's crop and scale ahead of the CSC.
+#[path = "vk_reframe.rs"]
+mod reframe_stage;
 
 // Construction + parameter-set builders. `#[path]` child sees this file's private items.
 #[path = "vk_build.rs"]
@@ -4692,6 +4783,97 @@ mod tests {
         }
         assert!(got_au, "no AU after the refused submits — session wedged");
         eprintln!("done — under validation layers this run must report ZERO VUID errors");
+    }
+
+    /// A joiner's reframe on an EFC-capable device: the session reopens on the CSC, and the
+    /// decoded picture is the crop's red and white halves with none of the blue beside it or
+    /// the green above and below.
+    #[test]
+    #[ignore = "needs a real VK_KHR_video_encode_h265 device and ffmpeg"]
+    fn vulkan_reframe_crops_and_scales() {
+        let (w, h) = (256u32, 144u32);
+        let (sw, sh) = (768u32, 432u32);
+        let mut enc =
+            VulkanVideoEncoder::open_opts(Codec::H265, w, h, 60, 10_000_000, true).expect("open");
+        assert!(enc.caps().crops_input && enc.caps().downscales_input);
+        enc.set_input_crop([128, 72, 512, 288]).expect("reframe");
+        assert!(enc.rgb.is_none(), "the reframe runs on the CSC path");
+        // BGRX: green rows outside the crop, blue columns beside it, red then white inside.
+        let mut px = vec![0u8; (sw * sh * 4) as usize];
+        for y in 0..sh {
+            for x in 0..sw {
+                let c: [u8; 4] = if !(72..360).contains(&y) {
+                    [40, 200, 40, 255]
+                } else if !(128..640).contains(&x) {
+                    [200, 40, 40, 255]
+                } else if x < 384 {
+                    [40, 40, 200, 255]
+                } else {
+                    [235, 235, 235, 255]
+                };
+                let i = ((y * sw + x) * 4) as usize;
+                px[i..i + 4].copy_from_slice(&c);
+            }
+        }
+        let mut stream = Vec::new();
+        for i in 0..4u64 {
+            let frame = CapturedFrame {
+                provenance: Default::default(),
+                width: sw,
+                height: sh,
+                pts_ns: i * 16_666_667,
+                format: PixelFormat::Bgrx,
+                payload: FramePayload::Cpu(px.clone()),
+                cursor: None,
+            };
+            enc.submit_indexed(&frame, i as u32).expect("submit");
+            while let Some(au) = enc.poll().expect("poll") {
+                stream.extend_from_slice(&au.data);
+            }
+        }
+        enc.flush().expect("flush");
+        while let Some(au) = enc.poll().expect("poll") {
+            stream.extend_from_slice(&au.data);
+        }
+        let path = std::env::temp_dir().join("vkenc-reframe.h265");
+        std::fs::write(&path, &stream).expect("write the stream");
+        let Ok(out) = std::process::Command::new("ffmpeg")
+            .args(["-v", "error", "-i"])
+            .arg(&path)
+            .args(["-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"])
+            .output()
+        else {
+            eprintln!("no ffmpeg — skipping the picture check");
+            return;
+        };
+        assert_eq!(
+            out.stdout.len(),
+            (w * h * 3) as usize,
+            "decoded size: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let at = |x: u32, y: u32| {
+            let i = ((y * w + x) * 3) as usize;
+            [out.stdout[i], out.stdout[i + 1], out.stdout[i + 2]]
+        };
+        let near = |got: [u8; 3], want: [u8; 3], what: &str| {
+            assert!(
+                got.iter().zip(want).all(|(g, w)| g.abs_diff(w) <= 40),
+                "{what}: got {got:?}, want {want:?}"
+            );
+        };
+        near(at(3, h / 2), [200, 40, 40], "left edge is the crop's red");
+        near(
+            at(w - 4, h / 2),
+            [235, 235, 235],
+            "right edge is the crop's white",
+        );
+        near(at(w / 4, 2), [200, 40, 40], "top edge has no green");
+        near(
+            at(w * 3 / 4, h - 3),
+            [235, 235, 235],
+            "bottom edge has no green",
+        );
     }
 
     /// Mid-stream [`Encoder::reset`] must not change what `vkCmdBeginVideoCodingKHR` declares.

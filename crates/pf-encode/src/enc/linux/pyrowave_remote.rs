@@ -828,8 +828,9 @@ impl Encoder for RemotePyroWave {
         // capturer's ring depth constrains nothing here.
     }
 
-    fn set_input_crop(&mut self, _rect: [u32; 4]) {
+    fn set_input_crop(&mut self, _rect: [u32; 4]) -> Result<()> {
         // `crops_input` is false: the host never asks a worker to crop.
+        Ok(())
     }
 
     fn flush(&mut self) -> Result<()> {
