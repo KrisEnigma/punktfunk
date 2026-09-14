@@ -39,6 +39,7 @@ internal class StreamPeripherals(
     private val keyCapture: () -> KeyCaptureView?,
     private val videoView: () -> SurfaceView?,
     private val containerSize: () -> IntSize,
+    private val video: () -> VideoFrame,
     private val onSessionEnded: (SessionEndReason) -> Unit,
 ) {
     private val handle = session.handle
@@ -128,13 +129,19 @@ internal class StreamPeripherals(
             handle,
             invertScroll = settings.invertScroll,
             captureWanted = settings.mouseMode == MouseMode.CAPTURE,
-            // The picture's rect in window coordinates (see MouseForwarder.videoRect) — read live,
-            // so it is right from the frame the SurfaceView is first laid out.
-            videoRect = {
+            // Window point → frame pixel through the picture's placement (see MouseForwarder.frameAt)
+            // — read live, so it is right from the frame the SurfaceView is first laid out. The
+            // SurfaceView sits at the placement's rect, so the container's origin is its origin
+            // less that offset.
+            frameAt = { wx, wy ->
                 videoView()?.takeIf { it.width > 0 && it.height > 0 }?.let { v ->
+                    val map = video().at(containerSize())
+                    if (map.isEmpty) return@let null
                     val loc = IntArray(2)
                     v.getLocationInWindow(loc)
-                    android.graphics.Rect(loc[0], loc[1], loc[0] + v.width, loc[1] + v.height)
+                    val cx = wx - (loc[0] - map.placement.dstX)
+                    val cy = wy - (loc[1] - map.placement.dstY)
+                    intArrayOf(map.x(cx), map.y(cy), map.width, map.height)
                 }
             },
         )

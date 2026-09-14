@@ -26,6 +26,12 @@ data class Settings(
      */
     val renderScale: Double = 1.0,
     /**
+     * How a frame whose shape differs from the screen fills it: `"fit"` (whole picture, bars),
+     * `"crop"` or `"stretch"`. The cross-client `video_fit` key; unknown reads as fit
+     * ([io.unom.punktfunk.kit.VideoFit.fromName]).
+     */
+    val videoFit: String = "fit",
+    /**
      * Advertise HDR (10-bit BT.2020 PQ) to the host. Default on, but only *effective* on a panel that
      * can actually present HDR10 (see [displaySupportsHdr]) — on an SDR display HDR is never
      * advertised regardless, so the host sends a proper 8-bit BT.709 stream rather than PQ the panel
@@ -606,6 +612,9 @@ object RenderScale {
 
 /** (scale, label) for the render-scale picker. `1.0` = Native. */
 val RENDER_SCALE_OPTIONS = RenderScale.PRESETS.map { it to RenderScale.label(it) }
+
+/** [Settings.videoFit] values and labels, the desktop and console wording. */
+val VIDEO_FIT_OPTIONS = listOf("fit" to "Fit", "crop" to "Crop to fill", "stretch" to "Stretch to fill")
 
 // ---- UI option tables (value, label). The first entry is always the "auto/native" default. ----
 

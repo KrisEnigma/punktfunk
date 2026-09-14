@@ -569,6 +569,8 @@ fn connect(req: ConnectRequest) -> jlong {
                 access_seq: std::sync::atomic::AtomicU32::new(0),
                 // Reported by Kotlin at `surfaceCreated` and on every resize after it.
                 surface_size: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+                // The full frame until Kotlin places the picture.
+                src_crop: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             };
             insert_session(handle)
         }

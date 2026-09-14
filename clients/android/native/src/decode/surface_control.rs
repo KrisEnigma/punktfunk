@@ -299,6 +299,8 @@ pub(super) struct Layer {
     /// present — the destination rectangle the buffer is scaled to fill. Live rather than captured
     /// because the view resizes under a surface that is never recreated (see `dest`).
     surface_size: Arc<AtomicU64>,
+    /// The visible part of the buffer (`pack_src_crop`), re-read before every present.
+    src_crop: Arc<AtomicU64>,
     /// Fallback destination for as long as `surface_size` is still `0` (Kotlin hadn't measured the
     /// view when video started): the window's own buffer geometry, the best remaining guess.
     fallback_w: i32,
@@ -320,7 +322,11 @@ impl Layer {
     /// screen hides the system bars and switches on cutout drawing a frame or two after
     /// `surfaceCreated`, and each one grows it. An empty `surface_size` (Kotlin hadn't measured the
     /// view yet) falls back to the buffer size as the best remaining guess.
-    pub(super) fn create(window: &NativeWindow, surface_size: Arc<AtomicU64>) -> Option<Layer> {
+    pub(super) fn create(
+        window: &NativeWindow,
+        surface_size: Arc<AtomicU64>,
+        src_crop: Arc<AtomicU64>,
+    ) -> Option<Layer> {
         let api = Api::resolve()?;
         // SAFETY: `window.ptr()` is the live `ANativeWindow` the decode thread owns; the name is a
         // static NUL-terminated string; the call returns null on failure (checked).
@@ -343,6 +349,7 @@ impl Layer {
             }),
             api,
             surface_size,
+            src_crop,
             fallback_w,
             fallback_h,
             configured: false,
@@ -390,12 +397,11 @@ impl Layer {
                 .map(std::os::fd::IntoRawFd::into_raw_fd)
                 .unwrap_or(-1);
             (self.api.txn_set_buffer)(txn, sc, buffer.as_ptr(), fence_fd);
-            let src = ARect {
-                left: 0,
-                top: 0,
-                right: src_w.max(1),
-                bottom: src_h.max(1),
-            };
+            let src = crop_rect(
+                crate::session::unpack_src_crop(self.src_crop.load(Ordering::Relaxed)),
+                src_w.max(1),
+                src_h.max(1),
+            );
             let (dest_w, dest_h) = self.dest();
             let dst = ARect {
                 left: 0,
@@ -522,5 +528,17 @@ pub(super) fn fence_signal_ns(fence: BorrowedFd<'_>) -> Option<i64> {
         }
         (api.free)(info);
         (signalled && latest > 0).then_some(latest as i64)
+    }
+}
+
+/// The buffer rect for a crop in frame fractions, at least one pixel on each axis.
+fn crop_rect([left, top, right, bottom]: [f32; 4], w: i32, h: i32) -> ARect {
+    let px = |f: f32, size: i32| ((f * size as f32).round() as i32).clamp(0, size);
+    let (l, t) = (px(left, w).min(w - 1), px(top, h).min(h - 1));
+    ARect {
+        left: l,
+        top: t,
+        right: px(right, w).max(l + 1),
+        bottom: px(bottom, h).max(t + 1),
     }
 }

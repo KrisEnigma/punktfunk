@@ -799,6 +799,16 @@ private fun DisplaySettings(s: Settings, update: (Settings) -> Unit, context: an
         ) { scale -> update(s.copy(renderScale = scale)) }
 
         SettingDropdown(
+            label = "Picture fit",
+            options = VIDEO_FIT_OPTIONS,
+            selected = io.unom.punktfunk.kit.VideoFit.fromName(s.videoFit).wire,
+            field = "video_fit",
+            caption = "When the stream's shape differs from this screen. Fit shows the whole " +
+                "picture with black bars, Crop to fill cuts the edges off, Stretch to fill " +
+                "distorts it.",
+        ) { fit -> update(s.copy(videoFit = fit)) }
+
+        SettingDropdown(
             label = "Bitrate",
             options = BITRATE_OPTIONS,
             selected = s.bitrateKbps,

@@ -240,6 +240,8 @@ pub(crate) struct DecodeOptions {
     /// — NOT the window's buffer geometry, which is rotated/scaled. `0` = Kotlin couldn't read it
     /// yet, and the backend falls back to the window buffer size.
     pub surface_size: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// The visible part of the frame, packed by [`crate::session::pack_src_crop`]; `0` = all of it.
+    pub src_crop: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 
 /// The decode entry point on the `pf-decode` thread: dispatches to the codec's loop. All of

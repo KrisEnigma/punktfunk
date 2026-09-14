@@ -92,6 +92,10 @@ pub(crate) struct SessionHandle {
     /// "stream in the top-left corner" field report. `0` = nothing reported yet, and the layer
     /// falls back to the window's buffer geometry.
     pub surface_size: Arc<AtomicU64>,
+    /// The visible part of the frame ([`pack_src_crop`]), written by `nativeVideoSourceCrop`
+    /// whenever Kotlin re-places the picture. Not the full frame only under Crop to fill (or a
+    /// few-pixel snap); `0` = the full frame.
+    pub src_crop: Arc<AtomicU64>,
 }
 
 static NEXT_SESSION_HANDLE: AtomicU64 = AtomicU64::new(0x1000_0000_0000_0001);
@@ -144,6 +148,28 @@ pub(crate) fn unpack_surface_size(packed: u64) -> Option<(i32, i32)> {
         return None;
     }
     Some((((packed >> 32) as u32) as i32, (packed as u32) as i32))
+}
+
+/// Pack a source crop (frame fractions, left/top/right/bottom) into one `u64`, 16 bits each, so
+/// a presenter reads all four as one atomic load. An empty or out-of-range rect packs as `0`,
+/// the full frame.
+pub(crate) fn pack_src_crop(left: f32, top: f32, right: f32, bottom: f32) -> u64 {
+    let ok = |v: f32| (0.0..=1.0).contains(&v);
+    if !(ok(left) && ok(top) && ok(right) && ok(bottom)) || right <= left || bottom <= top {
+        return 0;
+    }
+    let q = |v: f32| u64::from((v * 65535.0).round() as u16);
+    (q(left) << 48) | (q(top) << 32) | (q(right) << 16) | q(bottom)
+}
+
+/// The inverse of [`pack_src_crop`]: `[left, top, right, bottom]`, the full frame for `0`.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+pub(crate) fn unpack_src_crop(packed: u64) -> [f32; 4] {
+    if packed == 0 {
+        return [0.0, 0.0, 1.0, 1.0];
+    }
+    let f = |shift: u32| f32::from((packed >> shift) as u16) / 65535.0;
+    [f(48), f(32), f(16), f(0)]
 }
 
 struct VideoThread {
@@ -259,7 +285,7 @@ fn parse_hex32(s: &str) -> Option<[u8; 32]> {
 
 #[cfg(test)]
 mod tests {
-    use super::{pack_surface_size, unpack_surface_size};
+    use super::{pack_src_crop, pack_surface_size, unpack_src_crop, unpack_surface_size};
 
     /// The pair the presenter reads as one atomic load must survive the round trip — including a
     /// size wider than a signed 16-bit value, which every panel this runs on now is.
@@ -280,5 +306,18 @@ mod tests {
         assert_eq!(pack_surface_size(1920, 0), 0);
         assert_eq!(pack_surface_size(-1, 1080), 0);
         assert_eq!(unpack_surface_size(0), None);
+    }
+
+    /// A crop survives the round trip to a sixty-thousandth of the frame; nonsense is the full
+    /// frame, so a bad call can never blank the picture.
+    #[test]
+    fn src_crop_round_trips_and_rejects_nonsense() {
+        let [l, t, r, b] = unpack_src_crop(pack_src_crop(0.0, 0.102, 1.0, 0.898));
+        assert_eq!((l, r), (0.0, 1.0));
+        assert!((t - 0.102).abs() < 1e-4 && (b - 0.898).abs() < 1e-4);
+        assert_eq!(unpack_src_crop(0), [0.0, 0.0, 1.0, 1.0]);
+        assert_eq!(pack_src_crop(0.5, 0.0, 0.5, 1.0), 0);
+        assert_eq!(pack_src_crop(-0.1, 0.0, 1.0, 1.0), 0);
+        assert_eq!(pack_src_crop(0.0, 0.0, 1.0, f32::NAN), 0);
     }
 }

@@ -10,9 +10,9 @@ import androidx.compose.ui.input.pointer.PointerType
 import androidx.compose.ui.input.pointer.changedToDownIgnoreConsumed
 import androidx.compose.ui.input.pointer.changedToUpIgnoreConsumed
 import androidx.compose.ui.input.pointer.positionChanged
-import androidx.compose.ui.unit.IntOffset
-import androidx.compose.ui.unit.IntRect
 import androidx.compose.ui.unit.IntSize
+import io.unom.punktfunk.kit.VideoFit
+import io.unom.punktfunk.kit.VideoPlacement
 import kotlin.math.abs
 import kotlin.math.atan2
 import kotlin.math.hypot
@@ -85,30 +85,41 @@ private const val ACCEL_MAX = 3.0f
  * contact is lifted so nothing stays stuck on the host.
  */
 /**
- * The picture's rect inside a container of [size] for a stream of [aspect] (width / height): the
- * same centre-aligned aspect fit the video surface is laid out with. The gesture layer spans the
- * whole container so a finger on a letterbox bar still counts, and every absolute mapping —
- * direct pointer, passthrough, the pen lane — measures against this rect, clamped, because a
- * contact outside the picture has no host position of its own. `aspect <= 0` (unknown) fills.
+ * The stream frame the gesture layer maps into: how it fills the container ([fit]) and its size.
+ * The video SurfaceView is laid out with the same placement, so every absolute mapping — direct
+ * pointer, passthrough, the pen lane, the mouse — lands where the picture is. A frame of unknown
+ * size (an older native lib) maps the container onto itself.
  */
-internal fun videoFitRect(size: IntSize, aspect: Float): IntRect {
-    val w = size.width
-    val h = size.height
-    if (aspect <= 0f || w <= 0 || h <= 0) return IntRect(IntOffset.Zero, size)
-    return if (w.toFloat() / h > aspect) {
-        val vw = (h * aspect).roundToInt() // wider container: bars left and right
-        val left = (w - vw) / 2
-        IntRect(left, 0, left + vw, h)
-    } else {
-        val vh = (w / aspect).roundToInt() // taller container: bars top and bottom
-        val top = (h - vh) / 2
-        IntRect(0, top, w, top + vh)
-    }
+internal class VideoFrame(val fit: VideoFit, val width: Int, val height: Int) {
+    fun at(size: IntSize): FrameMap =
+        if (width > 0 && height > 0) {
+            FrameMap(VideoFit.place(fit, size.width, size.height, width, height), width, height)
+        } else {
+            FrameMap(VideoFit.place(fit, size.width, size.height, size.width, size.height), size.width, size.height)
+        }
 }
 
-/** [x] in container pixels → picture-surface pixels, clamped to the picture's edge. */
-private fun IntRect.clampX(x: Float): Int = (x - left).roundToInt().coerceIn(0, width - 1)
-private fun IntRect.clampY(y: Float): Int = (y - top).roundToInt().coerceIn(0, height - 1)
+/**
+ * One placement of a [width]×[height] frame in a container. Container points clamp onto the
+ * visible frame: a contact on a bar or on a cropped-away edge has no host position of its own.
+ */
+internal class FrameMap(val placement: VideoPlacement, val width: Int, val height: Int) {
+    val isEmpty: Boolean get() = placement.isEmpty || width <= 0 || height <= 0
+
+    /** Container x → frame pixel. */
+    fun x(viewX: Float): Int = placement.frameX(viewX.toDouble()).roundToInt().coerceIn(0, width - 1)
+
+    /** Container y → frame pixel. */
+    fun y(viewY: Float): Int = placement.frameY(viewY.toDouble()).roundToInt().coerceIn(0, height - 1)
+
+    /** Container x → 0…1 across the frame, the pen plane's unit. */
+    fun nx(viewX: Float): Float =
+        (placement.frameX(viewX.toDouble()) / (width - 1).coerceAtLeast(1)).toFloat().coerceIn(0f, 1f)
+
+    /** Container y → 0…1 down the frame. */
+    fun ny(viewY: Float): Float =
+        (placement.frameY(viewY.toDouble()) / (height - 1).coerceAtLeast(1)).toFloat().coerceIn(0f, 1f)
+}
 
 /** Whether this change belongs to the stylus lane (only when a pen-capable host is live). */
 private fun isStylus(c: PointerInputChange, stylus: StylusStream?): Boolean =
@@ -118,11 +129,11 @@ private fun isStylus(c: PointerInputChange, stylus: StylusStream?): Boolean =
  *  mouse/touch gesture. Toward a pen-less host ([stylus] == null) a stylus stays a finger. */
 private suspend fun AwaitPointerEventScope.awaitFirstFingerDown(
     stylus: StylusStream?,
-    videoAspect: Float,
+    video: () -> VideoFrame,
 ): PointerInputChange {
     while (true) {
         val ev = awaitPointerEvent()
-        stylus?.intercept(ev, videoFitRect(size, videoAspect))
+        stylus?.intercept(ev, video().at(size))
         val down = ev.changes.firstOrNull {
             it.changedToDownIgnoreConsumed() && !isStylus(it, stylus)
         }
@@ -133,7 +144,7 @@ private suspend fun AwaitPointerEventScope.awaitFirstFingerDown(
 internal suspend fun PointerInputScope.streamTouchPassthrough(
     sink: TouchSink,
     stylus: StylusStream?,
-    videoAspect: Float,
+    video: () -> VideoFrame,
 ) {
     val ids = mutableMapOf<PointerId, Int>()
     fun alloc(p: PointerId): Int {
@@ -146,15 +157,15 @@ internal suspend fun PointerInputScope.streamTouchPassthrough(
         awaitPointerEventScope {
             while (true) {
                 val ev = awaitPointerEvent()
-                val r = videoFitRect(size, videoAspect)
+                val r = video().at(size)
                 stylus?.intercept(ev, r)
+                if (r.isEmpty) continue
                 val sw = r.width
                 val sh = r.height
-                if (sw <= 0 || sh <= 0) continue
                 for (c in ev.changes) {
                     if (isStylus(c, stylus)) continue // the pen plane owns it
-                    val x = r.clampX(c.position.x)
-                    val y = r.clampY(c.position.y)
+                    val x = r.x(c.position.x)
+                    val y = r.y(c.position.y)
                     when {
                         c.changedToDownIgnoreConsumed() ->
                             sink.touch(alloc(c.id), 0, x, y, sw, sh)
@@ -170,7 +181,7 @@ internal suspend fun PointerInputScope.streamTouchPassthrough(
                                 // unbuffered dispatch is requested, so this costs nothing).
                                 for (hs in c.historical) {
                                     sink.touch(id, 1,
-                                        r.clampX(hs.position.x), r.clampY(hs.position.y),
+                                        r.x(hs.position.x), r.y(hs.position.y),
                                         sw, sh,
                                     )
                                 }
@@ -190,7 +201,7 @@ internal suspend fun PointerInputScope.streamTouchPassthrough(
 internal suspend fun PointerInputScope.streamTouchInput(
     sink: TouchSink,
     stylus: StylusStream?,
-    videoAspect: Float,
+    video: () -> VideoFrame,
     trackpad: Boolean,
     invertScroll: Boolean,
     /** The dial editor's stage: only multi-finger gestures are owned (the twist, with the real
@@ -205,7 +216,7 @@ internal suspend fun PointerInputScope.streamTouchInput(
     var lastTapX = 0f
     var lastTapY = 0f
     awaitEachGesture {
-        val down = awaitFirstFingerDown(stylus, videoAspect)
+        val down = awaitFirstFingerDown(stylus, video)
         // A touch landing just after a quick tap nearby = tap-and-drag: hold the left
         // button for this whole gesture (laptop-trackpad convention).
         val isDrag = down.uptimeMillis - lastTapUp < TAP_DRAG_MS &&
@@ -213,7 +224,7 @@ internal suspend fun PointerInputScope.streamTouchInput(
         lastTapUp = 0L // consume the arming either way
         val g = Gesture(
             sink, down, trackpad, invertScroll, dialOnly, size.height, onDial, onKeyboard,
-        ) { videoFitRect(size, videoAspect) }
+        ) { video().at(size) }
         // Direct mode jumps the cursor to the finger; trackpad mode leaves it put (the
         // whole point — you nudge it with swipes instead).
         if (!trackpad) g.moveAbs(down.position.x, down.position.y)
@@ -234,7 +245,7 @@ internal suspend fun PointerInputScope.streamTouchInput(
                     g.holdButton()
                     continue
                 }
-                stylus?.intercept(ev, videoFitRect(size, videoAspect))
+                stylus?.intercept(ev, video().at(size))
                 val pressed = ev.changes.filter { it.pressed && !isStylus(it, stylus) }
                     .sortedBy { it.id.value }
                 if (pressed.isEmpty()) {
@@ -282,7 +293,7 @@ private class Gesture(
     private val viewHeight: Int,
     private val onDial: (DialEvent) -> Unit,
     private val onKeyboard: (show: Boolean) -> Unit,
-    private val fitRect: () -> IntRect,
+    private val frame: () -> FrameMap,
 ) {
     private val scrollDir = if (invertScroll) -1 else 1
     private val startX = down.position.x
@@ -331,9 +342,9 @@ private class Gesture(
     private var accY = 0f
 
     fun moveAbs(x: Float, y: Float) {
-        val r = fitRect()
-        if (r.width <= 0 || r.height <= 0) return
-        sink.pointerAbs(r.clampX(x), r.clampY(y), r.width, r.height)
+        val r = frame()
+        if (r.isEmpty) return
+        sink.pointerAbs(r.x(x), r.y(y), r.width, r.height)
     }
 
     fun holdButton() {

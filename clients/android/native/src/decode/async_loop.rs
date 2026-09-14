@@ -448,6 +448,7 @@ fn bring_up(
                 mode.width as i32,
                 mode.height as i32,
                 opts.surface_size.clone(),
+                opts.src_crop.clone(),
                 opts.panel_hz,
                 color_dataspace(&client.color),
                 mode.refresh_hz,

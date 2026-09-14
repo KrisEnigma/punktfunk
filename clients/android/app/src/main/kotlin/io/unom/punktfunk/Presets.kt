@@ -34,6 +34,7 @@ data class SettingsOverlay(
     val hz: Int? = null,
     val bitrateKbps: Int? = null,
     val renderScale: Double? = null,
+    val videoFit: String? = null,
     val codec: String? = null,
     val hdrEnabled: Boolean? = null,
     val tenBitSdr: Boolean? = null,

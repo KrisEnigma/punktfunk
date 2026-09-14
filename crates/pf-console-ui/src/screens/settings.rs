@@ -970,8 +970,8 @@ pub fn row_on(id: RowId, platform: crate::platform::Platform) -> bool {
         RowId::ReduceUiResolution => &[Android],
         // A MediaCodec decoder flag; nothing else has the knob.
         RowId::LowLatency => &[Android],
-        // Only the desktop presenter places the picture through `video_fit` so far.
-        RowId::VideoFit => &[Desktop],
+        // The clients whose presenters place the picture through `video_fit`.
+        RowId::VideoFit => &[Desktop, Android],
         // Offered wherever there is a second UI to fall back to: Android's touch home,
         // webOS's cursor shell. `row_applies` still needs `fallback_ui` from the host.
         RowId::GamepadUi | RowId::GamepadUiMode => &[Android, WebOS],
@@ -2821,8 +2821,6 @@ pub(crate) mod tests {
         assert_eq!(
             off_android,
             vec![
-                // The Android stream screen does not place through `video_fit` yet.
-                RowId::VideoFit,
                 RowId::Decoder,
                 RowId::Chroma444,
                 // TenBitSdr is NOT here: MediaCodec decodes Main10 from the SPS and the depth

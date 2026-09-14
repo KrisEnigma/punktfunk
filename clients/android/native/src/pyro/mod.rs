@@ -28,7 +28,6 @@ mod present;
 mod imp {
     use super::{device::PyroDevice, present::Present};
     use anyhow::{anyhow, Result};
-    use ash::vk;
     use ndk::native_window::NativeWindow;
     use pf_client_core::video_color::ColorDesc;
     use pf_client_core::video_pyrowave::PyroWaveDecoder;
@@ -215,11 +214,10 @@ mod imp {
                 continue; // packets accumulated, frame not complete yet
             };
 
-            let extent = vk::Extent2D {
-                width: picture.width,
-                height: picture.height,
-            };
-            let shown = present.show(picture.views, extent, picture.color, depth, msb_packed)?;
+            let crop = crate::session::unpack_src_crop(
+                opts.src_crop.load(std::sync::atomic::Ordering::Relaxed),
+            );
+            let shown = present.show(picture.views, crop, picture.color, depth, msb_packed)?;
             if !shown {
                 continue; // swapchain was out of date; it has been rebuilt
             }
