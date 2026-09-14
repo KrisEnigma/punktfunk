@@ -9,10 +9,10 @@
 // The remote is read through GameController as a GCMicroGamepad with
 // `reportsAbsoluteDpadValues = true`: the dpad axes then report the finger's ABSOLUTE position
 // on the surface (±1, +y up) while touched, and snap to exactly (0, 0) on lift. Successive
-// positions are differenced into relative mouse deltas. Contact and lift come from the
-// surface's own touch report (`buttonA.isTouched`) where the remote has one, else from the
-// exact-zero snap and a quiet gap. Handlers (not a poll) — the same in-session delivery
-// GamepadCapture relies on.
+// positions are differenced into relative mouse deltas. The exact-zero snap and a quiet gap
+// end a touch; the touch report (`buttonA.isTouched`) may end one early, but a clickpad remote
+// reports its click there, so it never gates motion. Handlers (not a poll) — the same
+// in-session delivery GamepadCapture relies on.
 //
 // Lifecycle mirrors GamepadCapture: started by SessionModel when streaming begins (never
 // during the trust prompt), stopped on disconnect; held buttons are released on stop so the
@@ -30,13 +30,13 @@ public final class SiriRemotePointer {
     private var bound: GCController?
     /// Finger position (±1 axes) at the last dpad callback while touched; nil = lifted.
     private var lastTouch: (x: Float, y: Float)?
-    /// When the finger landed; nil while lifted. Set by the touch report where the remote has
-    /// one, else by the first sample after a lift or a quiet gap.
+    /// When the finger landed; nil while lifted. Set by a touch report, else by the first sample
+    /// after a lift or a quiet gap.
     private var contactAt: Date?
     private var lastSampleAt = Date.distantPast
-    /// `buttonA.touchedChangedHandler` has fired: lifts are explicit, and a sample with no
-    /// contact is the release ramp — ignored.
-    private var reportsTouch = false
+    /// A touch report said "lifted": samples until the (0, 0) snap or a quiet gap are the
+    /// release ramp, ignored.
+    private var inReleaseRamp = false
     /// Wire buttons currently held (1 = left, 3 = right) — released on stop/unbind.
     private var heldButtons: Set<UInt32> = []
     /// When Back/Menu went down; a release after `disconnectHold` fires the exit.
@@ -155,7 +155,7 @@ public final class SiriRemotePointer {
         releaseHeld()
         lastTouch = nil
         contactAt = nil
-        reportsTouch = false
+        inReleaseRamp = false
         menuDownAt = nil
         bound = controller
         guard let micro = controller?.microGamepad else { return }
@@ -184,26 +184,32 @@ public final class SiriRemotePointer {
         }
     }
 
-    /// The surface's touch report: contact starts the settle, a lift ends the gesture at once
-    /// — nothing after it counts, the release ramp included.
+    /// The surface's touch report: contact starts the settle, a lift ends the gesture and opens
+    /// the release ramp. A clickpad remote reports its click here, not the finger, so the
+    /// report may end a gesture but never gates the next one — the samples do.
     private func touchChanged(_ touched: Bool) {
-        reportsTouch = true
         lastTouch = nil
         swipeAnchor = nil
         contactAt = touched ? Date() : nil
+        inReleaseRamp = !touched
     }
 
     private func touchMoved(x: Float, y: Float) {
         let now = Date()
         let quiet = now.timeIntervalSince(lastSampleAt) > Self.quietGap
         lastSampleAt = now
-        // Exact (0, 0) is the lift snap; with a touch report, a sample after the lift is the
-        // release ramp. Either way drop the anchor so the next touch starts fresh.
-        guard x != 0 || y != 0, contactAt != nil || !reportsTouch else {
+        // Exact (0, 0) is the lift snap: drop the anchor so the next touch starts fresh.
+        guard x != 0 || y != 0 else {
             lastTouch = nil
             swipeAnchor = nil
-            if !reportsTouch { contactAt = nil }
+            contactAt = nil
+            inReleaseRamp = false
             return
+        }
+        // After a reported lift the position slides home; a quiet gap is a new touch instead.
+        if inReleaseRamp {
+            guard quiet else { return }
+            inReleaseRamp = false
         }
         defer { lastTouch = (x, y) }
         // First contact — or the first sample after a quiet gap, a lift the remote never
