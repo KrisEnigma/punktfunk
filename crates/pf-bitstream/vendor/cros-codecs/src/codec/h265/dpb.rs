@@ -141,20 +141,14 @@ impl<T: Clone> Dpb<T> {
             || self.entries().len() >= max_dec_pic_buffering
     }
 
-    /// Find the lowest POC in the DPB that can be bumped.
+    /// Find the lowest POC in the DPB that can be bumped: that entry itself, never another
+    /// entry sharing its POC, or `bump` makes no progress.
     fn find_lowest_poc_for_bumping(&self) -> Option<DpbEntry<T>> {
-        let lowest = self
-            .pictures()
-            .filter(|pic| pic.needed_for_output)
-            .min_by_key(|pic| pic.pic_order_cnt_val)?;
-
-        let position = self
-            .entries
+        self.entries
             .iter()
-            .position(|handle| handle.0.borrow().pic_order_cnt_val == lowest.pic_order_cnt_val)
-            .unwrap();
-
-        Some(self.entries[position].clone())
+            .filter(|entry| entry.0.borrow().needed_for_output)
+            .min_by_key(|entry| entry.0.borrow().pic_order_cnt_val)
+            .cloned()
     }
 
     /// See C.5.2.4 "Bumping process".
@@ -293,5 +287,34 @@ impl<T: Clone> std::fmt::Debug for Dpb<T> {
             .field("pictures", &pics)
             .field("max_num_pics", &self.max_num_pics)
             .finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    use super::Dpb;
+    use crate::codec::h265::picture::PictureData;
+
+    fn picture(poc: i32) -> Rc<RefCell<PictureData>> {
+        let mut pic = PictureData::default();
+        pic.pic_order_cnt_val = poc;
+        pic.pic_output_flag = true;
+        Rc::new(RefCell::new(pic))
+    }
+
+    /// Two pictures at one POC, the first already output and kept as a reference: the second
+    /// must still leave the output queue, or `bump` never makes progress.
+    #[test]
+    fn two_pictures_at_one_poc_both_leave_the_output_queue() {
+        let mut dpb = Dpb::<()>::default();
+        dpb.set_max_num_pics(16);
+        dpb.store_picture(picture(5), ()).unwrap();
+        assert!(dpb.bump(false).is_some());
+        dpb.store_picture(picture(5), ()).unwrap();
+        assert!(dpb.bump(false).is_some());
+        assert_eq!(dpb.pictures().filter(|p| p.needed_for_output).count(), 0);
     }
 }

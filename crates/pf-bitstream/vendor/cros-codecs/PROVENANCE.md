@@ -272,5 +272,16 @@ in the future."
     Regression test: `an_authored_sps_states_the_reorder_bound` in `pf-vaapi`.
     **Report upstream — not yet filed.**
 
+24. `src/codec/h265/dpb.rs` — `find_lowest_poc_for_bumping` returns the lowest-POC entry
+    still needed for output, not the first entry sharing its POC. Upstream found the
+    lowest POC, then looked the picture up again by `pic_order_cnt_val`. With two
+    pictures at one POC it could return the one already output, `bump` changed nothing,
+    and `pf-bitstream`'s `bump_as_needed` looped forever on the decode thread. A
+    loss-damaged stream stores such a pair: a loopback at 15 % wire loss from an AMD
+    (AMF, long-term references) host wedged the client's decoder, and its capture spins
+    the planner at the same frame. The H.264 DPB already returns the entry. Regression
+    test: `two_pictures_at_one_poc_both_leave_the_output_queue`, in the file's own test
+    module. **Report upstream — not yet filed.**
+
 Re-sync procedure: fetch the AOSP tree, re-apply this trim, diff `codec/` +
 `bitstream_utils.rs` (expect near-zero conflicts), update the commit pin above.
