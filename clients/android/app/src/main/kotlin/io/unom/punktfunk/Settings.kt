@@ -304,6 +304,11 @@ data class Settings(
      */
     val overlayActions: String = "",
     /**
+     * Back mid-stream opens the ring. Off, Back does nothing while a pad, the twist or a keyboard
+     * chord can open it instead; with none of those it still opens, so a session keeps a way out.
+     */
+    val backOpensRing: Boolean = true,
+    /**
      * Where a bare launch opens — the cross-client `start_in` key: `"hosts"` (the default),
      * `"library"` or `"stream"`. Empty or unknown reads as hosts, and with no default host every
      * value degrades to the host list. Resolve through [io.unom.punktfunk.kit.link.StartScreen],

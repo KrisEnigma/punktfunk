@@ -103,6 +103,8 @@ internal object SettingsFields {
             overlay({ it.invertScroll }, { o, v -> o.copy(invertScroll = v) })),
         field("overlayActions", "overlay_actions", StrKind, { it.overlayActions }, { s, v -> s.copy(overlayActions = v) },
             overlay({ it.overlayActions }, { o, v -> o.copy(overlayActions = v) })),
+        field("backOpensRing", "android.back_opens_ring", BoolKind, { it.backOpensRing },
+            { s, v -> s.copy(backOpensRing = v) }, prefsKey = "back_opens_ring"),
         // Cross-client start-screen keys; the console writes the same two names.
         field("startIn", "start_in", StrKind, { it.startIn }, { s, v -> s.copy(startIn = v) }),
         field("defaultHost", "default_host", NullableStrKind, { it.defaultHost }, { s, v -> s.copy(defaultHost = v) }),

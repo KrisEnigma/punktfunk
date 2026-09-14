@@ -6,6 +6,8 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.test.hasAnySibling
+import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.isToggleable
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithText
@@ -45,12 +47,9 @@ class SettingsScopeTest {
 
     private val context: Context get() = ApplicationProvider.getApplicationContext()
 
-    /**
-     * "Invert scroll direction" is the row under test: Input is presetable end to end, and that
-     * toggle is the only toggleable node on the page, so a click needs no fragile lookup.
-     */
+    /** "Invert scroll direction" is the row under test: Input is presetable end to end. */
     private fun toggleTheRow() {
-        compose.onNode(isToggleable()).performClick()
+        compose.onNode(isToggleable() and hasAnySibling(hasText("Invert scroll direction"))).performClick()
         compose.waitForIdle()
     }
 

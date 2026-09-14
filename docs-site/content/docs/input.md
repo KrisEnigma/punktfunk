@@ -87,7 +87,9 @@ microphone mute; the in-stream hint over the video doesn't, to stay one readable
   key reaches the host: the Korean **한/영** and **한자** keys, the JIS **変換**, **無変換**,
   **カタカナ/ひらがな**, **半角/全角**, **ろ** and **¥** keys, and the ABNT2 **/?** and keypad
   **.** keys included. **Ctrl+Space** reaches the host from Android 13 on; Android 12 and older
-  use it to switch their own layout. The system Back button opens the dial; a mouse's Back button
+  use it to switch their own layout. The system Back button opens the dial; turn off **Settings →
+  Input → Back opens quick actions** and Back does nothing while the twist, a keyboard or a pad can
+  open it instead. A mouse's Back button
   goes to the host — also on builds like One UI 8 that map it to Back themselves, where Android
   hands the app a Back key and the dial would otherwise open. With a mouse attached, that Back
   is the mouse's; the Back gesture still opens the dial.
