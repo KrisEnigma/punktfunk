@@ -83,6 +83,8 @@ struct CaptureSignals {
     /// GPU import is gone for this stream (worker death, or tiled imports
     /// failed — CPU fallback would de-pad scrambled tiles). Never cleared.
     broken: Arc<AtomicBool>,
+    /// The stream reached `Error` (e.g. "no more input formats"). Terminal: it never delivers.
+    errored: Arc<AtomicBool>,
     hdr_negotiated: Arc<AtomicBool>,
     /// Thread actually advertised the EGL→CUDA dmabuf-only offer. `plan.build_importer`
     /// is not enough: a failed importer means no dmabuf was offered, so a
@@ -104,6 +106,7 @@ impl CaptureSignals {
             streaming: Arc::new(AtomicBool::new(false)),
             driving: Arc::new(AtomicBool::new(false)),
             broken: Arc::new(AtomicBool::new(false)),
+            errored: Arc::new(AtomicBool::new(false)),
             hdr_negotiated: Arc::new(AtomicBool::new(false)),
             gpu_dmabuf_offer: Arc::new(AtomicBool::new(false)),
             cursor_live: Arc::new(std::sync::Mutex::new(None)),
@@ -657,10 +660,11 @@ fn timeout_convicts(offer: TimeoutOffer, verdict: TimeoutVerdict) -> bool {
 
 impl PortalCapturer {
     /// First frame can lag negotiation; later frames arrive at ~fps. Wait in
-    /// 500 ms slices so a GPU-import poison fails within ~0.5 s instead of
-    /// the full first-frame budget.
+    /// 500 ms slices so a GPU-import poison or an errored stream fails within
+    /// ~0.5 s instead of the full first-frame budget.
     fn frame_within(&mut self, budget: Duration, verdict: TimeoutVerdict) -> Result<CapturedFrame> {
-        let deadline = std::time::Instant::now() + budget;
+        let started = std::time::Instant::now();
+        let deadline = started + budget;
         loop {
             if self.signals.broken.load(Ordering::Relaxed) {
                 return Err(anyhow!(
@@ -674,6 +678,11 @@ impl PortalCapturer {
             if let Some(f) = self.take_frame() {
                 self.note_negotiation_confirmed();
                 return Ok(f);
+            }
+            // Judged like an expired wait, over the time actually spent.
+            if self.signals.errored.load(Ordering::Relaxed) {
+                let spent = started.elapsed();
+                return self.next_frame_timed_out(RecvTimeoutError::Timeout, spent, verdict);
             }
             let slice = Duration::from_millis(500)
                 .min(deadline.saturating_duration_since(std::time::Instant::now()));

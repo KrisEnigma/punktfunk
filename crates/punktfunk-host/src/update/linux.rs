@@ -383,9 +383,18 @@ pub(super) fn run_apply(
     .map_err(|e| ("restarting", format!("write intent record: {e}")))?;
 
     stage("restarting");
-    // Web console first (own unit), then us. `--no-block`: this process is the one restarting.
+    // Web console and plugin runner first (own units), then us. `--no-block`: this process is
+    // the one restarting. `try-restart` leaves an opted-out runner off.
     let _ = Command::new("systemctl")
         .args(["--user", "--no-block", "restart", "punktfunk-web.service"])
+        .status();
+    let _ = Command::new("systemctl")
+        .args([
+            "--user",
+            "--no-block",
+            "try-restart",
+            "punktfunk-scripting.service",
+        ])
         .status();
     let _ = Command::new("systemctl")
         .args(["--user", "--no-block", "restart", "punktfunk-host.service"])

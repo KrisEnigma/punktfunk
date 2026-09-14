@@ -702,7 +702,8 @@ pub fn open_portal_monitor(
 }
 
 /// Linux capturer for an existing virtual output's PipeWire node.
-/// `keepalive` owns the output. `want_hdr` requires an HDR output.
+/// `keepalive` owns the output. `want_hdr` holds on a gamescope node only: every other
+/// virtual output is SDR, and a desktop that refuses the offer would latch gamescope's SDR.
 /// `cursor_id0_hides` selects KWin's rewritten cursor-meta contract.
 /// `producer_is_gamescope` selects its no-meta, LINEAR-only contract.
 /// KWin also needs [`KWIN_POOL_MIN`] and [`unpaced_capture`].
@@ -730,7 +731,7 @@ pub fn open_virtual_output(
         keepalive,
         allow_zerocopy,
         want_444,
-        want_hdr && !hdr_capture_failed(HdrSource::VirtualOutput),
+        want_hdr && producer_is_gamescope && !hdr_capture_failed(HdrSource::VirtualOutput),
         policy,
         expect_exact_dims,
         cursor_id0_hides,

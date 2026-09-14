@@ -539,6 +539,8 @@ if [ "$WITH_WEB" = 1 ]; then
     systemctl --user restart punktfunk-web.service
     ok "punktfunk-web started"
 fi
+# A re-run rebuilds the runner (§2b); try-restart leaves an opted-out runner off.
+systemctl --user try-restart punktfunk-scripting.service 2>/dev/null || true
 
 # --- 6. summary ------------------------------------------------------------
 IP="$(ip -4 route get 1.1.1.1 2>/dev/null | sed -n 's/.* src \([0-9.]*\).*/\1/p' | head -1 || true)"

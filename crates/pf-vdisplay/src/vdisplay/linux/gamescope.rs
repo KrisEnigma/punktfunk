@@ -2383,6 +2383,7 @@ fn stop_autologin_sessions() -> Result<()> {
         record_session_select_baseline();
     }
     let units: Vec<String> = listed.into_iter().map(|(u, _)| u).collect();
+    let logins_before = max_logind_session_id();
     let mut stopped = Vec::new();
     for unit in units {
         kill_unit(&unit);
@@ -2401,7 +2402,7 @@ fn stop_autologin_sessions() -> Result<()> {
     }
     *STOPPED_AUTOLOGIN.lock().unwrap_or_else(|e| e.into_inner()) = stopped;
     persist_takeover();
-    watch_for_relogin_storm();
+    watch_for_relogin_storm(logins_before);
     Ok(())
 }
 
@@ -2422,9 +2423,11 @@ fn max_logind_session_id() -> Option<u64> {
 
 /// Detect-and-report only. A storm presents as a dead pad (~1.4 Hz vs 250 Hz), not as the DM;
 /// every audio/input/PipeWire measurement taken during one is invalid. No self-mitigate: tearing
-/// our session down if the detector is wrong is worse than the storm.
-fn watch_for_relogin_storm() {
-    let Some(before) = max_logind_session_id() else {
+/// our session down if the detector is wrong is worse than the storm. `before` is read ahead of
+/// the kill: once the autologin's session file is gone the max id can fall back to 1, and every
+/// later login then counts as new.
+fn watch_for_relogin_storm(before: Option<u64>) {
+    let Some(before) = before else {
         return; // no logind — nothing relogins here
     };
     std::thread::spawn(move || {
