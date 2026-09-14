@@ -87,6 +87,7 @@ pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativeStartVideo(
             panel_hz: panel_fps,
             surface_size: h.surface_size.clone(),
             src_crop: h.src_crop.clone(),
+            decoded_size: h.decoded_size.clone(),
         };
         let join = match std::thread::Builder::new()
             .name("pf-decode".into())
@@ -370,6 +371,30 @@ pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativeVideoSize<'
         ];
         let arr = env.new_int_array(buf.len())?;
         arr.set_region(env, 0, &buf)?;
+        Ok(arr)
+    })
+    .resolve::<LogErrorAndDefault>()
+}
+
+/// `NativeBridge.nativeVideoDecodedSize(handle): IntArray?` — the decoder's picture size as
+/// `[width, height]`, or `null` before the first output format (or on a `0` handle). Differs from
+/// [`Java_io_unom_punktfunk_kit_NativeBridge_nativeVideoSize`] when the host frames the picture
+/// for this device. Cheap (one atomic load); safe on the UI thread.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativeVideoDecodedSize<'local>(
+    mut env: EnvUnowned<'local>,
+    _this: JObject<'local>,
+    handle: jlong,
+) -> JIntArray<'local> {
+    env.with_env(|env| -> jni::errors::Result<JIntArray<'local>> {
+        let size = get_session(handle).and_then(|h| {
+            super::unpack_surface_size(h.decoded_size.load(std::sync::atomic::Ordering::Relaxed))
+        });
+        let Some((w, h)) = size else {
+            return Ok(JIntArray::default());
+        };
+        let arr = env.new_int_array(2)?;
+        arr.set_region(env, 0, &[w, h])?;
         Ok(arr)
     })
     .resolve::<LogErrorAndDefault>()

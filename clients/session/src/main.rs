@@ -466,6 +466,7 @@ mod session_main {
             pad_speaker: settings.pad_speaker.clone(),
             clipboard,
             keep_host_audio: settings.keep_host_audio,
+            video_fit: punktfunk_core::video_fit::VideoFit::from_name(&settings.video_fit),
             // The Settings preference (auto → VAAPI where it exists; the presenter
             // demotes to software on boxes whose Vulkan can't import the dmabufs).
             // PUNKTFUNK_DECODER still overrides inside the decoder for bisects.

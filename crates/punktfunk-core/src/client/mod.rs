@@ -541,6 +541,7 @@ impl NativeClient {
             0,
             0,
             crate::audio::AudioLayout::Legacy,
+            crate::video_fit::VideoFit::Fit,
             video_codecs,
             preferred_codec,
             display_hdr,
@@ -583,6 +584,9 @@ impl NativeClient {
         // Surround coupling to ask for ([`crate::audio::AudioLayout`]). The host answers in
         // [`NativeClient::audio_layout`]; `Legacy` keeps the Hello byte-identical.
         audio_layout: crate::audio::AudioLayout,
+        // How this client fills its view ([`crate::quic::Hello::video_fit`]); `Fit` keeps the
+        // Hello byte-identical.
+        video_fit: crate::video_fit::VideoFit,
         video_codecs: u8,
         preferred_codec: u8,
         display_hdr: Option<HdrMeta>,
@@ -705,6 +709,7 @@ impl NativeClient {
                     audio_rate_hz,
                     audio_bits,
                     audio_layout,
+                    video_fit,
                     video_codecs,
                     preferred_codec,
                     display_hdr,

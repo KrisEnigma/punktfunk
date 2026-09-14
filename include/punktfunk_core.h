@@ -25,7 +25,7 @@
 // Not [`WIRE_VERSION`]. The C surface can grow without a wire byte changing.
 // Pin the integer in `abi.rs` (`abi_version_is_pinned`). Per-bump notes live
 // in `CHANGELOG.md`.
-#define PUNKTFUNK_ABI_VERSION 31
+#define PUNKTFUNK_ABI_VERSION 32
 
 // punktfunk/1 wire version. `Hello`/`Welcome` carry it; hosts equality-check it.
 //
@@ -255,6 +255,15 @@
 
 // [`punktfunk_connection_set_pad_audio_caps`] bit: the pad renders the SPEAKER stream.
 #define PUNKTFUNK_PAD_AUDIO_CAP_SPEAKER 2
+
+// [`punktfunk_connect_ex12`] `video_fit`: whole picture, bars.
+#define PUNKTFUNK_VIDEO_FIT_FIT 0
+
+// [`punktfunk_connect_ex12`] `video_fit`: fill the view, cut the overflow.
+#define PUNKTFUNK_VIDEO_FIT_CROP 1
+
+// [`punktfunk_connect_ex12`] `video_fit`: fill the view, scale each axis alone.
+#define PUNKTFUNK_VIDEO_FIT_STRETCH 2
 
 // [`punktfunk_connect_ex9`] `client_caps` bit: render the host cursor locally
 // (`design/remote-desktop-sweep.md`).
@@ -2234,6 +2243,39 @@ PunktfunkConnection *punktfunk_connect_ex11(const char *host,
                                             uint8_t video_codecs,
                                             uint8_t preferred_codec,
                                             uint8_t client_caps,
+                                            const char *launch_id,
+                                            const uint8_t *pin_sha256,
+                                            uint8_t *observed_sha256_out,
+                                            const char *client_cert_pem,
+                                            const char *client_key_pem,
+                                            const char *device_name,
+                                            uint32_t timeout_ms,
+                                            int32_t *status_out);
+#endif
+
+#if defined(PUNKTFUNK_FEATURE_QUIC)
+// [`punktfunk_connect_ex11`] plus `video_fit`: how this client fills its view when the frame's
+// shape differs (`PUNKTFUNK_VIDEO_FIT_*`; unknown = fit). A host that frames the picture for
+// another device reframes to it. Every other argument is [`punktfunk_connect_ex11`]'s.
+//
+// # Safety
+// Same as [`punktfunk_connect_ex10`].
+PunktfunkConnection *punktfunk_connect_ex12(const char *host,
+                                            uint16_t port,
+                                            uint32_t width,
+                                            uint32_t height,
+                                            uint32_t refresh_hz,
+                                            uint32_t compositor,
+                                            uint32_t gamepad,
+                                            uint32_t bitrate_kbps,
+                                            uint8_t video_caps,
+                                            uint8_t audio_channels,
+                                            uint32_t audio_rate_hz,
+                                            uint8_t audio_bits,
+                                            uint8_t video_codecs,
+                                            uint8_t preferred_codec,
+                                            uint8_t client_caps,
+                                            uint8_t video_fit,
                                             const char *launch_id,
                                             const uint8_t *pin_sha256,
                                             uint8_t *observed_sha256_out,

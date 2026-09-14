@@ -283,6 +283,13 @@ object NativeBridge {
      */
     external fun nativeVideoSourceCrop(handle: Long, left: Float, top: Float, right: Float, bottom: Float)
 
+    /**
+     * The decoder's picture size as `[width, height]`, or `null` before its first output format.
+     * Differs from [nativeVideoSize] when the host frames the picture for this device (a join, a
+     * mirrored head). One atomic load; UI-safe.
+     */
+    external fun nativeVideoDecodedSize(handle: Long): IntArray?
+
     /** Stop + join the decode thread without closing the session. No-op on `0`. */
     external fun nativeStopVideo(handle: Long)
 

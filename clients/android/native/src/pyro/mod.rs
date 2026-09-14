@@ -214,6 +214,10 @@ mod imp {
                 continue; // packets accumulated, frame not complete yet
             };
 
+            opts.decoded_size.store(
+                crate::session::pack_surface_size(picture.width as i32, picture.height as i32),
+                std::sync::atomic::Ordering::Relaxed,
+            );
             let crop = crate::session::unpack_src_crop(
                 opts.src_crop.load(std::sync::atomic::Ordering::Relaxed),
             );

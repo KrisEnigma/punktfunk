@@ -513,7 +513,9 @@ final class SessionModel: ObservableObject {
                 audioChannels: audioChannels,
                 audioRateHz: audioRateHz, audioBits: audioBits,
                 videoCodecs: videoCodecs, preferredCodec: preferredCodec,
-                clientCaps: clientCaps, launchID: launchID,
+                clientCaps: clientCaps,
+                videoFit: VideoFit(name: effective.videoFit).wire,
+                launchID: launchID,
                 // Delegated approval: the host holds this connect open until the operator approves
                 // it (~180 s) — outwait that window so a slow approval still lands here. Normal
                 // connects keep the snappy default.

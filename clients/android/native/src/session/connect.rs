@@ -357,6 +357,9 @@ struct ConnectRequest {
     pad_audio_ok: bool,
     #[serde(default)]
     keep_host_audio: bool,
+    /// The `video_fit` setting (`"fit"`/`"crop"`/`"stretch"`); absent reads as fit.
+    #[serde(default)]
+    video_fit: String,
 }
 
 /// `NativeBridge.nativeConnect(requestJson): Long` — see [`ConnectRequest`]. Returns an opaque
@@ -415,6 +418,7 @@ fn connect(req: ConnectRequest) -> jlong {
         device_name,
         pad_audio_ok,
         keep_host_audio,
+        video_fit,
     } = req;
     let launch = launch.filter(|s| !s.is_empty());
     let device_name = device_name
@@ -488,6 +492,7 @@ fn connect(req: ConnectRequest) -> jlong {
         audio_bits,
         // Legacy coupling: libopus here decodes either, and nothing on Android needs the other.
         punktfunk_core::audio::AudioLayout::Legacy,
+        punktfunk_core::video_fit::VideoFit::from_name(&video_fit),
         // Codecs this device decodes (`VideoDecoders.decodableCodecBits`): H.264 + HEVC always,
         // AV1 on a real `video/av01` decoder, PyroWave on a GPU that passes the probe — the one
         // bit here naming no MediaCodec, since it decodes as Vulkan compute in `crate::pyro`.
@@ -571,6 +576,7 @@ fn connect(req: ConnectRequest) -> jlong {
                 surface_size: Arc::new(std::sync::atomic::AtomicU64::new(0)),
                 // The full frame until Kotlin places the picture.
                 src_crop: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+                decoded_size: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             };
             insert_session(handle)
         }

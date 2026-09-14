@@ -19,6 +19,15 @@ public enum VideoFit: String, CaseIterable, Sendable {
         self = name.flatMap(VideoFit.init(rawValue:)) ?? .fit
     }
 
+    /// The `Hello::video_fit` byte (`PUNKTFUNK_VIDEO_FIT_*`); `0` is Fit.
+    public var wire: UInt8 {
+        switch self {
+        case .fit: return 0
+        case .crop: return 1
+        case .stretch: return 2
+        }
+    }
+
     /// The picker label every client shares.
     public var label: String {
         switch self {

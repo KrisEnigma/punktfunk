@@ -258,6 +258,7 @@ pub(super) fn run_async(
         // A persistent Sender for the ASC path: the pump hands it to each transaction's completion
         // callback, and it keeps the event channel alive for those callbacks.
         present_tx: asc.as_ref().map(|_| ev_tx.clone()),
+        decoded_size: opts.decoded_size.clone(),
     };
     let mut state = State::new(asc, presenter, ReanchorGate::new(client.frames_dropped()));
 
@@ -543,6 +544,8 @@ struct Ctx {
     window: NativeWindow,
     /// The persistent Sender each ASC transaction's completion callback rides back on.
     present_tx: Option<mpsc::Sender<DecodeEvent>>,
+    /// The session's decoded-size cell, refreshed on each output-format change.
+    decoded_size: Arc<AtomicU64>,
 }
 
 impl Ctx {
@@ -694,6 +697,10 @@ impl State {
         }
         ctx.stats.note_skipped_overflow(pass.aus_dropped); // parked-AU overflow: skips, flagged as such
         if pass.fmt_dirty {
+            if let Some((w, h)) = super::display::picture_size(&ctx.codec) {
+                ctx.decoded_size
+                    .store(crate::session::pack_surface_size(w, h), Ordering::Relaxed);
+            }
             match self.asc.as_mut() {
                 // ASC carries the HDR signal on the transaction, not the SurfaceView window.
                 // Refine only when the codec actually reports an HDR transfer — a `None` echo

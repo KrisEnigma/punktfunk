@@ -31,6 +31,8 @@ pub(crate) struct WorkerArgs {
     pub(crate) audio_bits: u8,
     /// Surround coupling asked for; the host answers in `Welcome::audio_layout`.
     pub(crate) audio_layout: crate::audio::AudioLayout,
+    /// How this client fills its view; the host reframes a shared frame to it.
+    pub(crate) video_fit: crate::video_fit::VideoFit,
     pub(crate) video_codecs: u8,
     pub(crate) preferred_codec: u8,
     pub(crate) display_hdr: Option<HdrMeta>,

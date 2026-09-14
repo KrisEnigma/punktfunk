@@ -127,6 +127,8 @@ pub(super) async fn connect_and_handshake(args: &WorkerArgs) -> Result<Handshake
                 audio_bits: args.audio_bits,
                 // The coupling asked for; `0` (legacy) keeps the Hello byte-identical.
                 audio_layout: args.audio_layout.wire(),
+                // How this client fills its view; a host framing for another device reframes to it.
+                video_fit: args.video_fit.wire(),
             }
             .encode(),
         )

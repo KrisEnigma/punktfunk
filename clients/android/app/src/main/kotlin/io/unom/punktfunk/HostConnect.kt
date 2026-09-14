@@ -110,6 +110,7 @@ suspend fun connectToHost(
             // "Keep host audio playing": the host taps its own default output rather than
             // silencing it for the session. Free to ask for — an older host just ignores it.
             keepHostAudio = settings.keepHostAudio,
+            videoFit = settings.videoFit,
         )
         NativeBridge.nativeConnect(request.toJson())
     }

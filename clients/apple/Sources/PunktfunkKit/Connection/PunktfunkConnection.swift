@@ -934,6 +934,7 @@ public final class PunktfunkConnection: @unchecked Sendable {
         videoCodecs: UInt8 = 0x02, // PUNKTFUNK_CODEC_HEVC — the codecs this client can decode
         preferredCodec: UInt8 = 0, // 0 = auto; else PUNKTFUNK_CODEC_* soft preference
         clientCaps: UInt8 = 0, // ABI v11: PUNKTFUNK_CLIENT_CAP_CURSOR = render the host cursor locally
+        videoFit: UInt8 = 0, // PUNKTFUNK_VIDEO_FIT_*: how this view fills; a host framing for another device reframes to it
         launchID: String? = nil,
         deviceName: String? = nil, // nil = this device's OS name (`DeviceName.current`)
         timeoutMs: UInt32 = 10_000
@@ -955,26 +956,9 @@ public final class PunktfunkConnection: @unchecked Sendable {
         // device pending approval reads "This device".
         let override = deviceName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let label = override.isEmpty ? DeviceName.current : override
-        // `ex11` only when a NON-DEFAULT audio format is being asked for, and this branch is
-        // LOAD-BEARING rather than a tidiness preference.
-        //
-        // ⚠ It used to be commented as one — "48 000/16 through `ex11` is byte-for-byte identical
-        // to `ex10`, but staying on the older entry point keeps that identity a property of this
-        // client" — and the C header now says plainly that it is not identical. `ex10` passes
-        // `0`/`0`, meaning UNSPECIFIED, and core's capability bit keys on "the caller specified a
-        // format", not on "the format differs from the default". So an explicit 48 000/16 through
-        // `ex11` is a genuine request for the cheapest LOSSLESS rung: it sets
-        // `CLIENT_CAP_AUDIO_HIRES`, and a host with the operator policy on resolves the session
-        // onto the `0xD3` plane at 1.5 Mbps — for audio indistinguishable from the 256 kbps Opus it
-        // replaced. That is deliberate in core (48/16 would otherwise be the one rung nobody could
-        // ask for), which is exactly why deleting this test would opt every ordinary session in.
-        //
-        // `AudioFormatChoice.opus.wire` is `(48_000, 16)` for readability, so this comparison — not
-        // that pair — is what keeps a Standard session on the legacy path.
-        //
-        // `ex11` also derives `CLIENT_CAP_AUDIO_HIRES` from the format itself and ORs it into
-        // `clientCaps`, so the bit and the format it advertises can never disagree; nothing here
-        // sets it by hand.
+        // LOAD-BEARING: the pair goes out as `0`/`0` unless a non-default format is asked for.
+        // Core reads any explicit pair, 48 000/16 included, as a lossless ask and sets
+        // `CLIENT_CAP_AUDIO_HIRES`; `AudioFormatChoice.opus.wire` is `(48_000, 16)`.
         let wantsHiRes = audioRateHz != 48_000 || audioBits != 16
         handle = host.withCString { cs in
             withOptionalCString(identity?.certPEM) { cert in
@@ -982,18 +966,11 @@ public final class PunktfunkConnection: @unchecked Sendable {
                     withOptionalCString(launchID) { launch in
                         label.withCString { name in
                             func dial(_ pin: UnsafePointer<UInt8>?) -> OpaquePointer? {
-                                if wantsHiRes {
-                                    return punktfunk_connect_ex11(
-                                        cs, port, width, height, refreshHz, compositor.rawValue,
-                                        gamepad.rawValue, bitrateKbps, videoCaps, audioChannels,
-                                        audioRateHz, audioBits,
-                                        videoCodecs, preferredCodec, clientCaps, launch,
-                                        pin, &observed, cert, key, name, timeoutMs, &connectStatus)
-                                }
-                                return punktfunk_connect_ex10(
+                                punktfunk_connect_ex12(
                                     cs, port, width, height, refreshHz, compositor.rawValue,
                                     gamepad.rawValue, bitrateKbps, videoCaps, audioChannels,
-                                    videoCodecs, preferredCodec, clientCaps, launch,
+                                    wantsHiRes ? audioRateHz : 0, wantsHiRes ? audioBits : 0,
+                                    videoCodecs, preferredCodec, clientCaps, videoFit, launch,
                                     pin, &observed, cert, key, name, timeoutMs, &connectStatus)
                             }
                             if let pin = pinSHA256 {

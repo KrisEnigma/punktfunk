@@ -3609,6 +3609,7 @@ mod tests {
             audio_rate_hz: punktfunk_core::audio::SAMPLE_RATE_HZ,
             audio_bits: punktfunk_core::audio::pcm::BITS_16,
             audio_layout: 0,
+            video_fit: 0,
         };
         io::write_msg(&mut send, &hello.encode())
             .await

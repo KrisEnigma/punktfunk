@@ -62,7 +62,7 @@ pub struct Hello {
     pub display_hdr: Option<HdrMeta>,
     /// Non-video bits ([`CLIENT_CAP_CURSOR`]). After `display_hdr`; that block has no
     /// placeholder, so remaining length < `HDR_META_BODY_LEN` means no HDR and these bytes
-    /// *are* the post-HDR tail. Budget: 1+2+4+1 = 8 of 27. Omitted / zero → `0`.
+    /// *are* the post-HDR tail. Budget: 1+2+4+1+1+1 = 10 of 27. Omitted / zero → `0`.
     pub client_caps: u8,
     /// Largest sealed video-shard payload this client accepts. Non-zero ⇒ mid-session
     /// `shard_payload` changes are safe, and the value is the jumbo ceiling. `0` = legacy:
@@ -79,9 +79,13 @@ pub struct Hello {
     /// request emits the rate and stops.
     pub audio_bits: u8,
     /// Requested surround coupling, an [`AudioLayout`](crate::audio::AudioLayout) wire id.
-    /// Host answers in [`Welcome::audio_layout`] with what it encodes. Last field: `0`/absence
-    /// is the legacy coupling, so a stereo or legacy Hello never carries this byte.
+    /// Host answers in [`Welcome::audio_layout`] with what it encodes. `0`/absence is the legacy
+    /// coupling, so a stereo or legacy Hello never carries this byte unless `video_fit` forces it.
     pub audio_layout: u8,
+    /// How this client fills its view when the frame's shape differs
+    /// ([`VideoFit::wire`](crate::video_fit::VideoFit::wire)). A host that sizes the frame for
+    /// another device (a join, a mirrored head) reframes to it. Last field: `0`/absence is Fit.
+    pub video_fit: u8,
 }
 
 /// QUIC application close: client deliberate quit. Host tears the virtual display down
@@ -245,7 +249,8 @@ impl Hello {
             self.audio_rate_hz != 0 && self.audio_rate_hz != crate::audio::SAMPLE_RATE_HZ;
         let abits_present = self.audio_bits != 0 && self.audio_bits != crate::audio::pcm::BITS_16;
         let alayout_present = self.audio_layout != 0;
-        let audio_present = arate_present || abits_present || alayout_present;
+        let vfit_present = self.video_fit != 0;
+        let audio_present = arate_present || abits_present || alayout_present || vfit_present;
         let need_placeholders = self.video_caps != 0
             || ac_present
             || vcodecs_present
@@ -313,18 +318,21 @@ impl Hello {
             };
             b.extend_from_slice(&rate.to_le_bytes());
         }
-        // A 96 kHz/16-bit request stops after the rate; only a layout forces the depth out,
-        // as 16 when it was left at zero.
-        if abits_present || alayout_present {
+        // A 96 kHz/16-bit request stops after the rate; only a later field forces the depth
+        // out, as 16 when it was left at zero.
+        if abits_present || alayout_present || vfit_present {
             b.push(if abits_present {
                 self.audio_bits
             } else {
                 crate::audio::pcm::BITS_16
             });
         }
-        // Last field: nothing can force it.
-        if alayout_present {
+        if alayout_present || vfit_present {
             b.push(self.audio_layout);
+        }
+        // Last field: nothing can force it.
+        if vfit_present {
+            b.push(self.video_fit);
         }
         b
     }
@@ -422,6 +430,8 @@ impl Hello {
             // Verbatim: the host answers a layout it knows or `0`, so an id from a newer
             // client costs nothing here and must not be folded onto one it did not ask for.
             audio_layout: b.get(post_hdr + 8).copied().unwrap_or(0),
+            // Verbatim for the same reason; the host reads it through `VideoFit::from_wire`.
+            video_fit: b.get(post_hdr + 9).copied().unwrap_or(0),
         })
     }
 }
@@ -1084,6 +1094,7 @@ mod tests {
             audio_rate_hz: SAMPLE_RATE_HZ,
             audio_bits: BITS_16,
             audio_layout: 0,
+            video_fit: 0,
         };
         let enc = h.encode();
         let dec = Hello::decode(&enc).unwrap();
@@ -1174,6 +1185,7 @@ mod tests {
             audio_rate_hz: SAMPLE_RATE_HZ,
             audio_bits: BITS_16,
             audio_layout: 0,
+            video_fit: 0,
         };
         assert_eq!(Hello::decode(&h.encode()).unwrap(), h);
         let s = Start {
@@ -1207,6 +1219,7 @@ mod tests {
             audio_rate_hz: SAMPLE_RATE_HZ,
             audio_bits: BITS_16,
             audio_layout: 0,
+            video_fit: 0,
         };
         let enc = h.encode();
         assert_eq!(enc.len(), 26);
@@ -1338,6 +1351,7 @@ mod tests {
             audio_rate_hz: SAMPLE_RATE_HZ,
             audio_bits: BITS_16,
             audio_layout: 0,
+            video_fit: 0,
         };
         let enc = base.encode();
         assert_eq!(
@@ -1393,6 +1407,7 @@ mod tests {
             audio_rate_hz: SAMPLE_RATE_HZ,
             audio_bits: BITS_16,
             audio_layout: 0,
+            video_fit: 0,
         };
         // Launch alone: a zero-length name placeholder keeps the offset deterministic.
         let with_launch = Hello {
@@ -1456,6 +1471,7 @@ mod tests {
             audio_rate_hz: SAMPLE_RATE_HZ,
             audio_bits: BITS_16,
             audio_layout: 0,
+            video_fit: 0,
         };
         let vol = HdrMeta {
             display_primaries: [[13250, 34500], [7500, 3000], [34000, 16000]], // G, B, R
@@ -1522,6 +1538,7 @@ mod tests {
                 audio_rate_hz: SAMPLE_RATE_HZ,
                 audio_bits: BITS_16,
                 audio_layout: 0,
+                video_fit: 0,
             }
             .encode();
             assert!(PairRequest::decode(&h).is_err(), "abi {abi} parsed as pair");
@@ -1560,6 +1577,7 @@ mod tests {
             audio_rate_hz: SAMPLE_RATE_HZ,
             audio_bits: BITS_16,
             audio_layout: 0,
+            video_fit: 0,
         };
         let vol = HdrMeta {
             display_primaries: [[13250, 34500], [7500, 3000], [34000, 16000]],
@@ -1628,6 +1646,7 @@ mod tests {
             audio_rate_hz: SAMPLE_RATE_HZ,
             audio_bits: BITS_16,
             audio_layout: 0,
+            video_fit: 0,
         };
         // Advertisement alone: earlier trailing fields are placeholders so the 2 LE bytes land.
         let adv = Hello {
@@ -1962,6 +1981,82 @@ mod tests {
     /// Hello trailing fields have placeholders except `display_hdr` (fixed 28-byte block,
     /// remaining-length). That caps the post-HDR tail at 27 bytes.
     #[test]
+    fn hello_video_fit_roundtrip_and_back_compat() {
+        let base = Hello {
+            abi_version: 2,
+            mode: Mode {
+                width: 3216,
+                height: 1440,
+                refresh_hz: 60,
+            },
+            compositor: CompositorPref::Auto,
+            gamepad: GamepadPref::Auto,
+            bitrate_kbps: 0,
+            name: None,
+            launch: None,
+            video_caps: 0,
+            audio_channels: 2,
+            video_codecs: 0,
+            preferred_codec: 0,
+            display_hdr: None,
+            client_caps: 0,
+            max_shard_payload: 0,
+            audio_rate_hz: SAMPLE_RATE_HZ,
+            audio_bits: BITS_16,
+            audio_layout: 0,
+            video_fit: 0,
+        };
+        // Fit is absence: the legacy 26 bytes.
+        assert_eq!(base.encode().len(), 26);
+
+        // A fit forces every earlier placeholder, the audio triple as its legacy values, and
+        // lands last; cut before it, the Hello reads as an older client's Fit.
+        let crop = Hello {
+            video_fit: crate::video_fit::VideoFit::Crop.wire(),
+            ..base.clone()
+        };
+        let enc = crop.encode();
+        assert_eq!(enc.len(), 26 + 6 + 1 + 2 + 4 + 1 + 1 + 1);
+        assert_eq!(
+            &enc[35..39],
+            &SAMPLE_RATE_HZ.to_le_bytes(),
+            "rate forced as 48 kHz"
+        );
+        assert_eq!(enc[39], BITS_16, "depth forced as 16");
+        assert_eq!(enc[40], 0, "layout forced as legacy");
+        assert_eq!(enc[41], 1);
+        let dec = Hello::decode(&enc).unwrap();
+        assert_eq!(dec, crop);
+        assert_eq!(dec.audio_layout, 0);
+        assert_eq!(Hello::decode(&enc[..41]).unwrap().video_fit, 0);
+
+        // With the HDR block and every other tail field the post-HDR tail stays under
+        // HDR_META_BODY_LEN, so a Hello without HDR is never read as one with.
+        let full = Hello {
+            display_hdr: Some(HdrMeta {
+                display_primaries: [[13250, 34500], [7500, 3000], [34000, 16000]],
+                white_point: [15635, 16450],
+                max_display_mastering_luminance: 8_000_000,
+                min_display_mastering_luminance: 500,
+                max_cll: 0,
+                max_fall: 400,
+            }),
+            client_caps: CLIENT_CAP_AUDIO_HIRES,
+            max_shard_payload: 8908,
+            audio_rate_hz: 96_000,
+            audio_bits: BITS_24,
+            audio_layout: 1,
+            video_fit: crate::video_fit::VideoFit::Stretch.wire(),
+            ..base.clone()
+        };
+        let fenc = full.encode();
+        let post_hdr = fenc.len() - (26 + 6 + HDR_META_BODY_LEN);
+        assert_eq!(post_hdr, 10);
+        assert!(post_hdr < HDR_META_BODY_LEN);
+        assert_eq!(Hello::decode(&fenc).unwrap(), full);
+    }
+
+    #[test]
     fn hello_hires_audio_request_roundtrip_and_back_compat() {
         let base = Hello {
             abi_version: 2,
@@ -1985,6 +2080,7 @@ mod tests {
             audio_rate_hz: SAMPLE_RATE_HZ,
             audio_bits: BITS_16,
             audio_layout: 0,
+            video_fit: 0,
         };
         // Legacy request is still 26 bytes.
         assert_eq!(base.encode().len(), 26);
