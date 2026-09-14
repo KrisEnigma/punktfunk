@@ -181,8 +181,17 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .flatpak-builder
-          key: flatpak-builder-state-${{ hashFiles('Cargo.lock', 'packaging/flatpak/**') }}
-          restore-keys: flatpak-builder-state-
+          key: flatpak-builder-state-v2-${{ hashFiles('Cargo.lock', 'packaging/flatpak/**') }}
+          restore-keys: flatpak-builder-state-v2-
+
+      # A restore that dies mid-archive leaves a partial tree, and flatpak-builder then fails on
+      # the half-written OSTree repo (`opendir(refs/heads)`). Start cold instead.
+      - name: Drop a partial cache restore
+        run: |
+          if [ -d .flatpak-builder/cache ] && [ ! -d .flatpak-builder/cache/refs/heads ]; then
+            echo "::warning::partial .flatpak-builder restore, starting cold"
+            rm -rf .flatpak-builder
+          fi
 
       - name: Version + channel
         # Tag vX.Y.Z -> X.Y.Z on the OSTree `stable` branch (a real release); a main push ->
