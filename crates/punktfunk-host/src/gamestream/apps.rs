@@ -4,8 +4,8 @@
 //! gamescope defaults.
 //!
 //! ```json
-//! [ {"id":1,"title":"Desktop"},
-//!   {"id":2,"title":"Steam","compositor":"gamescope","cmd":"steam -gamepadui"} ]
+//! [ {"id":1,"title":"Desktop","icon":"monitor"},
+//!   {"id":2,"title":"Steam","icon":"steam","compositor":"gamescope","cmd":"steam -gamepadui"} ]
 //! ```
 
 use serde_json::Value;
@@ -21,6 +21,8 @@ pub struct AppEntry {
     /// Store-qualified id (`steam:570`). When set, launch resolves this against the
     /// host library instead of running [`cmd`](Self::cmd).
     pub library_id: Option<String>,
+    /// Mark token ([`crate::library::GameEntry::icon`]). Picks the `/appasset` tile when there is no cover.
+    pub icon: Option<String>,
     /// Sunshine `prep-cmd` parity: `do` before launch, `undo` reverse at stream end
     /// ([`crate::hooks::run_prep`]).
     pub prep: Vec<crate::hooks::PrepCmd>,
@@ -65,6 +67,7 @@ fn base_catalog() -> Vec<AppEntry> {
                                     .and_then(parse_compositor),
                                 cmd: it.get("cmd").and_then(|c| c.as_str()).map(String::from),
                                 library_id: None,
+                                icon: it.get("icon").and_then(|c| c.as_str()).map(String::from),
                                 // Malformed `"prep"` is ignored; the entry still launches unprepped.
                                 prep: it
                                     .get("prep")
@@ -90,6 +93,7 @@ fn base_catalog() -> Vec<AppEntry> {
         compositor: None,
         cmd: None,
         library_id: None,
+        icon: Some("monitor".into()),
         prep: Vec::new(),
     }];
     if which("gamescope") {
@@ -100,6 +104,7 @@ fn base_catalog() -> Vec<AppEntry> {
                 compositor: Some(crate::vdisplay::Compositor::Gamescope),
                 cmd: Some("steam -gamepadui".into()),
                 library_id: None,
+                icon: Some("steam".into()),
                 prep: Vec::new(),
             });
         }
@@ -110,6 +115,7 @@ fn base_catalog() -> Vec<AppEntry> {
                 compositor: Some(crate::vdisplay::Compositor::Gamescope),
                 cmd: Some("vkcube".into()),
                 library_id: None,
+                icon: None,
                 prep: Vec::new(),
             });
         }
@@ -142,6 +148,7 @@ fn append_library(apps: &mut Vec<AppEntry>) {
             compositor: None, // Windows ignores compositor
             cmd: None,
             library_id: Some(g.id),
+            icon: g.icon,
             prep: Vec::new(),
         });
     }
@@ -162,11 +169,30 @@ pub fn by_id(id: u32) -> Option<AppEntry> {
     catalog().into_iter().find(|a| a.id == id)
 }
 
-/// Blocking (disk + network) — call off the async runtime. Desktop / apps.json
-/// entries have no art.
+/// Cover for `appid`, else the baked tile for its mark. Blocking (disk + network) — call
+/// off the async runtime.
 pub fn appasset_bytes(appid: u32) -> Option<(Vec<u8>, String)> {
-    let lib_id = by_id(appid)?.library_id?;
-    crate::library::fetch_box_art(&lib_id)
+    let app = by_id(appid)?;
+    app.library_id
+        .as_deref()
+        .and_then(crate::library::fetch_box_art)
+        .or_else(|| Some((tile_png(app.icon.as_deref()?)?.to_vec(), "image/png".into())))
+}
+
+/// The console's coverless poster for `icon`, baked to PNG by `scripts/gen-launcher-icons.sh`:
+/// GameStream clients decode raster only. `None` keeps Moonlight's titled placeholder.
+fn tile_png(icon: &str) -> Option<&'static [u8]> {
+    Some(match icon {
+        "monitor" => include_bytes!("../../assets/gamestream/monitor.png").as_slice(),
+        "steam" => include_bytes!("../../assets/gamestream/steam.png").as_slice(),
+        "lutris" => include_bytes!("../../assets/gamestream/lutris.png").as_slice(),
+        "heroic" => include_bytes!("../../assets/gamestream/heroic.png").as_slice(),
+        "playnite" => include_bytes!("../../assets/gamestream/playnite.png").as_slice(),
+        "epic" => include_bytes!("../../assets/gamestream/epic.png").as_slice(),
+        "gog" => include_bytes!("../../assets/gamestream/gog.png").as_slice(),
+        "xbox" => include_bytes!("../../assets/gamestream/xbox.png").as_slice(),
+        _ => return None,
+    })
 }
 
 /// GameStream `/applist` XML. Compact — no whitespace between elements.
@@ -239,6 +265,7 @@ mod tests {
             compositor: None,
             cmd: None,
             library_id: None,
+            icon: None,
             prep: Vec::new(),
         }];
         append_library(&mut apps);
@@ -247,6 +274,27 @@ mod tests {
         uniq.sort_unstable();
         uniq.dedup();
         assert_eq!(ids.len(), uniq.len(), "duplicate GameStream ids in catalog");
+    }
+
+    /// 600x800: Moonlight titles 628x888 and 200x266 art as its own placeholder.
+    #[test]
+    fn every_mark_tile_is_a_600x800_png() {
+        for icon in [
+            "monitor", "steam", "lutris", "heroic", "playnite", "epic", "gog", "xbox",
+        ] {
+            let png = tile_png(icon).unwrap_or_else(|| panic!("no tile for {icon}"));
+            assert!(png.starts_with(b"\x89PNG\r\n\x1a\n"), "{icon} is not a PNG");
+            let dim = |at: usize| u32::from_be_bytes(png[at..at + 4].try_into().unwrap());
+            assert_eq!((dim(16), dim(20)), (600, 800), "{icon} tile size");
+        }
+        assert!(tile_png("gamepad-2").is_none());
+    }
+
+    #[test]
+    fn desktop_appasset_is_the_monitor_tile() {
+        let (bytes, ctype) = appasset_bytes(1).expect("desktop has a tile");
+        assert_eq!(ctype, "image/png");
+        assert_eq!(bytes, tile_png("monitor").unwrap());
     }
 
     #[test]

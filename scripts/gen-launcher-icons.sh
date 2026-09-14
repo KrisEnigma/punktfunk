@@ -12,6 +12,9 @@
 #   GTK shell      symbolic SVG, black fill  -> clients/linux/data/icons/scalable/actions/
 #   Windows shell  PNG, h=128, mid-grey      -> clients/windows/assets/launchers/
 #   Apple clients  vector PDF, black fill    -> clients/apple/.../LauncherIcons.xcassets/
+#   Host           600x800 PNG tile          -> crates/punktfunk-host/assets/gamestream/
+#
+# The host tile is the console's coverless poster baked for Moonlight, which decodes raster only.
 #
 # The web console, the Android client and the in-session console UI transcribe the master's
 # path data inline instead — those are hand-kept, and this script prints them at the end so a
@@ -33,6 +36,14 @@ APPLE=clients/apple/Sources/PunktfunkKit/Resources/LauncherIcons.xcassets
 WIN_GREY='#8A8F98'
 WIN_HEIGHT=128
 
+HOST=crates/punktfunk-host/assets/gamestream
+# pf-console-ui `card_face` on the default dark palette: accent #8678F5 at 0.38 (launcher) and
+# 0.20 (desktop) over black. 3:4, and not a size Moonlight treats as its placeholder.
+HOST_LAUNCHER_FACE='#332E5D'
+HOST_DESKTOP_FACE='#1B1831'
+HOST_W=600
+HOST_H=800
+
 log() { printf '\033[1;36m==>\033[0m %s\n' "$*"; }
 
 command -v rsvg-convert >/dev/null 2>&1 || {
@@ -45,10 +56,24 @@ if [ ${#tokens[@]} -eq 0 ]; then
   for f in "$MASTERS"/*.svg; do tokens+=("$(basename "$f" .svg)"); done
 fi
 
-mkdir -p "$GTK" "$WIN" "$APPLE"
+mkdir -p "$GTK" "$WIN" "$APPLE" "$HOST"
 
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
+
+# host_tile MASTER FACE MARK_PERCENT OUT: the master nested in a face, letterboxed at
+# MARK_PERCENT of the short side, white at 85 % — `draw_poster_placeholder`'s recipe.
+host_tile() {
+  local side=$((HOST_W * $3 / 100))
+  local x=$(((HOST_W - side) / 2)) y=$(((HOST_H - side) / 2))
+  {
+    printf '<svg xmlns="http://www.w3.org/2000/svg" width="%d" height="%d">' "$HOST_W" "$HOST_H"
+    printf '<rect width="100%%" height="100%%" fill="%s"/><g opacity=".85" color="#FFFFFF">' "$2"
+    perl -0pe 's/<!--.*?-->//gs; s{<svg\b([^>]*)>}{my $a = $1; $a =~ s/\s(?:x|y|width|height)="[^"]*"//g; qq(<svg x="'"$x"'" y="'"$y"'" width="'"$side"'" height="'"$side"'"$a>)}e' "$1"
+    printf '</g></svg>'
+  } > "$tmp/tile.svg"
+  rsvg-convert -f png -o "$4" "$tmp/tile.svg"
+}
 
 for t in "${tokens[@]}"; do
   src="$MASTERS/$t.svg"
@@ -81,7 +106,12 @@ for t in "${tokens[@]}"; do
   }
 }
 JSON
+
+  host_tile "$src" "$HOST_LAUNCHER_FACE" 44 "$HOST/$t.png"
 done
+
+# The desktop tile is a Lucide outline, not a launcher master.
+host_tile assets/lucide/monitor.svg "$HOST_DESKTOP_FACE" 34 "$HOST/monitor.png"
 
 echo
 log "Inline registries (web console, Android, in-session console UI)"
@@ -103,6 +133,7 @@ echo
 log "Remember: a NEW token also has to be added to each client's shipped-token list —"
 log "  clients/linux/src/ui_library.rs, clients/linux/data/resources.gresource.xml,"
 log "  clients/windows/src/app/launcher_icons.rs,"
-log "  clients/apple/.../PunktfunkKit/LauncherIcon.swift"
+log "  clients/apple/.../PunktfunkKit/LauncherIcon.swift,"
+log "  crates/punktfunk-host/src/gamestream/apps.rs (tile_png)"
 log "  (the three inline registries above pick it up automatically)"
 log "  — and to the plugin that emits the tile."

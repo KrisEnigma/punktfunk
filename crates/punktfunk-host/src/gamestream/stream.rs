@@ -1769,6 +1769,7 @@ mod tests {
             compositor: None,
             cmd: cmd.map(str::to_string),
             library_id: None,
+            icon: None,
             prep: Vec::new(),
         }
     }

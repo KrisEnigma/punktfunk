@@ -204,8 +204,8 @@ async fn h_applist() -> impl IntoResponse {
     xml(super::apps::applist_xml())
 }
 
-/// Cover bytes for `appid`. Fetch is disk+network, so `spawn_blocking`. 404 (Desktop, no art,
-/// or fetch failure) is Moonlight's title-only placeholder.
+/// Cover or mark tile for `appid`. Fetch is disk+network, so `spawn_blocking`. 404 (no art, no
+/// known mark, or fetch failure) is Moonlight's title-only placeholder.
 async fn h_appasset(Query(q): Query<HashMap<String, String>>) -> Response {
     let Some(appid) = q.get("appid").and_then(|s| s.parse::<u32>().ok()) else {
         return StatusCode::BAD_REQUEST.into_response();
