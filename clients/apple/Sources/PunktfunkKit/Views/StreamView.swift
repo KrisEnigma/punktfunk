@@ -680,8 +680,8 @@ public final class StreamLayerView: NSView {
             hotX: min(ev.hotX, w - 1), hotY: min(ev.hotY, h - 1))
     }
 
-    /// Points-per-host-pixel: the exact factor the video frame is aspect-fit into the view (the same
-    /// `AVMakeRect` fit `hostPoint`/`cgScreenPoint` use). The host forwards the pointer bitmap in host
+    /// Points-per-host-pixel: the exact factor the video frame is placed into the view at (the same
+    /// placement `hostPoint`/`cgScreenPoint` use). The host forwards the pointer bitmap in host
     /// framebuffer pixels — the mode we drive is in the client's BACKING pixels, so on retina this is
     /// ~1/backingScale and the pointer lands at its TRUE size relative to the streamed desktop
     /// (crisp, 1:1 with the video) rather than the 2×-inflated pixel-as-points it used to be. Because
@@ -716,15 +716,26 @@ public final class StreamLayerView: NSView {
             safeMode: safeModePixels)
     }
 
-    private func cursorFitScale() -> CGFloat {
-        guard connection != nil else { return 1 }
-        let mode = hostContentSize()
+    /// Where the picture sits in `videoBounds`: the presenter's placement in backing pixels, the
+    /// points→pixels scale, and the frame size. Every pointer mapping reads this, so a click lands on
+    /// the pixel drawn there.
+    private func videoPlacement()
+        -> (placement: VideoPlacement, box: CGRect, scale: CGFloat, width: UInt32, height: UInt32)? {
+        guard connection != nil else { return nil }
+        let content = hostContentSize()
         let box = videoBounds
-        guard mode.width > 0, mode.height > 0, box.width > 0, box.height > 0 else { return 1 }
-        let fit = AVMakeRect(
-            aspectRatio: CGSize(width: Int(mode.width), height: Int(mode.height)), insideRect: box)
-        guard fit.width > 0 else { return 1 }
-        return fit.width / CGFloat(mode.width)
+        let scale = window?.backingScaleFactor ?? 1
+        guard content.width > 0, content.height > 0, box.width > 0, box.height > 0 else { return nil }
+        let p = VideoFit(name: SessionSettings.current.videoFit).place(
+            view: (Int((box.width * scale).rounded()), Int((box.height * scale).rounded())),
+            frame: (Int(content.width), Int(content.height)))
+        return p.isEmpty ? nil : (p, box, scale, content.width, content.height)
+    }
+
+    /// Points per host pixel at the placement's scale. Stretch keeps the cursor's own shape.
+    private func cursorFitScale() -> CGFloat {
+        guard let v = videoPlacement() else { return 1 }
+        return CGFloat(min(v.placement.scaleX, v.placement.scaleY)) / v.scale
     }
 
     /// Build the `NSCursor` for a cached shape at the CURRENT video-fit scale (see `cursorFitScale`).
@@ -741,20 +752,14 @@ public final class StreamLayerView: NSView {
     }
 
     /// Host video px → CG GLOBAL screen coordinates (top-left origin, the
-    /// `CGWarpMouseCursorPosition` convention `CursorCapture` established) through the
-    /// aspect-fit letterbox — the inverse direction of `hostPoint(from:)`.
+    /// `CGWarpMouseCursorPosition` convention `CursorCapture` established) through the placement —
+    /// the inverse direction of `hostPoint(from:)`. A host point cropped away lands on the edge.
     private func cgScreenPoint(forHostX hx: Int32, _ hy: Int32) -> CGPoint? {
-        guard connection != nil, let window else { return nil }
-        let mode = hostContentSize()
-        guard mode.width > 0, mode.height > 0 else { return nil }
-        let fit = AVMakeRect(
-            aspectRatio: CGSize(width: Int(mode.width), height: Int(mode.height)),
-            insideRect: videoBounds)
-        guard fit.width > 0, fit.height > 0 else { return nil }
-        let u = (CGFloat(hx) / CGFloat(mode.width)).clamped(to: 0...1)
-        let v = (CGFloat(hy) / CGFloat(mode.height)).clamped(to: 0...1)
-        let videoMinYTop = bounds.height - fit.maxY
-        let pTop = CGPoint(x: fit.minX + u * fit.width, y: videoMinYTop + v * fit.height)
+        guard let window, let v = videoPlacement() else { return nil }
+        let px = v.placement.view(fromFrame: CGPoint(x: Int(hx), y: Int(hy)))
+        // The placement counts rows from the box's top; AppKit's box origin is its bottom.
+        let boxTop = bounds.height - v.box.maxY
+        let pTop = CGPoint(x: v.box.minX + px.x / v.scale, y: boxTop + px.y / v.scale)
         let inView = CGPoint(x: pTop.x, y: bounds.height - pTop.y)
         let inWindow = convert(inView, to: nil)
         let onScreen = window.convertPoint(toScreen: inWindow)
@@ -841,28 +846,19 @@ public final class StreamLayerView: NSView {
     /// events in the letterbox bars (outside the video rect) so the host's cursor isn't dragged
     /// onto a black edge, and until a mode is negotiated.
     private func hostPoint(from event: NSEvent) -> HostPoint? {
-        guard connection != nil, let window, event.window === window else { return nil }
-        let mode = hostContentSize()
-        guard mode.width > 0, mode.height > 0 else { return nil }
-        // Window → view coords (non-flipped: origin bottom-left), then flip y into view-top-left.
+        guard let window, event.window === window, let v = videoPlacement() else { return nil }
+        // Window → view coords (non-flipped: origin bottom-left), then flip y into the box's
+        // top-left pixel space, the placement's. The flip stays on the VIEW's height — `inView` is
+        // in view coordinates, box or no box.
         let inView = convert(event.locationInWindow, from: nil)
-        let p = CGPoint(x: inView.x, y: bounds.height - inView.y)
-        // The video occupies the aspect-fit rect inside the (non-flipped) video box; AVMakeRect's
-        // origin is bottom-left, so flip its minY too to match p's top-left space. The flip itself
-        // stays on the VIEW's height — `p` is in view coordinates, box or no box.
-        let fit = AVMakeRect(
-            aspectRatio: CGSize(width: Int(mode.width), height: Int(mode.height)),
-            insideRect: videoBounds)
-        guard fit.width > 0, fit.height > 0 else { return nil }
-        let videoMinYTop = bounds.height - fit.maxY
-        let u = (p.x - fit.minX) / fit.width
-        let v = (p.y - videoMinYTop) / fit.height
-        guard u >= 0, u <= 1, v >= 0, v <= 1 else { return nil } // letterbox bars
-        let hx = Int32((u * CGFloat(mode.width)).rounded()
-            .clamped(to: 0...CGFloat(mode.width - 1)))
-        let hy = Int32((v * CGFloat(mode.height)).rounded()
-            .clamped(to: 0...CGFloat(mode.height - 1)))
-        return HostPoint(x: hx, y: hy, w: mode.width, h: mode.height)
+        let boxTop = bounds.height - v.box.maxY
+        let px = CGPoint(
+            x: (inView.x - v.box.minX) * v.scale, y: (bounds.height - inView.y - boxTop) * v.scale)
+        guard v.placement.contains(view: px) else { return nil } // the bars
+        let f = v.placement.frame(fromView: px)
+        let hx = Int32(f.x.rounded().clamped(to: 0...CGFloat(v.width - 1)))
+        let hy = Int32(f.y.rounded().clamped(to: 0...CGFloat(v.height - 1)))
+        return HostPoint(x: hx, y: hy, w: v.width, h: v.height)
     }
 
     /// NSEvent `buttonNumber` → GameStream wire id for the "other" buttons: 2 = middle,
@@ -1041,6 +1037,7 @@ public final class StreamLayerView: NSView {
         // `videoBounds` is read on every mouse event — that belongs on layout, not on input.
         safeModePixels = window?.screen?.notchSafePixelSize
         presenter.layout(in: videoBounds, contentsScale: window?.backingScaleFactor ?? 1)
+        displayLayer.videoGravity = SessionPresenter.gravity
         // Present routing tracks the window's composited state (fullscreen transitions always
         // re-layout, so this stays current): a windowed session presents through a Core Animation
         // transaction — the DCP swapID kernel-panic mitigation (see SessionPresenter.setComposited).

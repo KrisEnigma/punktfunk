@@ -24,6 +24,8 @@ public struct EffectiveSettings: Equatable, Sendable {
     public var matchWindow = false
     public var bitrateKbps = 0
     public var renderScale = 1.0
+    /// A `VideoFit` raw value; unknown reads as fit.
+    public var videoFit = VideoFit.fit.rawValue
     public var codec = "auto"
     public var hdrEnabled = true
     public var compositor = 0
@@ -103,6 +105,7 @@ public struct EffectiveSettings: Equatable, Sendable {
         matchWindow = bool(DefaultsKey.matchWindow, matchWindow)
         bitrateKbps = int(DefaultsKey.bitrateKbps, bitrateKbps)
         renderScale = dbl(DefaultsKey.renderScale, renderScale)
+        videoFit = str(DefaultsKey.videoFit, videoFit)
         codec = str(DefaultsKey.codec, codec)
         hdrEnabled = bool(DefaultsKey.hdrEnabled, hdrEnabled)
         compositor = int(DefaultsKey.compositor, compositor)
@@ -190,6 +193,7 @@ public struct EffectiveSettings: Equatable, Sendable {
         if let v = overlay.matchWindow { s.matchWindow = v }
         if let v = overlay.bitrateKbps { s.bitrateKbps = v }
         if let v = overlay.renderScale { s.renderScale = v }
+        if let v = overlay.videoFit { s.videoFit = v }
         if let v = overlay.codec { s.codec = v }
         if let v = overlay.hdrEnabled { s.hdrEnabled = v }
         if let v = overlay.compositor { s.compositor = v }

@@ -100,6 +100,8 @@ public struct SettingsOverlay: Codable, Equatable, Sendable {
     public var matchWindow: Bool?
     public var bitrateKbps: Int?
     public var renderScale: Double?
+    /// A `VideoFit` raw value.
+    public var videoFit: String?
     public var codec: String?
     public var hdrEnabled: Bool?
     public var compositor: Int?
@@ -159,6 +161,7 @@ public struct SettingsOverlay: Codable, Equatable, Sendable {
         case matchWindow = "match_window"
         case bitrateKbps = "bitrate_kbps"
         case renderScale = "render_scale"
+        case videoFit = "video_fit"
         case codec
         case hdrEnabled = "hdr_enabled"
         case compositor
@@ -200,6 +203,7 @@ public struct SettingsOverlay: Codable, Equatable, Sendable {
         matchWindow = bool(.matchWindow)
         bitrateKbps = int(.bitrateKbps)
         renderScale = dbl(.renderScale)
+        videoFit = str(.videoFit)
         codec = str(.codec)
         hdrEnabled = bool(.hdrEnabled)
         compositor = int(.compositor)
@@ -243,6 +247,7 @@ public struct SettingsOverlay: Codable, Equatable, Sendable {
         try c.encodeIfPresent(matchWindow, forKey: AnyKey(Key.matchWindow.rawValue))
         try c.encodeIfPresent(bitrateKbps, forKey: AnyKey(Key.bitrateKbps.rawValue))
         try c.encodeIfPresent(renderScale, forKey: AnyKey(Key.renderScale.rawValue))
+        try c.encodeIfPresent(videoFit, forKey: AnyKey(Key.videoFit.rawValue))
         try c.encodeIfPresent(codec, forKey: AnyKey(Key.codec.rawValue))
         try c.encodeIfPresent(hdrEnabled, forKey: AnyKey(Key.hdrEnabled.rawValue))
         try c.encodeIfPresent(compositor, forKey: AnyKey(Key.compositor.rawValue))
@@ -304,6 +309,7 @@ public enum OverlayField {
         case "match_window": overlay.matchWindow = nil
         case "bitrate_kbps": overlay.bitrateKbps = nil
         case "render_scale": overlay.renderScale = nil
+        case "video_fit": overlay.videoFit = nil
         case "codec": overlay.codec = nil
         case "hdr_enabled": overlay.hdrEnabled = nil
         case "compositor": overlay.compositor = nil
@@ -347,6 +353,7 @@ public enum OverlayField {
         case "match_window": return o.matchWindow != nil
         case "bitrate_kbps": return o.bitrateKbps != nil
         case "render_scale": return o.renderScale != nil
+        case "video_fit": return o.videoFit != nil
         case "codec": return o.codec != nil
         case "hdr_enabled": return o.hdrEnabled != nil
         case "compositor": return o.compositor != nil

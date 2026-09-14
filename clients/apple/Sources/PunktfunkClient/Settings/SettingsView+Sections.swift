@@ -268,6 +268,14 @@ extension SettingsView {
     @ViewBuilder var qualitySection: some View {
         Section("Quality") {
             renderScaleRow
+            described("When the stream's shape differs from this screen. Fit shows the whole "
+                + "picture with black bars, Crop to fill cuts the edges off, Stretch to fill "
+                + "distorts it.", field: "video_fit") {
+                settingPicker(
+                    "Picture fit",
+                    options: VideoFit.allCases.map { (label: $0.label, tag: $0.rawValue) },
+                    selection: scoped(SettingsFields.videoFit))
+            }
             #if os(tvOS)
             tvBitrateRow
             #else
