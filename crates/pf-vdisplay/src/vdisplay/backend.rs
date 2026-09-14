@@ -160,6 +160,11 @@ impl VirtualOutput {
 pub trait VirtualDisplay: Send {
     /// Backend pin name (`"kwin"`, `"wlroots"`, `"mutter"`).
     fn name(&self) -> &'static str;
+    /// Compositor id of the PipeWire producer; the capture's per-producer contracts key on it.
+    /// Equal to [`name`](Self::name) except where a backend streams another compositor's head.
+    fn producer(&self) -> &'static str {
+        self.name()
+    }
     /// Create a virtual output of the given mode. Teardown is RAII: drop the returned
     /// [`VirtualOutput`]'s `keepalive`.
     fn create(&mut self, mode: Mode) -> Result<VirtualOutput>;

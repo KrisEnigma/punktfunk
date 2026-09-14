@@ -369,7 +369,8 @@ pub(super) fn build_pipeline(
         );
     }
     let effective_hz = pacing_hz(mode.refresh_hz, achieved_hz);
-    let cursor_id0_hides = vd.name() == pf_vdisplay::Compositor::Kwin.id();
+    // A mirrored KWin head is still KWin's stream: its id 0 hides the pointer.
+    let cursor_id0_hides = vd.producer() == pf_vdisplay::Compositor::Kwin.id();
     let producer_is_gamescope = vd.name() == pf_vdisplay::Compositor::Gamescope.id();
     let mut capturer = crate::capture::capture_virtual_output(
         vout,
