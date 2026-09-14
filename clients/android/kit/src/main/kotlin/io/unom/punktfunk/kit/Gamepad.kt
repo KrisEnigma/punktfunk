@@ -642,6 +642,11 @@ object Gamepad {
         val rightTrigger: Int = AXIS_NONE,
         /** Those trigger axes rest at −1 rather than 0, measured off the device's own range. */
         val triggersSigned: Boolean = false,
+        /**
+         * No trigger axis at all: the triggers arrive as BUTTON_L2/R2 keys, as a Switch Pro's
+         * ZL/ZR do under AOSP's layout. [AxisMapper.onTriggerKey] sends them full or released.
+         */
+        val digitalTriggers: Boolean = false,
     ) {
         /** One resolved trigger axis value, folded to the 0..1 the wire scale expects. */
         fun level(v: Float): Float = if (triggersSigned) (v + 1f) / 2f else v
@@ -740,8 +745,10 @@ object Gamepad {
      * The axis half of [padMap], decided from four facts about the device so it can be pinned
      * without one — see `PadButtonsTest`. [namedTriggers] is whether the pad calls its triggers
      * anything Android knows (LTRIGGER/RTRIGGER, BRAKE/GAS, BRAKE/THROTTLE); if it does, nothing
-     * here applies and the pad is read exactly as it always was. [restsNegative] is measured off
-     * whichever axis pair the fallback picks, never assumed.
+     * here applies and the pad is read exactly as it always was. A pad with neither those names nor
+     * an Rx/Ry pair has no trigger axis: Z/Rz is its right stick and its triggers are keys
+     * ([PadMap.digitalTriggers]). [restsNegative] is measured off whichever axis pair the fallback
+     * picks, never assumed.
      */
     fun padMap(
         buttons: PadButtons,
@@ -749,7 +756,8 @@ object Gamepad {
         hasRxRy: Boolean,
         restsNegative: Boolean,
     ): PadMap = when {
-        namedTriggers || !hasRxRy -> PadMap(buttons)
+        namedTriggers -> PadMap(buttons)
+        !hasRxRy -> PadMap(buttons, digitalTriggers = true)
         // X, Y, Z, Rz, Rx, Ry = left stick, right stick, triggers. The sticks already read right.
         buttons == PadButtons.GENERIC_SONY -> PadMap(
             buttons,
@@ -823,15 +831,15 @@ object Gamepad {
             sendAxis(AXIS_RS_X, stick(event.getAxisValue(map.rightStickX)))
             sendAxis(AXIS_RS_Y, stick(-event.getAxisValue(map.rightStickY)))
 
-            // Triggers: pads report LTRIGGER/RTRIGGER or BRAKE/GAS (some mirror both) — merge
-            // with max, the same fold as the Controllers screen probe, so a pad that reports
-            // only one pair and a pad that reports both behave identically; 0..1 → 0..255. A pad
-            // reporting NONE of those names is one Android has no key layout for, and [map]
-            // carries the raw axes its triggers really landed on instead.
-            val lt = resolved(event, map.leftTrigger, MotionEvent.AXIS_LTRIGGER, MotionEvent.AXIS_BRAKE)
-            val rt = resolved(event, map.rightTrigger, MotionEvent.AXIS_RTRIGGER, MotionEvent.AXIS_GAS)
-            sendAxis(AXIS_LT, trigger(lt))
-            sendAxis(AXIS_RT, trigger(rt))
+            // Triggers: LTRIGGER/RTRIGGER and BRAKE/GAS merge by max (as the Controllers screen
+            // probe does); 0..1 → 0..255. [map] carries an unmapped pad's raw trigger axes. A pad
+            // with none sends its triggers as keys ([onTriggerKey]); reading 0 here would undo them.
+            if (!map.digitalTriggers) {
+                val lt = resolved(event, map.leftTrigger, MotionEvent.AXIS_LTRIGGER, MotionEvent.AXIS_BRAKE)
+                val rt = resolved(event, map.rightTrigger, MotionEvent.AXIS_RTRIGGER, MotionEvent.AXIS_GAS)
+                sendAxis(AXIS_LT, trigger(lt))
+                sendAxis(AXIS_RT, trigger(rt))
+            }
 
             // HAT → dpad button transitions. Android BATCHES joystick ACTION_MOVEs, so a rapid d-pad
             // tap (press+release inside one batch window) lives only in the historical samples — the
@@ -850,6 +858,10 @@ object Gamepad {
                 sign(event.getAxisValue(MotionEvent.AXIS_HAT_Y)),
             )
         }
+
+        /** One L2/R2 key edge from a [PadMap.digitalTriggers] pad: a full pull or none. */
+        fun onTriggerKey(left: Boolean, down: Boolean) =
+            sendAxis(if (left) AXIS_LT else AXIS_RT, if (down) 255 else 0)
 
         /** Emit dpad button deltas for one HAT sample (`hx`/`hy` each −1/0/+1), tracking held state. */
         private fun applyHat(hx: Int, hy: Int) {
