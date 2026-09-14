@@ -63,6 +63,10 @@ pub struct GamescopeDisplay {
     /// This acquire spawned gamescope, so `cmd` is already its primary child. A keep-alive reuse
     /// leaves it `false` and the session must launch into the live compositor instead.
     spawned_nested_launch: bool,
+    /// `mode_conflict: join` admitted this session.
+    join_live: bool,
+    /// Seat key of the last bare spawn (`gamescope-N`), which names it for a joiner.
+    join_name: Option<String>,
 }
 
 /// Mode + HDR the managed session was launched at. HDR is in the reuse key: gamescope cannot
@@ -460,6 +464,29 @@ impl VirtualDisplay for GamescopeDisplay {
         gamescope_node_present(node_id)
     }
 
+    fn set_join_live(&mut self, on: bool) {
+        self.join_live = on;
+    }
+
+    fn join_live(&self) -> bool {
+        self.join_live
+    }
+
+    fn last_join_name(&self) -> Option<crate::backend::JoinName> {
+        self.join_name
+            .clone()
+            .map(|n| std::sync::Arc::new(std::sync::OnceLock::from(n)))
+    }
+
+    /// Gamescope publishes one PipeWire stream per spawn, so a joiner is its second consumer.
+    fn join_cast(
+        &mut self,
+        _name: &str,
+        node_id: u32,
+    ) -> Result<Option<crate::backend::SessionCastParts>> {
+        Ok(Some((node_id, None, Box::new(()))))
+    }
+
     fn create(&mut self, mode: Mode) -> Result<VirtualOutput> {
         // This session's route — never the process env, or a second connect retargets this one.
         let (session_env, node_env) = match self.route.clone() {
@@ -472,6 +499,14 @@ impl VirtualDisplay for GamescopeDisplay {
         let exclusive =
             crate::effective_topology(self.client_fp) == crate::policy::Topology::Exclusive;
         if let Some(client) = session_env {
+            // A joiner shares the running session. Relaunching it at another mode or HDR would
+            // end the owner's stream.
+            if self.join_live && !managed_session_matches(mode, self.hdr) {
+                bail!(
+                    "join the running gamescope session: it runs at another mode or HDR, and \
+                     relaunching it would end the owner's stream"
+                );
+            }
             let out = create_managed_session(&client, mode, self.hdr)?;
             // Idling autologin leaves the CRTC configured. The hold cannot ride `pending_restore`:
             // this route is `SessionManaged`, so the registry never picks it up. Release is
@@ -583,6 +618,7 @@ impl VirtualDisplay for GamescopeDisplay {
         // every discovery then falls back to unscoped, which is what it did before seats.
         out.seat = wayland_name_from_log(&log);
         out.pid = Some(pid);
+        self.join_name = out.seat.clone();
         tracing::info!(
             node_id,
             seat = out.seat.as_deref().unwrap_or("-"),
@@ -746,6 +782,20 @@ fn create_managed_session(client: &str, mode: Mode, hdr: bool) -> Result<Virtual
         "gamescope session: launched gamescope-session-plus at the client's mode"
     );
     Ok(managed_output(node_id, mode))
+}
+
+/// Whether the tracked managed session runs at `mode` and `hdr`, so a `join` session can share it.
+fn managed_session_matches(mode: Mode, hdr: bool) -> bool {
+    MANAGED_SESSION
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .is_some_and(|s| {
+            s.width == mode.width
+                && s.height == mode.height
+                && s.refresh_hz == mode.refresh_hz
+                && s.hdr == hdr
+        })
 }
 
 /// Box-level session: restore is this module's (`schedule_restore_tv_session`), so

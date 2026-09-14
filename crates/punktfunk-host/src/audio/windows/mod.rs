@@ -44,6 +44,7 @@ pub(super) fn open_audio_capture_named(
     channels: u32,
     rate_hz: u32,
     _sink: Option<&str>,
+    _tap: bool,
 ) -> Result<Box<dyn AudioCapturer>> {
     open_audio_capture(channels, rate_hz)
 }

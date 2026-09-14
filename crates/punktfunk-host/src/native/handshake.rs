@@ -295,6 +295,8 @@ pub(super) async fn negotiate(
     // Gamescope sub-mode as a value, not process env — a concurrent connect would overwrite env.
     Option<crate::vdisplay::GamescopeRoute>,
     Option<super::stream::PrepHandle>,
+    // Admitted by `mode_conflict: join`: the owner's display, which this session shares.
+    Option<crate::vdisplay::admission::LiveDisplay>,
 )> {
     let mut hello = Hello::decode(first).map_err(|e| anyhow!("Hello decode: {e:?}"))?;
     if hello.abi_version != punktfunk_core::WIRE_VERSION {
@@ -354,6 +356,7 @@ pub(super) async fn negotiate(
 
     // Mode-conflict before Welcome. Same-client reconnect never conflicts. This session
     // registers in the live set only once its data plane is up, so a later client can steal it.
+    let mut joined = None;
     {
         use crate::vdisplay::admission::{admit, preempt_same_identity, Admission};
         let peer_fp = conn.peer_fingerprint();
@@ -375,7 +378,7 @@ pub(super) async fn negotiate(
 
         match admit(peer_fp) {
             Admission::Separate => {}
-            Admission::Join(m) => {
+            Admission::Join(m, display) => {
                 tracing::info!(
                     requested =
                         %format_args!("{}x{}@{}", hello.mode.width, hello.mode.height, hello.mode.refresh_hz),
@@ -385,6 +388,16 @@ pub(super) async fn negotiate(
                 hello.mode.width = m.0;
                 hello.mode.height = m.1;
                 hello.mode.refresh_hz = m.2;
+                // On gamescope the owner's game is the shared screen; this client's own title
+                // would land in it.
+                if display.compositor == Some(crate::vdisplay::Compositor::Gamescope)
+                    && hello.launch.take().is_some()
+                {
+                    tracing::info!(
+                        "mode-conflict: JOIN — this client's launch dropped; it shares the owner's game"
+                    );
+                }
+                joined = Some(display);
             }
             Admission::Steal(victims) => {
                 tracing::info!(
@@ -411,7 +424,15 @@ pub(super) async fn negotiate(
         .context("client-requested mode")?;
     crate::encode::validate_refresh(hello.mode.refresh_hz).context("client-requested mode")?;
 
-    let (compositor, gamescope_route) = negotiate_compositor(source, &hello).await?;
+    let (mut compositor, mut gamescope_route) = negotiate_compositor(source, &hello).await?;
+    // A joiner streams the owner's display, so it runs on the owner's compositor and route.
+    if let Some(d) = joined
+        .as_ref()
+        .filter(|d: &&crate::vdisplay::admission::LiveDisplay| d.compositor.is_some())
+    {
+        compositor = d.compositor;
+        gamescope_route = d.route.clone();
+    }
 
     // Library launch is resolved after Welcome into `SessionContext.launch`. Do not write
     // `PUNKTFUNK_GAMESCOPE_APP`: process env races concurrent sessions and only gamescope's bare spawn reads it.
@@ -722,6 +743,7 @@ pub(super) async fn negotiate(
         compositor,
         gamescope_route,
         prep,
+        joined,
     ))
 }
 

@@ -31,6 +31,13 @@ pub(crate) struct MirrorStream {
     pub keepalive: Box<dyn Send>,
 }
 
+impl MirrorStream {
+    /// This stream as a session cast ([`VirtualDisplay::join_cast`]).
+    pub(crate) fn into_cast(self) -> super::backend::SessionCastParts {
+        (self.node_id, self.remote_fd, self.keepalive)
+    }
+}
+
 /// Streams an existing monitor, named by connector.
 pub struct MirrorDisplay {
     compositor: Compositor,

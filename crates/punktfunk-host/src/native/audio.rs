@@ -137,6 +137,7 @@ impl NativeAudioEnc {
 ///
 /// `plane` is the format `Welcome` stated — read back by the caller, never recomputed, so
 /// the promised wire and the sent wire cannot disagree.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn audio_thread(
     conn: super::link::SessionLink,
     stop: Arc<AtomicBool>,
@@ -148,6 +149,8 @@ pub(super) fn audio_thread(
     // the shared park slot. A parked shared capturer has the wrong sink; parking an isolated
     // one would hand this session's name to the next. `None` = shared path. Linux-only.
     sink: Option<String>,
+    // A `join` session taps the owner's sink instead of minting a second one of that name.
+    tap: bool,
 ) {
     use crate::audio::SAMPLE_RATE;
     const FRAME_MS: usize = 5;
@@ -213,7 +216,8 @@ pub(super) fn audio_thread(
         }
         prev => {
             drop(prev);
-            match crate::audio::open_audio_capture_named(want as u32, rate_hz, sink.as_deref()) {
+            match crate::audio::open_audio_capture_named(want as u32, rate_hz, sink.as_deref(), tap)
+            {
                 Ok(c) => Some(c),
                 Err(e) => {
                     tracing::warn!(error = %format!("{e:#}"), "punktfunk/1 audio failed to open — retrying in the background until it comes up");
@@ -335,7 +339,8 @@ pub(super) fn audio_thread(
                 std::thread::sleep(std::time::Duration::from_millis(200));
                 continue;
             }
-            match crate::audio::open_audio_capture_named(want as u32, rate_hz, sink.as_deref()) {
+            match crate::audio::open_audio_capture_named(want as u32, rate_hz, sink.as_deref(), tap)
+            {
                 Ok(c) => {
                     tracing::info!("punktfunk/1 audio capture reopened");
                     capturer = Some(c);

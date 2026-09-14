@@ -5,7 +5,8 @@
 //! mid-build failure:
 //!
 //! * `separate` — fresh display at the requested mode (Linux default).
-//! * `join` — admit at the live display's mode (Welcome carries the real mode).
+//! * `join` — admit onto the live display: its mode, compositor and route
+//!   (Welcome carries the real mode).
 //! * `steal` — signal victim stop flags, wait the release grace, then serve.
 //! * `reject` — handshake error naming the live mode and client.
 //!
@@ -17,6 +18,16 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::policy::{self, ModeConflict};
 
+/// The display a live session streams, which a `join` session takes as its own.
+#[derive(Clone, Debug, Default)]
+pub struct LiveDisplay {
+    pub compositor: Option<crate::Compositor>,
+    pub route: Option<crate::GamescopeRoute>,
+    /// The owner's isolated planes (`design/gamescope-multiuser.md`): a joiner reads its input
+    /// relay and taps its sink.
+    pub isolation: Option<crate::SessionIsolation>,
+}
+
 #[derive(Clone)]
 pub struct LiveSession {
     id: u64,
@@ -27,13 +38,15 @@ pub struct LiveSession {
     pub stop: Arc<AtomicBool>,
     /// Client label interpolated into `reject` messages.
     pub label: String,
+    pub display: LiveDisplay,
 }
 
 #[derive(Debug)]
 pub enum Admission {
     Separate,
-    /// Admit at this live mode; Welcome must carry it, not the request.
-    Join((u32, u32, u32)),
+    /// Admit at this live mode onto the owner's display; Welcome must carry the mode, not the
+    /// request.
+    Join((u32, u32, u32), LiveDisplay),
     /// Victim stop flags; caller signals them and waits the release grace.
     Steal(Vec<Arc<AtomicBool>>),
     Reject(String),
@@ -71,7 +84,7 @@ pub fn decide(
     match conflict {
         ModeConflict::Separate => Admission::Separate,
         // Oldest other session: the established primary the desktop is built on.
-        ModeConflict::Join => Admission::Join(others[0].mode),
+        ModeConflict::Join => Admission::Join(others[0].mode, others[0].display.clone()),
         ModeConflict::Steal => {
             Admission::Steal(others.iter().map(|s| Arc::clone(&s.stop)).collect())
         }
@@ -187,13 +200,14 @@ pub fn preempt_same_identity(req_identity: Option<[u8; 32]>) -> Vec<Arc<AtomicBo
 }
 
 /// Register an admitted session; the guard removes it on drop. Call after
-/// [`admit`] (so a session never conflicts with itself) once mode and stop
-/// are known.
+/// [`admit`] (so a session never conflicts with itself) once mode, stop and
+/// display are known.
 pub fn register(
     identity: Option<[u8; 32]>,
     mode: (u32, u32, u32),
     stop: Arc<AtomicBool>,
     label: String,
+    display: LiveDisplay,
 ) -> LiveGuard {
     let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
     table().lock().unwrap().push(LiveSession {
@@ -202,6 +216,7 @@ pub fn register(
         mode,
         stop,
         label,
+        display,
     });
     LiveGuard { id }
 }
@@ -231,6 +246,7 @@ mod tests {
             mode,
             stop: Arc::new(AtomicBool::new(false)),
             label: "peer".into(),
+            display: LiveDisplay::default(),
         }
     }
     fn fp(n: u8) -> Option<[u8; 32]> {
@@ -273,7 +289,7 @@ mod tests {
         ));
         assert!(matches!(
             decide(ModeConflict::Join, fp(2), &live),
-            Admission::Join((2560, 1440, 60))
+            Admission::Join((2560, 1440, 60), _)
         ));
         assert!(matches!(
             decide(ModeConflict::Steal, fp(2), &live),
@@ -307,13 +323,16 @@ mod tests {
 
     #[test]
     fn join_targets_the_oldest_other_session() {
-        let live = [
-            sess(Some(1), (3840, 2160, 60)),
-            sess(Some(2), (1280, 720, 120)),
-        ];
-        assert!(matches!(
-            decide(ModeConflict::Join, fp(3), &live),
-            Admission::Join((3840, 2160, 60))
-        ));
+        let mut owner = sess(Some(1), (3840, 2160, 60));
+        owner.display.compositor = Some(crate::Compositor::Gamescope);
+        owner.display.route = Some(crate::GamescopeRoute::Spawn);
+        let live = [owner, sess(Some(2), (1280, 720, 120))];
+        let Admission::Join(mode, display) = decide(ModeConflict::Join, fp(3), &live) else {
+            panic!("join policy must admit onto the live display");
+        };
+        assert_eq!(mode, (3840, 2160, 60));
+        // The joiner takes the owner's display, not only its mode.
+        assert_eq!(display.compositor, Some(crate::Compositor::Gamescope));
+        assert_eq!(display.route, Some(crate::GamescopeRoute::Spawn));
     }
 }

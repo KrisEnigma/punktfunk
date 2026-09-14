@@ -8,9 +8,9 @@
 //!
 //! Linux: a per-session pool driven by [`super::lifecycle`]. Capture on the
 //! default PipeWire daemon (`remote_fd == None`) stays alive with the keepalive;
-//! reconnect re-attaches to the same `node_id`. Hyprland lingers the named head
-//! and recasts ScreenCast by name; wlroots (`remote_fd == Some`) cannot re-open
-//! the portal fd, so it stays teardown-on-drop.
+//! reconnect re-attaches to the same `node_id`. Hyprland and sway linger the
+//! named head and recast ScreenCast by name. A `mode_conflict: join` session holds
+//! a live display with its own cast (`VirtualDisplay::join_cast`).
 //!
 //! [`acquire`] returns a `VirtualOutput` whose `keepalive` is a generation-stamped
 //! `DisplayLease`. Dropping it releases the registry refcount; the lifecycle
@@ -177,8 +177,8 @@ pub fn release(slot: Option<u64>) -> usize {
 
 /// Tear down a reused-but-dead pool entry by generation. The pipeline builder
 /// calls this when the first frame fails on a REUSED [`acquire`] so the next
-/// acquire creates fresh. No-op off Linux or if already gone; the later
-/// stale-generation lease drop no-ops too.
+/// acquire creates fresh. No-op off Linux, if already gone (the later
+/// stale-generation lease drop no-ops too), or while another session holds it.
 pub fn mark_failed(generation: u64) {
     #[cfg(target_os = "linux")]
     linux::mark_failed(generation);
@@ -263,6 +263,9 @@ mod pool {
         /// Compositor output name ([`VirtualOutput::output_name`]). Kept across
         /// reuse so the reused head answers with the same name as a fresh create.
         pub(super) output_name: Option<String>,
+        /// What a `mode_conflict: join` session casts to share this display
+        /// (`VirtualDisplay::join_cast`). Unset until the backend knows it.
+        pub(super) join_name: Option<crate::backend::JoinName>,
         pub(super) mode: Mode,
         pub(super) backend: &'static str,
         /// Identity slot at create (`None` = anonymous). Kept across reuse; keys
@@ -331,6 +334,29 @@ mod pool {
             })
             .map(|e| e.generation)
             .collect()
+    }
+
+    /// Live display a `mode_conflict: join` session shares: Active, same backend, mode,
+    /// isolation, colourimetry and epoch, and its join name known. The first match is the
+    /// oldest, which is the session admission named. The cursor mode rides each session's
+    /// own cast, so it is not a key.
+    pub(super) fn join_target(
+        entries: &[Entry],
+        backend: &str,
+        mode: Mode,
+        isolation: &Option<String>,
+        hdr: bool,
+        cur_epoch: u64,
+    ) -> Option<usize> {
+        entries.iter().position(|e| {
+            matches!(e.life, lifecycle::State::Active { .. })
+                && e.backend == backend
+                && e.mode == mode
+                && e.isolation == *isolation
+                && e.hdr == hdr
+                && epoch_matches(e.backend, e.epoch, cur_epoch)
+                && e.join_name.as_ref().is_some_and(|n| n.get().is_some())
+        })
     }
 
     /// Display group: one per desktop compositor backend. Each gamescope spawn
@@ -560,6 +586,7 @@ mod pool {
                 node_id: 0,
                 preferred_mode: None,
                 output_name: None,
+                join_name: None,
                 mode: Mode {
                     width: 1920,
                     height: 1080,
@@ -627,6 +654,48 @@ mod pool {
                 Linger::For(Duration::from_secs(10))
             );
             assert_eq!(effective_linger(false, Linger::Forever), Linger::Forever);
+        }
+
+        #[test]
+        fn join_shares_only_a_live_named_display_at_the_same_mode() {
+            let m = Mode {
+                width: 1920,
+                height: 1080,
+                refresh_hz: 60,
+            };
+            let live = |generation, name: Option<&str>| {
+                let mut e = test_entry("hyprland", generation, None);
+                e.life.acquire();
+                e.join_name = name.map(|n| Arc::new(std::sync::OnceLock::from(n.to_string())));
+                e
+            };
+            let mut kept = live(1, Some("PF-1-1"));
+            kept.life.release(Instant::now(), Linger::Forever);
+            // Mutter names its monitor after `create` returns.
+            let mut naming = live(3, None);
+            naming.join_name = Some(Arc::new(std::sync::OnceLock::new()));
+            let pool = vec![
+                kept,
+                live(2, None),
+                naming,
+                live(4, Some("PF-1-4")),
+                live(5, Some("PF-1-5")),
+            ];
+            assert_eq!(join_target(&pool, "hyprland", m, &None, false, 0), Some(3));
+            pool[2]
+                .join_name
+                .as_ref()
+                .unwrap()
+                .set("Meta-0".into())
+                .unwrap();
+            assert_eq!(join_target(&pool, "hyprland", m, &None, false, 0), Some(2));
+            let other = Mode { width: 1280, ..m };
+            assert_eq!(join_target(&pool, "hyprland", other, &None, false, 0), None);
+            let iso = Some("seat-2".to_string());
+            assert_eq!(join_target(&pool, "hyprland", m, &iso, false, 0), None);
+            assert_eq!(join_target(&pool, "hyprland", m, &None, true, 0), None);
+            assert_eq!(join_target(&pool, "hyprland", m, &None, false, 1), None);
+            assert_eq!(join_target(&pool, "kwin", m, &None, false, 0), None);
         }
 
         #[test]
@@ -933,8 +1002,8 @@ mod linux {
 
     use super::pool::{
         assemble_displays, assign_group_ids, effective_linger, epoch_matches, group_key,
-        hand_off_restore, in_group, kept_to_retire, position_for_new, take_expired, Entry, Restore,
-        Row,
+        hand_off_restore, in_group, join_target, kept_to_retire, position_for_new, take_expired,
+        Entry, Restore, Row,
     };
     use super::DisplayInfo;
     use crate::lifecycle::{self, Release};
@@ -1102,6 +1171,13 @@ mod linux {
         drop(expired);
         emit_released(reaped);
 
+        // Before linger reuse: admission named a live session, so share its display.
+        if vd.join_live() {
+            if let Some(out) = join_live(vd, backend, mode, &isolation, cur_epoch, &quit) {
+                return Ok(out);
+            }
+        }
+
         // Gated on `poolable_now()`: gamescope managed/attach shares the
         // `"gamescope"` name with a bare spawn and must not reuse it.
         if vd.poolable_now() {
@@ -1243,8 +1319,8 @@ mod linux {
         };
         vd.set_first_in_group(first_in_group);
 
-        // Not under the lock: `vd.create` blocks and spawns threads. Hyprland
-        // parks the fresh ScreenCast for the session attachment below; direct
+        // Not under the lock: `vd.create` blocks and spawns threads. Hyprland and
+        // sway park the fresh ScreenCast for the session attachment below; direct
         // `create` callers still receive a complete output.
         vd.set_session_cast_handoff(true);
         let real = vd.create(mode);
@@ -1254,8 +1330,8 @@ mod linux {
 
         // Pool only `Owned` with no portal fd on the output. Pass through
         // `External`/`SessionManaged` (gamescope owns those; pooling wedges on
-        // a stale node) and `remote_fd = Some` (wlroots cannot reopen the fd).
-        // Hyprland leaves the fd off so this arm pools the named head.
+        // a stale node) and `remote_fd = Some` (a portal fd cannot be reopened).
+        // Hyprland and sway leave the fd off so this arm pools the named head.
         if real.ownership != crate::DisplayOwnership::Owned || real.remote_fd.is_some() {
             tracing::debug!(
                 backend,
@@ -1268,6 +1344,11 @@ mod linux {
         let node_id = real.node_id;
         let preferred_mode = real.preferred_mode;
         let output_name = real.output_name.clone();
+        // KWin and Mutter report their cast name apart from `output_name`, which drives
+        // input aiming and direct capture. The rest cast by the output name.
+        let join_name = vd
+            .last_join_name()
+            .or_else(|| output_name.clone().map(|n| Arc::new(OnceLock::from(n))));
         // Fresh create may start at a sacrificial mode (KWin >60 Hz) that must
         // renegotiate before frames count. Reuse already did; leave the flag off.
         let expect_exact_dims = real.expect_exact_dims;
@@ -1282,6 +1363,7 @@ mod linux {
             node_id,
             preferred_mode,
             output_name: output_name.clone(),
+            join_name,
             mode,
             backend,
             identity_slot,
@@ -1352,18 +1434,76 @@ mod linux {
         }
     }
 
-    /// Hyprland: attach a session-scoped ScreenCast (pending from `create`, or
-    /// a recast on reconnect). Other backends return `None` and leave `out`.
+    /// `mode_conflict: join`: take a hold on the [`join_target`] and give this session its
+    /// own cast of it (`VirtualDisplay::join_cast`). The generation is not re-stamped, so the
+    /// owner's lease still releases it. `None` means nothing to join or no cast, and the
+    /// caller creates. Dropping the output on that path gives the hold back.
+    fn join_live(
+        vd: &mut Box<dyn VirtualDisplay>,
+        backend: &'static str,
+        mode: Mode,
+        isolation: &Option<String>,
+        cur_epoch: u64,
+        quit: &Arc<AtomicBool>,
+    ) -> Option<VirtualOutput> {
+        let (out, name, node_id) = {
+            let mut es = reg().entries.lock().unwrap();
+            let idx = join_target(&es, backend, mode, isolation, vd.hdr(), cur_epoch)?;
+            let e = &mut es[idx];
+            let name = e.join_name.as_ref()?.get()?.clone();
+            e.life.acquire();
+            tracing::info!(
+                backend,
+                output = %name,
+                node_id = e.node_id,
+                "mode-conflict: JOIN — sharing the live display"
+            );
+            let out = output_for(
+                e.node_id,
+                e.preferred_mode,
+                e.output_name.clone(),
+                e.seat.clone(),
+                e.generation,
+                quit.clone(),
+                true,
+            );
+            (out, name, e.node_id)
+        };
+        match vd.join_cast(&name, node_id) {
+            Ok(Some(parts)) => Some(with_cast(out, parts)),
+            Ok(None) => None,
+            Err(e) => {
+                tracing::warn!(
+                    backend,
+                    error = %format!("{e:#}"),
+                    "live display join cast did not start — creating this session's own display"
+                );
+                None
+            }
+        }
+    }
+
+    /// Hyprland and sway: attach a session-scoped ScreenCast (pending from `create`, or a
+    /// recast on reconnect). Other backends return `None` and leave `out`.
     fn attach_session_cast(
         vd: &mut Box<dyn VirtualDisplay>,
-        mut out: VirtualOutput,
+        out: VirtualOutput,
     ) -> Result<VirtualOutput> {
         let Some(name) = out.output_name.clone() else {
             return Ok(out);
         };
-        let Some((node_id, fd, cast)) = vd.session_cast_for(&name)? else {
-            return Ok(out);
-        };
+        Ok(match vd.session_cast_for(&name)? {
+            Some(parts) => with_cast(out, parts),
+            None => out,
+        })
+    }
+
+    /// Put a session cast on `out`: its node and fd, and a keepalive that closes the cast
+    /// before the lease drops.
+    fn with_cast(
+        mut out: VirtualOutput,
+        (node_id, fd, cast): crate::backend::SessionCastParts,
+    ) -> VirtualOutput {
         out.node_id = node_id;
         out.remote_fd = fd;
         let lease = std::mem::replace(&mut out.keepalive, Box::new(()));
@@ -1371,7 +1511,7 @@ mod linux {
             _cast: cast,
             _lease: lease,
         });
-        Ok(out)
+        out
     }
 
     /// Drop order: close ScreenCast, then the registry lease (linger vs teardown).
@@ -1417,7 +1557,7 @@ mod linux {
                     );
                     (None, None)
                 }
-                // Linux entries are single-session (refs == 1), so Decref never occurs; harmless.
+                // A JOIN session left a shared display; another session still holds it.
                 Release::Decref => (None, None),
             }
         };
@@ -1583,6 +1723,10 @@ mod linux {
             let Some(idx) = es.iter().position(|e| e.generation == generation) else {
                 return; // already gone — the subsequent stale-generation lease drop no-ops too
             };
+            // Another session still streams it (JOIN), so it is not dead. The lease drop decrefs.
+            if matches!(es[idx].life, lifecycle::State::Active { refs } if refs > 1) {
+                return;
+            }
             let mut e = es.remove(idx);
             let (backend, g) = (e.backend, e.generation);
             let restore = hand_off_restore(&mut es, backend, g, e.topology_restore.take());

@@ -86,6 +86,10 @@ pub struct KwinDisplay {
     pending_restore: Option<Box<dyn FnOnce() + Send>>,
     /// Cursor-channel session: METADATA at creation; otherwise EMBEDDED.
     hw_cursor: bool,
+    /// `mode_conflict: join` admitted this session.
+    join_live: bool,
+    /// `wl_output.name` of the last `create` (`Virtual-<name>`), which a joiner streams.
+    join_name: Option<String>,
 }
 
 impl Drop for KwinDisplay {
@@ -204,6 +208,32 @@ impl VirtualDisplay for KwinDisplay {
         self.hw_cursor
     }
 
+    fn set_join_live(&mut self, on: bool) {
+        self.join_live = on;
+    }
+
+    fn join_live(&self) -> bool {
+        self.join_live
+    }
+
+    fn last_join_name(&self) -> Option<crate::backend::JoinName> {
+        self.join_name
+            .clone()
+            .map(|n| Arc::new(std::sync::OnceLock::from(n)))
+    }
+
+    /// A second `zkde_screencast` stream of the owner's output. The output lives as long as
+    /// the owner's stream, which the registry entry holds.
+    fn join_cast(
+        &mut self,
+        name: &str,
+        _node_id: u32,
+    ) -> Result<Option<crate::backend::SessionCastParts>> {
+        Ok(Some(
+            stream_existing_output(name, self.hw_cursor)?.into_cast(),
+        ))
+    }
+
     fn apply_position(&mut self, x: i32, y: i32) {
         // Address OUR output by its stable UUID over kde_output_management_v2. A name
         // would hit a superseded sibling still alive.
@@ -244,6 +274,7 @@ impl VirtualDisplay for KwinDisplay {
         // resolves. The bare `name` we give KWin matches no output.
         let our_prefix = format!("Virtual-{name}");
         self.last_name = Some(our_prefix.clone());
+        self.join_name = Some(our_prefix.clone());
         // A supersede keeps this `KwinDisplay` while the predecessor is still alive.
         // A stale UUID still resolves: `set_position` would move the old output and
         // report success. Re-set below only if the in-process path handles us.

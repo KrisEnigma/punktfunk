@@ -141,6 +141,8 @@ pub struct HyprlandDisplay {
     /// The registry requests a split output/cast lifetime around `create`.
     /// Direct callers keep the portal fd and cast on their returned output.
     handoff_cast: bool,
+    /// `mode_conflict: join`: the registry shares a live head and casts it for this session.
+    join_live: bool,
 }
 
 impl Drop for HyprlandDisplay {
@@ -168,6 +170,7 @@ impl HyprlandDisplay {
             prev_output: None,
             pending_cast: None,
             handoff_cast: false,
+            join_live: false,
         })
     }
 
@@ -273,6 +276,22 @@ impl VirtualDisplay for HyprlandDisplay {
     /// topology be resolved from inside it (§6.1).
     fn set_client_identity(&mut self, fingerprint: Option<[u8; 32]>) {
         self.client_fp = fingerprint;
+    }
+
+    fn set_join_live(&mut self, on: bool) {
+        self.join_live = on;
+    }
+
+    fn join_live(&self) -> bool {
+        self.join_live
+    }
+
+    /// Kept out of [`casts`]: that map holds one cast per name, and a joiner must not close
+    /// the owner's.
+    fn join_cast(&mut self, name: &str, _node_id: u32) -> Result<Option<SessionCastParts>> {
+        let stream = stream_existing_output(name, self.hw_cursor)?;
+        self.last_cursor_mode = stream.cursor_mode;
+        Ok(Some(stream.into_cast()))
     }
 
     fn name(&self) -> &'static str {

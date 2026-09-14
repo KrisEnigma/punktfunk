@@ -72,6 +72,7 @@ impl StreamState {
         let rebuilt = (|| -> Result<(Box<dyn crate::vdisplay::VirtualDisplay>, Pipeline)> {
             let mut new_vd = crate::vdisplay::open(sw.compositor)?;
             new_vd.set_gamescope_route(switched_route.clone());
+            new_vd.set_join_live(self.join_live);
             #[cfg(target_os = "linux")]
             new_vd.set_session_isolation(self.isolation.clone());
             let pipe = build_pipeline_with_retry(
@@ -442,6 +443,7 @@ impl StreamState {
             }
         }
         self.vd.set_gamescope_route(rebuilt_route.clone());
+        self.vd.set_join_live(self.join_live);
         #[cfg(target_os = "linux")]
         self.vd.set_session_isolation(self.isolation.clone());
     }

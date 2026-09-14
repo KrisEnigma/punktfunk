@@ -1452,7 +1452,7 @@ pub(crate) async fn run_admitted(
         });
     }
 
-    let (hello, welcome, udp_port, data_sock, start, compositor, gamescope_route, prep) =
+    let (hello, welcome, udp_port, data_sock, start, compositor, gamescope_route, prep, joined) =
         tokio::time::timeout(
             HANDSHAKE_TIMEOUT,
             handshake::negotiate(
@@ -1474,10 +1474,13 @@ pub(crate) async fn run_admitted(
         .await
         .map_err(|_| anyhow!("handshake timed out after {HANDSHAKE_TIMEOUT:?}"))??;
     let (ctrl_send, ctrl_recv) = (send, recv);
+    let join_live = joined.is_some();
+    let gamescope_hold =
+        (compositor == Some(crate::vdisplay::Compositor::Gamescope)).then(GamescopeHold::new);
     // Live reconfigure is off for gamescope (resize must not relaunch the title),
-    // `identity: per-client-mode` (resize would resolve a different slot), and a
-    // monitor mirror (physical head ignores the requested mode). Synthetic stays on.
-    // Captured once here.
+    // `identity: per-client-mode` (resize would resolve a different slot), a monitor
+    // mirror (physical head ignores the requested mode) and a `join` session (the mode
+    // is the owner's). Synthetic stays on. Captured once here.
     let live_reconfig_ok = {
         let per_client_mode_identity = crate::vdisplay::policy::prefs()
             .configured_effective()
@@ -1488,7 +1491,7 @@ pub(crate) async fn run_admitted(
         let mirrored = crate::vdisplay::capture_monitor().is_some();
         #[cfg(not(target_os = "linux"))]
         let mirrored = false;
-        reconfig_allowed(compositor, per_client_mode_identity, mirrored)
+        reconfig_allowed(compositor, per_client_mode_identity, mirrored || join_live)
     };
     // `Copy` so the control task's `async move` and SessionContext both keep it.
     let codec = crate::encode::codec_from_wire(welcome.codec);
@@ -1671,23 +1674,34 @@ pub(crate) async fn run_admitted(
     // so keep-alive hands a kept spawn back to the same client. Minted after handshake, before
     // the input/audio threads (`compositor::session_is_isolated`).
     #[cfg(target_os = "linux")]
-    let isolation: Option<crate::vdisplay::SessionIsolation> = compositor
-        .filter(|c| compositor::session_is_isolated(*c, gamescope_route.as_ref()))
-        .map(|_| {
-            // `--open` has no fingerprint; a per-accept sequence isolates at the cost of keep-alive.
-            static ANON_SEQ: AtomicU64 = AtomicU64::new(0);
-            let id = session_fp_hex
-                .as_deref()
-                .map(|fp| fp[..fp.len().min(8)].to_string())
-                .unwrap_or_else(|| format!("anon{}", ANON_SEQ.fetch_add(1, Ordering::Relaxed)));
-            // Monitor-mode has no per-session sink — audio stays shared; input/mic still isolate.
-            let sink = crate::audio::per_session_sink_possible()
-                .then(|| format!("punktfunk-speaker-iso-{id}"));
-            let mic_source = Some(format!("punktfunk-mic-{id}"));
-            tracing::info!(%id, sink = sink.as_deref().unwrap_or("-"),
+    let isolation: Option<crate::vdisplay::SessionIsolation> = match joined.as_ref() {
+        // A joiner uses the owner's planes: its input relay and sink. A second mic source of the
+        // same name would split the owner's, so this session's mic stays on the shared one.
+        Some(d) => d
+            .isolation
+            .clone()
+            .map(|i| crate::vdisplay::SessionIsolation {
+                mic_source: None,
+                ..i
+            }),
+        None => compositor
+            .filter(|c| compositor::session_is_isolated(*c, gamescope_route.as_ref()))
+            .map(|_| {
+                // `--open` has no fingerprint; a per-accept sequence isolates at the cost of keep-alive.
+                static ANON_SEQ: AtomicU64 = AtomicU64::new(0);
+                let id = session_fp_hex
+                    .as_deref()
+                    .map(|fp| fp[..fp.len().min(8)].to_string())
+                    .unwrap_or_else(|| format!("anon{}", ANON_SEQ.fetch_add(1, Ordering::Relaxed)));
+                // Monitor-mode has no per-session sink — audio stays shared; input/mic still isolate.
+                let sink = crate::audio::per_session_sink_possible()
+                    .then(|| format!("punktfunk-speaker-iso-{id}"));
+                let mic_source = Some(format!("punktfunk-mic-{id}"));
+                tracing::info!(%id, sink = sink.as_deref().unwrap_or("-"),
                 "isolated gamescope session — per-session input/audio/mic planes");
-            crate::vdisplay::SessionIsolation::new(id, sink, mic_source)
-        });
+                crate::vdisplay::SessionIsolation::new(id, sink, mic_source)
+            }),
+    };
     // Pinned injector + swappable route. Drop at session end closes the EIS connection.
     #[cfg(target_os = "linux")]
     let session_injector = isolation
@@ -1866,6 +1880,14 @@ pub(crate) async fn run_admitted(
             ),
             stop.clone(),
             label,
+            crate::vdisplay::admission::LiveDisplay {
+                compositor,
+                route: gamescope_route.clone(),
+                #[cfg(target_os = "linux")]
+                isolation: isolation.clone(),
+                #[cfg(not(target_os = "linux"))]
+                isolation: None,
+            },
         )
     };
 
@@ -1893,7 +1915,7 @@ pub(crate) async fn run_admitted(
         std::thread::Builder::new()
             .name("punktfunk1-audio".into())
             .spawn(move || {
-                audio_thread(conn, stop, cap, channels, budget, audio_plane, iso_sink)
+                audio_thread(conn, stop, cap, channels, budget, audio_plane, iso_sink, join_live)
             })
             .map_err(|e| tracing::warn!(error = %e, "audio thread spawn failed — session continues without audio"))
             .ok()
@@ -2243,6 +2265,7 @@ pub(crate) async fn run_admitted(
                         launch: launch_for_dp,
                         launch_target,
                         client_hdr,
+                        join_live,
                         bringup: bringup_dp,
                         resize_ms: resize_ms_dp,
                         wire_sock,
@@ -2325,9 +2348,32 @@ pub(crate) async fn run_admitted(
              already-owned until it returns"
         );
     }
-    // Managed gamescope on an autologin box: put the TV's gaming session back.
-    crate::vdisplay::restore_managed_session();
+    // Managed gamescope on an autologin box: put the TV's gaming session back once no session
+    // streams gamescope. A `join` session still shows the owner's game after the owner leaves.
+    drop(gamescope_hold);
+    if LIVE_GAMESCOPE.load(Ordering::SeqCst) == 0 {
+        crate::vdisplay::restore_managed_session();
+    }
     result.map(|()| Served::Session)
+}
+
+/// Live native sessions on a gamescope display, for the managed TV restore above.
+static LIVE_GAMESCOPE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// One count in [`LIVE_GAMESCOPE`] for the session's lifetime, early returns included.
+struct GamescopeHold;
+
+impl GamescopeHold {
+    fn new() -> Self {
+        LIVE_GAMESCOPE.fetch_add(1, Ordering::SeqCst);
+        GamescopeHold
+    }
+}
+
+impl Drop for GamescopeHold {
+    fn drop(&mut self) {
+        LIVE_GAMESCOPE.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 /// Reopen backoff after a host-lifetime capturer dies. Mic has its own ([`crate::audio::MicPump`]).
