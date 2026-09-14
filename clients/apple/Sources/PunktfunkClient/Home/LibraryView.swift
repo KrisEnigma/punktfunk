@@ -184,6 +184,10 @@ struct LibraryView: View {
             #if os(iOS)
             .modifier(LibraryTitleMode(inTab: inTab))
             #endif
+            #if os(tvOS)
+            // The tab bar names the place and the host row holds the actions: no bar in the tab.
+            .toolbar(inTab ? .hidden : .automatic, for: .navigationBar)
+            #endif
             .toolbar {
                 #if os(macOS)
                 ToolbarItemGroup {
@@ -215,12 +219,11 @@ struct LibraryView: View {
                 }
                 #endif
             }
+            // A TV's `.searchable` is a keyboard band over the shelf; search there wants a tab.
             #if os(iOS) || os(macOS)
             .modifier(TitleSearch(active: inTab, text: $search))
             #endif
-            #if os(iOS) || os(macOS)
             .sheet(item: $detailGame, onDismiss: launchPendingTitle) { detailSheet($0) }
-            #endif
             // Before the first frame: a shelf seen this run opens on its titles, any other one on
             // the (held back) spinner rather than a flash of the empty state.
             .onAppear {
@@ -479,7 +482,15 @@ struct LibraryView: View {
             keyNavigation(sections: groups, proxy: proxy) {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 26) {
+                        #if os(tvOS)
+                        HStack(spacing: 24) {
+                            tabHeader
+                            Spacer(minLength: 0)
+                            tvActions
+                        }
+                        #else
                         tabHeader
+                        #endif
                         staleNote
                         ForEach(sectionLayout.visible) { section in
                             tabSection(section, groups: groups, proxy: proxy)
@@ -636,7 +647,6 @@ struct LibraryView: View {
             .filter { marked.contains($0.id) }
     }
 
-    #if os(iOS) || os(macOS)
     private var customizeButton: some View {
         Button { showCustomize = true } label: {
             Label("Customize", systemImage: "slider.horizontal.3")
@@ -653,6 +663,23 @@ struct LibraryView: View {
             LibrarySectionsPanel().frame(width: 320, height: 250)
         }
         #endif
+        #if os(tvOS)
+        .sheet(isPresented: $showCustomize) { LibrarySectionsPanel() }
+        #endif
+    }
+
+    #if os(tvOS)
+    /// Sort, Customize and Reload as round buttons at the end of the host row: the TV's tab has
+    /// no bar to hold them.
+    private var tvActions: some View {
+        HStack(spacing: 24) {
+            if !gamepadUIActive { sortMenu }
+            customizeButton
+            reloadButton
+        }
+        .labelStyle(.iconOnly)
+        .buttonBorderShape(.circle)
+        .padding(.trailing)
     }
     #endif
 
@@ -698,10 +725,7 @@ struct LibraryView: View {
             }
         }
         .id(scope.isEmpty ? game.id : "\(scope):\(game.id)")
-        // `.contextMenu` doesn't exist on tvOS, which also has no clipboard to copy into.
-        #if !os(tvOS)
         .contextMenu { titleMenu(game) }
-        #endif
     }
 
     private func card(_ game: GameEntry, caption: String?) -> GameCard {
@@ -725,11 +749,9 @@ struct LibraryView: View {
                 favorites.toggle(game.id, host: host.id.uuidString)
             }
         }
-        #if os(iOS) || os(macOS)
         if game.id != LibraryCollation.desktopID {
             Button("Details…", systemImage: "info.circle") { detailGame = game }
         }
-        #endif
         if LinkClipboard.isAvailable {
             Button("Copy Link", systemImage: "link") { copyLink(game) }
         }
@@ -740,7 +762,6 @@ struct LibraryView: View {
         return running[game.id] != nil ? "Resume" : "Play"
     }
 
-    #if os(iOS) || os(macOS)
     private func detailSheet(_ game: GameEntry) -> some View {
         TitleDetailSheet(
             game: game, artLoader: artLoader, playLabel: playLabel(game),
@@ -753,7 +774,7 @@ struct LibraryView: View {
             onCopyLink: LinkClipboard.isAvailable ? { copyLink(game) } : nil)
             #if os(iOS)
             .presentationDetents([.medium, .large])
-            #else
+            #elseif os(macOS)
             .frame(minWidth: 440, minHeight: 360)
             #endif
     }
@@ -763,7 +784,6 @@ struct LibraryView: View {
         launchAfterDetails = nil
         launchAndRemember?(id)
     }
-    #endif
 
     /// What a tile says under its title for the active sort (design P6): when it was last
     /// played under Recent, how long under Most played, nothing otherwise.

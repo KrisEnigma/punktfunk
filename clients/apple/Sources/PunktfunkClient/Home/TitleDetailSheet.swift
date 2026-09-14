@@ -4,7 +4,6 @@
 
 import PunktfunkKit
 import SwiftUI
-#if os(iOS) || os(macOS)
 
 struct TitleDetailSheet: View {
     let game: GameEntry
@@ -19,50 +18,92 @@ struct TitleDetailSheet: View {
     var onCopyLink: (() -> Void)?
     @Environment(\.dismiss) private var dismiss
 
+    #if os(tvOS)
+    // 10-foot sizes. Back closes the sheet, so it carries no Done.
+    private let posterWidth: CGFloat = 300
+    private let titleSize: CGFloat = 40
+    private let factSize: CGFloat = 28
+    private let margin: CGFloat = 60
+    private let actionSpacing: CGFloat = 24
+    #else
+    private let posterWidth: CGFloat = 112
+    private let titleSize: CGFloat = 20
+    private let factSize: CGFloat = 13
+    private let margin: CGFloat = 20
+    private let actionSpacing: CGFloat = 10
+    #endif
+
     var body: some View {
         NavigationStack {
             ScrollView {
-                VStack(alignment: .leading, spacing: 18) {
-                    header
-                    if let stats = PlayStatsText.summary(game.stats) {
-                        Label(stats, systemImage: "clock")
-                            .font(.geist(13, relativeTo: .subheadline))
-                            .foregroundStyle(.secondary)
-                    }
-                    actions
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(20)
+                layout
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(margin)
             }
             #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
             #endif
+            #if !os(tvOS)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Done") { dismiss() }
                 }
             }
+            #endif
         }
     }
 
-    private var header: some View {
-        HStack(alignment: .top, spacing: 16) {
-            PosterImage(
-                candidates: game.art.posterCandidates, title: game.title, loader: artLoader,
-                icon: game.iconToken)
-                .aspectRatio(2.0 / 3.0, contentMode: .fit)
-                .frame(width: 112)
-                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-            VStack(alignment: .leading, spacing: 6) {
-                Text(game.title)
-                    .font(.geist(20, .semibold, relativeTo: .title3))
-                    .fixedSize(horizontal: false, vertical: true)
-                ForEach(facts, id: \.self) { line in
-                    Text(line)
-                        .font(.geist(13, relativeTo: .subheadline))
-                        .foregroundStyle(.secondary)
-                }
+    /// A TV sets the facts and the acts beside the poster, as its own detail pages do; elsewhere
+    /// they stack under it.
+    @ViewBuilder private var layout: some View {
+        #if os(tvOS)
+        HStack(alignment: .top, spacing: 48) {
+            poster
+            VStack(alignment: .leading, spacing: 24) {
+                info
+                stats
+                actions
             }
+        }
+        #else
+        VStack(alignment: .leading, spacing: 18) {
+            HStack(alignment: .top, spacing: 16) {
+                poster
+                info
+            }
+            stats
+            actions
+        }
+        #endif
+    }
+
+    private var poster: some View {
+        PosterImage(
+            candidates: game.art.posterCandidates, title: game.title, loader: artLoader,
+            icon: game.iconToken)
+            .aspectRatio(2.0 / 3.0, contentMode: .fit)
+            .frame(width: posterWidth)
+            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+    }
+
+    private var info: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(game.title)
+                .font(.geist(titleSize, .semibold, relativeTo: .title3))
+                .fixedSize(horizontal: false, vertical: true)
+            ForEach(facts, id: \.self) { line in
+                Text(line)
+                    .font(.geist(factSize, relativeTo: .subheadline))
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    @ViewBuilder private var stats: some View {
+        if let stats = PlayStatsText.summary(game.stats) {
+            Label(stats, systemImage: "clock")
+                .font(.geist(factSize, relativeTo: .subheadline))
+                .foregroundStyle(.secondary)
         }
     }
 
@@ -81,11 +122,14 @@ struct TitleDetailSheet: View {
     }
 
     private var actions: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: actionSpacing) {
             if let onPlay {
                 Button(action: onPlay) {
                     Label(playLabel, systemImage: "play.fill")
+                        // A TV button keeps its own width; stretched, it read as a banner.
+                        #if !os(tvOS)
                         .frame(maxWidth: .infinity)
+                        #endif
                 }
                 .buttonStyle(.borderedProminent)
             }
@@ -102,7 +146,8 @@ struct TitleDetailSheet: View {
                     .accessibilityLabel("Copy Link")
             }
         }
+        #if !os(tvOS)
         .controlSize(.large)
+        #endif
     }
 }
-#endif

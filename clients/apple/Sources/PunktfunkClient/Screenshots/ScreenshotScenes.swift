@@ -233,6 +233,13 @@ enum ShotScenes {
                     handOff: { _ in })
             })
         })
+        // The Library's details: a title's sheet, and Customize with one section off.
+        scenes.append(ShotScene(name: "25-tv-title-details", orientation: .natural, colorScheme: .dark) {
+            AnyView(ShotTitleDetails())
+        })
+        scenes.append(ShotScene(name: "25b-tv-library-customize", orientation: .natural, colorScheme: .dark) {
+            AnyView(LibrarySectionsPanel(shotLayout: "desktops,favorites,recent,-launchers,games"))
+        })
         #endif
         scenes.append(ShotScene(name: "10-edithost", orientation: .natural, colorScheme: .dark) {
             AnyView(ShotEditHost())
