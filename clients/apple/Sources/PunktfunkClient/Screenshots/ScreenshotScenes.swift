@@ -215,6 +215,10 @@ enum ShotScenes {
             AnyView(ShotTVTabs(
                 tab: .settings, category: .display, scope: .preset(ShotMock.hdrPresetID)))
         })
+        // The dial's editor: the TV default ring beside its shortcuts.
+        scenes.append(ShotScene(name: "23-tv-quick-actions", orientation: .natural, colorScheme: .dark) {
+            AnyView(ShotTVTabs(tab: .settings, category: .quickActions))
+        })
         #endif
         scenes.append(ShotScene(name: "10-edithost", orientation: .natural, colorScheme: .dark) {
             AnyView(ShotEditHost())
