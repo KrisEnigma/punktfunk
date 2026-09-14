@@ -687,11 +687,13 @@ pub fn settle_desktop_portal(chosen: Compositor) {
     );
     // KWin input rides the xdg RemoteDesktop portal, which keys the backend off its *startup*
     // `XDG_CURRENT_DESKTOP`. Restart, then wait 600 ms for it to re-read before the injector reopens.
+    // Plasma 6 names the KDE backend `plasma-xdg-desktop-portal-kde`; older builds drop the prefix.
     if chosen == Compositor::Kwin {
         let _ = crate::proc::status_within(
             std::process::Command::new("systemctl").args([
                 "--user",
                 "try-restart",
+                "plasma-xdg-desktop-portal-kde.service",
                 "xdg-desktop-portal-kde.service",
                 "xdg-desktop-portal.service",
             ]),
