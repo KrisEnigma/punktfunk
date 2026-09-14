@@ -8,8 +8,8 @@
 //! else `Embedded`. `PUNKTFUNK_PORTAL_CURSOR_MODE` pins a preference; the
 //! ladder still runs, so a pin cannot request an unadvertised mode.
 //!
-//! `pf-capture` keeps the same ladder (`portal::choose_cursor_mode`). This crate
-//! must not depend on capture; keep the two copies in step.
+//! `pf-capture` keeps the same ladder (`portal::choose_cursor_mode`); keep the
+//! two copies in step. Both read through `portal_rt::available_cursor_modes`.
 //!
 //! Compiled on every platform so the tests run in CI without a compositor.
 
@@ -69,7 +69,7 @@ pub(crate) struct Choice {
     pub(crate) wanted: Option<Mode>,
 }
 
-/// Unknown bits fall to `Hidden` and set `wanted`.
+/// `Hidden` only when advertised. Nothing known falls to `Embedded` and sets `wanted`.
 pub(crate) fn pick(advertised: u32, want: Mode) -> Choice {
     if advertised & want.bit() != 0 {
         return Choice {
@@ -85,10 +85,10 @@ pub(crate) fn pick(advertised: u32, want: Mode) -> Choice {
             };
         }
     }
-    // Advertised nothing this build knows (0, or bits from a newer spec). Hidden
-    // draws no pointer. The caller warns.
+    // Advertised nothing this build knows (0, or bits from a newer spec). Every
+    // backend implements Embedded, and it still shows a pointer. The caller warns.
     Choice {
-        mode: Mode::Hidden,
+        mode: Mode::Embedded,
         wanted: Some(want),
     }
 }
@@ -166,6 +166,7 @@ impl Mode {
 
 /// Returns our [`Mode`], not ashpd's: the caller converts with [`Mode::to_ashpd`]
 /// and carries the value out of the portal thread for the session lifetime.
+/// An empty or failed read requests `Embedded`: the mode is fixed for the session.
 #[cfg(target_os = "linux")]
 pub(crate) async fn negotiate(
     proxy: &ashpd::desktop::screencast::Screencast,
@@ -173,8 +174,15 @@ pub(crate) async fn negotiate(
     backend: &str,
 ) -> Mode {
     let want = want(hw_cursor, backend);
-    let advertised = match proxy.available_cursor_modes().await {
-        Ok(avail) => avail.bits(),
+    let advertised = match pf_capture::portal_rt::available_cursor_modes(proxy).await {
+        Ok(avail) if !avail.is_empty() => avail.bits(),
+        Ok(_) => {
+            tracing::warn!(
+                backend,
+                "ScreenCast: portal advertised no cursor modes — requesting Embedded cursor"
+            );
+            return Mode::Embedded;
+        }
         Err(e) => {
             // ScreenCast v2 property. A portal that cannot publish it is too old for Metadata.
             tracing::warn!(
@@ -286,12 +294,12 @@ mod tests {
         assert_eq!(c.wanted, Some(Mode::Metadata));
     }
 
-    /// Unknown bits: still a legal `Mode`, flagged as a downgrade so the caller warns.
+    /// Nothing known (a portal still starting reads 0): Embedded, flagged so the caller warns.
     #[test]
-    fn unknown_advertisement_guesses_hidden_and_reports_a_downgrade() {
+    fn unknown_advertisement_guesses_embedded_and_reports_a_downgrade() {
         for advertised in [0, 0b1000_0000] {
             let c = pick(advertised, Mode::Metadata);
-            assert_eq!(c.mode, Mode::Hidden);
+            assert_eq!(c.mode, Mode::Embedded);
             assert_eq!(c.wanted, Some(Mode::Metadata));
         }
     }

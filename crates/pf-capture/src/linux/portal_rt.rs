@@ -12,7 +12,10 @@
 //! takes `&self`, so every portal thread can park on it concurrently. A portal
 //! session made here outlives the thread that made it: close it explicitly.
 
+use ashpd::desktop::screencast::{CursorMode, Screencast};
+use ashpd::enumflags2::BitFlags;
 use std::sync::OnceLock;
+use std::time::Duration;
 use tokio::runtime::Runtime;
 
 /// `Result` so a failed build fails the handshake with a reason instead of aborting the process.
@@ -31,5 +34,22 @@ pub fn portal_runtime() -> Result<&'static Runtime, String> {
     }) {
         Ok(rt) => Ok(rt),
         Err(e) => Err(format!("build the shared portal runtime: {e}")),
+    }
+}
+
+/// `AvailableCursorModes`, re-read while it is empty.
+///
+/// A portal that the ScreenCast call itself D-Bus-activated publishes `0`
+/// until its backend answers. xdg-desktop-portal validates `SelectSources`
+/// against this same property, so the settled value is the one that counts.
+/// Returns whatever it reads last, empty included, after 2 s.
+pub async fn available_cursor_modes(proxy: &Screencast) -> ashpd::Result<BitFlags<CursorMode>> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        let avail = proxy.available_cursor_modes().await?;
+        if !avail.is_empty() || tokio::time::Instant::now() >= deadline {
+            return Ok(avail);
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
