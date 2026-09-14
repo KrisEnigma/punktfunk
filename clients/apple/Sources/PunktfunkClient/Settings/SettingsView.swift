@@ -1,16 +1,6 @@
-// App settings. The host creates a virtual output at exactly the chosen size/refresh; the only
-// deliberate resample is the opt-in Render Scale (the host renders at size × scale and this device
-// downscales — supersampling for sharpness, or under-rendering for a lighter host/link).
-//
-// Navigation differs per platform, but all three follow the same category map (General =
-// session/app behavior, Display = everything about the picture, Input, Audio, Controllers,
-// About — see SettingsCategory): macOS uses a tabbed preferences window; iOS/iPadOS uses an
-// adaptive NavigationSplitView — a category sidebar + detail pane on iPad, auto-collapsing to
-// a hierarchical push list on iPhone (the system Settings idiom on each); tvOS uses a
-// focus-native pushed-picker layout in the same order. The individual sections
-// (`resolutionSection`, `audioSection`, …) are shared across all three so a setting is defined
-// exactly once — they live in SettingsView+Sections.swift, with their helpers (including the
-// per-field `described` caption idiom) in SettingsView+Support.swift.
+// App settings: one category map on every platform (SettingsCategory) — macOS tabs, an iOS
+// split view, a tvOS sidebar with the focused row's caption in a band. Each row is defined once,
+// in SettingsView+Sections.swift; helpers such as `described` are in SettingsView+Support.swift.
 
 #if os(macOS)
 import AppKit
@@ -89,9 +79,9 @@ struct SettingsView: View {
     /// When the switch above takes over — read (and shown) only while it is on.
     @AppStorage(DefaultsKey.gamepadUIMode) var gamepadUIMode =
         GamepadUIEnvironment.modeWhenConnected
-    /// The gamepad UI's background palette. Edited here on tvOS only (see `tvBody`) — every other
-    /// platform reaches it through the gamepad settings screen, which an Apple TV without a
-    /// controller cannot open.
+    /// The gamepad UI's background palette. Edited here on tvOS only (`controllersSection`) —
+    /// every other platform reaches it through the gamepad settings screen, which an Apple TV
+    /// without a controller cannot open.
     @AppStorage(DefaultsKey.uiPalette) var uiPalette = "violet"
     @AppStorage(DefaultsKey.autoWake) var autoWakeEnabled = true
     @AppStorage(DefaultsKey.backgroundKeepAlive) var backgroundKeepAlive = false
@@ -128,6 +118,11 @@ struct SettingsView: View {
     // when this is false (see `isCustomResolution`), so it survives relaunches without persisting.
     @State var customMode = false
     #endif
+    #if os(tvOS)
+    /// The category the pane shows. Focus on a sidebar row picks it, as on a tab bar.
+    @State private var tvCategory: SettingsCategory = .general
+    @FocusState private var tvFocusedCategory: SettingsCategory?
+    #endif
     /// Steam Controller 2 passthrough (device tier). Every platform shows the row, so the
     /// storage sits outside the per-platform blocks.
     @AppStorage(DefaultsKey.sc2Capture) var sc2Capture = false
@@ -158,13 +153,17 @@ struct SettingsView: View {
     init(initialCategory: SettingsCategory? = nil) {
         _settingsSelection = State(initialValue: initialCategory)
     }
+    #elseif os(tvOS)
+    /// The app opens on General; the screenshot harness opens a specific category.
+    init(initialCategory: SettingsCategory = .general) {
+        _tvCategory = State(initialValue: initialCategory)
+    }
     #endif
 
     var body: some View {
         #if os(tvOS)
-        // Native tv pattern: no inline text entry (typing numbers with a remote is
-        // miserable and the inline field chrome fights the focus system). Modes are
-        // preset pickers that push selection lists like the system Settings app.
+        // No inline text entry on a TV: values are picked from pushed lists, as in the system
+        // Settings app.
         tvBody
         #elseif os(macOS)
         macBody
@@ -396,193 +395,79 @@ struct SettingsView: View {
     }
     #endif
 
-    // MARK: - tvOS
+    // MARK: - tvOS: a sidebar of categories
 
     #if os(tvOS)
-    private static let presets: [(label: String, tag: String)] = [
-        ("720p @ 60", "1280x720x60"),
-        ("1080p @ 60", "1920x1080x60"),
-        ("4K @ 60", "3840x2160x60"),
-    ]
-
-    private var modeTag: Binding<String> {
-        Binding(
-            get: { "\(width)x\(height)x\(hz)" },
-            set: { tag in
-                let parts = tag.split(separator: "x").compactMap { Int($0) }
-                guard parts.count == 3 else { return }
-                width = parts[0]
-                height = parts[1]
-                hz = parts[2]
-            })
-    }
-
-    private var hdrEnabledTag: Binding<String> {
-        Binding(get: { hdrEnabled ? "on" : "off" }, set: { hdrEnabled = $0 == "on" })
-    }
-
-    /// The gamepad-UI switch as an on/off row (same shape as HDR above) — the escape hatch back
-    /// to this focus-engine home for someone who prefers it with a controller connected.
-    private var gamepadUIEnabledTag: Binding<String> {
-        Binding(get: { gamepadUIEnabled ? "on" : "off" }, set: { gamepadUIEnabled = $0 == "on" })
-    }
-
-    private var sc2CaptureTag: Binding<String> {
-        Binding(get: { sc2Capture ? "on" : "off" }, set: { sc2Capture = $0 == "on" })
-    }
-
-    private var autoWakeEnabledTag: Binding<String> {
-        Binding(get: { autoWakeEnabled ? "on" : "off" }, set: { autoWakeEnabled = $0 == "on" })
-    }
-
-    private var advancedStatsTag: Binding<String> {
-        Binding(get: { advancedStats ? "on" : "off" }, set: { advancedStats = $0 == "on" })
-    }
-
-    /// One cluster caption, TV-legible — the 10-foot analogue of the touch/desktop per-row
-    /// `described` captions (per-row text doesn't scale to TV type sizes).
-    private func tvCaption(_ text: String) -> some View {
-        Text(text)
-            .font(.geist(20, relativeTo: .caption))
-            .foregroundStyle(.secondary)
-            .multilineTextAlignment(.center)
-            .padding(.top, 8)
-    }
-
+    /// The categories beside the chosen one's rows, the focused row's caption in a band under
+    /// them (design/apple-tvos-ui-overhaul.md §2.2). Two focus sections side by side: focus on a
+    /// category picks it, as on a tab bar, and a swipe right enters its rows.
     private var tvBody: some View {
-        let currentTag = "\(width)x\(height)x\(hz)"
-        let bounds = UIScreen.main.nativeBounds
-        let nativeTag = "\(Int(max(bounds.width, bounds.height)))x"
-            + "\(Int(min(bounds.width, bounds.height)))x\(UIScreen.main.maximumFramesPerSecond)"
-        var options = Self.presets
-        if !options.contains(where: { $0.tag == nativeTag }) {
-            options.insert(("This TV (native)", nativeTag), at: 0)
-        }
-        if !options.contains(where: { $0.tag == currentTag }) {
-            options.insert(("Custom (\(width)×\(height) @ \(hz))", currentTag), at: 0)
-        }
-        // Row order mirrors the touch/desktop category map: Display (mode → quality →
-        // presentation → host output), then Audio, General, Statistics, Controllers — with one
-        // short caption per cluster (per-row captions don't scale to 10-foot type sizes).
-        return ScrollView {
-            VStack(spacing: 16) {
-                TVSelectionRow(title: "Stream mode", options: options, selection: modeTag)
-                TVSelectionRow(
-                    title: "Render scale",
-                    options: RenderScale.presets.map { (label: RenderScale.label($0), tag: $0) },
-                    selection: $renderScale)
-                // PyroWave is always Automatic (ABR overhaul RFC §5.2): the session sends 0
-                // and the host pins a per-mode rate. tvOS has no codec picker, so this only
-                // fires on a codec synced from another device — but the row must not offer a
-                // rate the session ignores. The stored value is kept.
-                if codec == "pyrowave", MetalWaveletDecoder.supported {
-                    tvCaption("PyroWave sets its own rate from the stream mode — the bitrate "
-                        + "setting doesn't apply.")
-                } else {
-                    TVSelectionRow(
-                        title: "Bitrate",
-                        options: SettingsOptions.bitrateOptions(current: bitrateKbps),
-                        selection: $bitrateKbps)
-                    if bitrateKbps > 1_000_000 {
-                        Label(Self.gigabitWarning, systemImage: "exclamationmark.triangle.fill")
-                            .font(.geist(20, relativeTo: .caption)) // TV-legible caption size
-                            .foregroundStyle(.orange)
-                            .multilineTextAlignment(.center)
-                    }
-                }
-                TVSelectionRow(
-                    title: "10-bit HDR",
-                    options: [("On", "on"), ("Off", "off")], selection: hdrEnabledTag)
-                TVSelectionRow(
-                    title: "Prioritize",
-                    options: SettingsOptions.presentPriorities,
-                    selection: $presentPriority)
-                if presentPriority == "smooth" {
-                    TVSelectionRow(
-                        title: "Smoothness buffer",
-                        options: SettingsOptions.smoothBuffers(refreshHz: hz),
-                        selection: $smoothBuffer)
-                }
-                TVSelectionRow(
-                    title: "Compositor", options: SettingsOptions.compositors,
-                    selection: $compositor)
-                tvCaption("The host drives a real output at exactly the chosen mode. "
-                    + "\(Self.bitrateFooter) Lowest latency shows frames immediately; "
-                    + "Smoothness buffers a few. A compositor is honored only if available. "
-                    + "Applies from the next session.")
-                TVSelectionRow(
-                    title: "Audio channels",
-                    options: SettingsOptions.audioChannels,
-                    selection: $audioChannels)
-                // Offered at every channel count — the lossless plane is no longer stereo-only,
-                // because the frame ladder is sized per channel count and surround simply
-                // negotiates a shorter frame (see SettingsOptions.audioFormats).
-                TVSelectionRow(
-                    title: "Audio quality",
-                    options: SettingsOptions.audioFormats,
-                    selection: $audioFormat)
-                tvCaption("Lossless sends bit-exact PCM — 2.3 Mbps at 48 kHz, up to 8.5 at "
-                    + "176.4. Falls back to Standard if the host or this TV declines it.")
-                TVSelectionRow(
-                    title: "Auto-wake on connect",
-                    options: [("On", "on"), ("Off", "off")], selection: autoWakeEnabledTag)
-                tvCaption("Sends Wake-on-LAN to a sleeping saved host and waits for it.")
-                TVSelectionRow(
-                    title: "Statistics overlay",
-                    options: SettingsOptions.statsVerbosities, selection: $statsVerbosityRaw)
-                TVSelectionRow(
-                    title: "Advanced statistics",
-                    options: [("On", "on"), ("Off", "off")], selection: advancedStatsTag)
-                tvCaption(Self.advancedStatisticsDescription
-                    + " What each number means: docs.punktfunk.unom.io/docs/stats")
-                TVSelectionRow(
-                    title: "Statistics position", options: SettingsOptions.hudPlacements,
-                    selection: $hudPlacement)
-                ForEach(gamepads.controllers) { controller in
-                    controllerRow(controller)
-                        .padding(.horizontal, 24)
-                }
-                TVSelectionRow(
-                    title: "Use controller", options: controllerOptions,
-                    selection: $gamepads.preferredID)
-                TVSelectionRow(
-                    title: "Controller type", options: SettingsOptions.padTypes,
-                    selection: $gamepadType)
-                TVSelectionRow(
-                    title: "Steam Controller 2 passthrough",
-                    options: [("On", "on"), ("Off", "off")], selection: sc2CaptureTag)
-                tvCaption(Self.sc2CaptureCaption)
-                TVSelectionRow(
-                    title: "Gamepad-optimized browsing",
-                    options: [("On", "on"), ("Off", "off")], selection: gamepadUIEnabledTag)
-                // Hidden while the switch above is off — see the touch settings' identical gate.
-                if gamepadUIEnabled {
-                    TVSelectionRow(
-                        title: "Show it",
-                        options: SettingsOptions.gamepadUIModes, selection: $gamepadUIMode)
-                    // The Apple TV's only route to the shared `ui_palette`: elsewhere the row lives
-                    // on the gamepad settings screen, whose launcher needs an extended-profile
-                    // controller, out of reach of a Siri Remote. It sits beside "Show it" since
-                    // both describe the interface this row sets the look of.
-                    TVSelectionRow(
-                        title: "Background",
-                        options: GamepadPalette.all.map { (label: $0.name, tag: $0.id) },
-                        selection: $uiPalette)
-                }
-                tvCaption(Self.controllersFooter)
-                NavigationLink("About") { AboutView() }
-                    .padding(.top, 8)
+        HStack(alignment: .top, spacing: 48) {
+            tvSidebar
+                .frame(width: 460)
+                .focusSection()
+            VStack(spacing: 0) {
+                tvDetail
+                SettingsCaptionBand()
             }
-            .frame(maxWidth: 1000)
             .frame(maxWidth: .infinity)
-            .padding(60)
+            .focusSection()
         }
+        .padding(.horizontal, 60)
         .navigationTitle("Settings")
+        .onChange(of: tvFocusedCategory) { _, category in
+            if let category { tvCategory = category }
+        }
         .onAppear {
             gamepads.refresh()
             gamepads.startDiscovery()
         }
         .onDisappear { gamepads.stopDiscovery() }
+    }
+
+    private var tvSidebar: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            ForEach(SettingsCategory.allCases) { category in
+                Button {
+                    tvCategory = category
+                } label: {
+                    HStack {
+                        Label(category.title, systemImage: category.symbol)
+                        Spacer(minLength: 16)
+                        if category == tvCategory {
+                            Image(systemName: "chevron.forward")
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+                .focused($tvFocusedCategory, equals: category)
+            }
+            Spacer(minLength: 0)
+        }
+    }
+
+    @ViewBuilder private var tvDetail: some View {
+        switch tvCategory {
+        case .general:
+            Form {
+                sessionSection
+                overlaySection
+                librarySection
+            }
+        case .display:
+            Form {
+                resolutionSection
+                qualitySection
+                presentationSection
+                hostOutputSection
+            }
+        case .audio:
+            Form { audioSection }
+        case .controllers:
+            Form { controllersSection }
+        case .about:
+            AboutView()
+        }
     }
     #endif
 }

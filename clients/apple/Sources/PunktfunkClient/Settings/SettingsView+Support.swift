@@ -46,7 +46,8 @@ extension SettingsView {
     /// choice.
     /// `field` is the overlay's name for this row (see `SettingsField`). Passing it puts the
     /// override marker + Reset in the caption line while a preset is being edited — with the row
-    /// it belongs to, which is the only place the state is legible.
+    /// it belongs to, which is the only place the state is legible. On a TV the caption goes to
+    /// the pane's band instead (`SettingsCaptionBand`).
     @ViewBuilder
     func described<Content: View>(
         _ caption: String, field: String? = nil, @ViewBuilder content: () -> Content
@@ -56,6 +57,10 @@ extension SettingsView {
         // debug rather than by noticing a missing badge.
         assert(field.map { OverlayField.isModelled($0) } ?? true,
                "described(field:) got \(field ?? "") — not a field SettingsOverlay models")
+        #if os(tvOS)
+        // A TV row carries no caption of its own: the pane shows the focused row's in one band.
+        return content().focusedValue(\.settingsCaption, caption)
+        #else
         return VStack(alignment: .leading, spacing: 5) {
             content()
             Text(caption)
@@ -72,6 +77,24 @@ extension SettingsView {
             }
         }
         .padding(.vertical, 2)
+        #endif
+    }
+
+    /// One picker row for every platform: the system `Picker`, or on tvOS the pushed selection
+    /// list (`Picker`'s own push draws its rows in the focused style while it animates).
+    @ViewBuilder
+    func settingPicker<Tag: Hashable>(
+        _ title: String, options: [(label: String, tag: Tag)], selection: Binding<Tag>
+    ) -> some View {
+        #if os(tvOS)
+        TVSelectionRow(title: title, options: options, selection: selection)
+        #else
+        Picker(title, selection: selection) {
+            ForEach(options, id: \.tag) { option in
+                Text(option.label).tag(option.tag)
+            }
+        }
+        #endif
     }
 
     // MARK: - Bitrate
@@ -81,10 +104,6 @@ extension SettingsView {
     /// first pixels.
     private static let minSliderKbps = 2_000.0
     private static let maxSliderKbps = 3_000_000.0
-
-    /// tvOS's cluster caption (the touch/desktop forms describe bitrate per-row instead). It says
-    /// nothing about the speed test, which a TV reaches from the host's page, not from here.
-    static let bitrateFooter = "Automatic bitrate uses the host's default, 20 Mbps."
 
     static let gigabitWarning =
         "Above 1 Gbps — more than the link sustains causes loss and stutter. Speed-test first."
@@ -138,11 +157,6 @@ extension SettingsView {
     static let statsDocsURL = URL(string: "https://docs.punktfunk.unom.io/docs/stats")!
 
     // MARK: - Controllers
-
-    /// tvOS's cluster caption (the touch/desktop form describes each row inline instead).
-    static let controllersFooter =
-        "Automatic uses the newest pad as player 1 and matches its type on the host. "
-        + "Applies from the next session."
 
     /// "Use controller" choices for this view's manager (see `SettingsOptions.controllerOptions`).
     var controllerOptions: [(label: String, tag: String)] {
@@ -241,3 +255,33 @@ extension SettingsView {
     }
     #endif
 }
+
+#if os(tvOS)
+/// The focused settings row's caption, published by `described` for the band under the rows.
+struct SettingsCaptionKey: FocusedValueKey {
+    typealias Value = String
+}
+
+extension FocusedValues {
+    var settingsCaption: String? {
+        get { self[SettingsCaptionKey.self] }
+        set { self[SettingsCaptionKey.self] = newValue }
+    }
+}
+
+/// The caption of whichever row has focus, in one place under the rows: per-row text does not
+/// scale to 10-foot type, and a caption per cluster can't be matched to its row.
+struct SettingsCaptionBand: View {
+    @FocusedValue(\.settingsCaption) private var caption
+
+    var body: some View {
+        Text(caption ?? "")
+            .font(.geist(24, relativeTo: .caption))
+            .foregroundStyle(.secondary)
+            .lineLimit(3, reservesSpace: true)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.vertical, 24)
+            .animation(.easeOut(duration: 0.15), value: caption)
+    }
+}
+#endif
