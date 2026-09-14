@@ -79,7 +79,7 @@ struct AddHostSheet: View {
                     editingField = nil
                 }
             case .address:
-                TVTextEntry(title: "IP or hostname", text: address) {
+                TVTextEntry(title: "IP or hostname", text: address, keyboardType: .URL) {
                     address = $0.trimmingCharacters(in: .whitespaces)
                     editingField = nil
                 }
@@ -104,6 +104,11 @@ struct AddHostSheet: View {
                         touch: "Name (optional, e.g. Living Room)",
                         desktop: "Optional — e.g. Living Room"))
                 TextField("Address", text: $address, prompt: Text("IP or hostname"))
+                    .autocorrectionDisabled()
+                    #if os(iOS)
+                    .textInputAutocapitalization(.never)
+                    .keyboardType(.URL)
+                    #endif
                 TextField("Port", value: $port, format: .number.grouping(.never))
                 TextField(
                     "MAC address", text: $mac,

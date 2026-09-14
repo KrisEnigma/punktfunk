@@ -51,7 +51,7 @@ struct HostSectionsView: View {
             tvContent
             #else
             NavigationSplitView {
-                List(HostSection.allCases, selection: sectionSelection) { section in
+                List(sections, selection: sectionSelection) { section in
                     Label(section.title, systemImage: section.symbol)
                 }
                 #if os(macOS)
@@ -136,6 +136,11 @@ struct HostSectionsView: View {
         }
     }
 
+    /// The sidebar's rows. The demo host has no speed test to run.
+    private var sections: [HostSection] {
+        HostSection.allCases.filter { $0 != .speedTest || hostID != DemoMode.hostID }
+    }
+
     /// A click on empty space deselects a List; the page always shows a section.
     private var sectionSelection: Binding<HostSection?> {
         Binding(get: { section }, set: { if let next = $0 { section = next } })
@@ -197,7 +202,7 @@ extension HostSectionsView {
             HStack(alignment: .top, spacing: 48) {
                 VStack(alignment: .leading, spacing: 0) {
                     VStack(alignment: .leading, spacing: 8) {
-                        ForEach(HostSection.allCases) { item in
+                        ForEach(sections) { item in
                             Button {
                                 section = item
                             } label: {

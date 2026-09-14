@@ -25,7 +25,7 @@
 // Not [`WIRE_VERSION`]. The C surface can grow without a wire byte changing.
 // Pin the integer in `abi.rs` (`abi_version_is_pinned`). Per-bump notes live
 // in `CHANGELOG.md`.
-#define PUNKTFUNK_ABI_VERSION 30
+#define PUNKTFUNK_ABI_VERSION 31
 
 // punktfunk/1 wire version. `Hello`/`Welcome` carry it; hosts equality-check it.
 //
@@ -1328,6 +1328,11 @@ typedef struct LocalRecovery LocalRecovery;
 typedef struct PunktfunkConnection PunktfunkConnection;
 #endif
 
+#if defined(PUNKTFUNK_FEATURE_QUIC)
+// A running demo host from [`punktfunk_demo_host_start`].
+typedef struct PunktfunkDemoHost PunktfunkDemoHost;
+#endif
+
 // Opaque handle: one elementary stream's [`H265Concealer`]. The type lives in another crate,
 // so the header needs a core-owned name for it.
 typedef struct PunktfunkH265Concealer PunktfunkH265Concealer;
@@ -1773,6 +1778,20 @@ typedef struct {
     uint32_t wire_packets_sent;
     uint32_t send_dropped;
 } PunktfunkProbeResult;
+
+#if defined(PUNKTFUNK_FEATURE_QUIC)
+// The demo session to render, from [`punktfunk_demo_host_session`].
+typedef struct {
+    // Bumped on each new session and accepted mode switch: rebuild the encoder, start on an IDR.
+    uint32_t generation;
+    uint32_t width;
+    uint32_t height;
+    uint32_t refresh_hz;
+    uint32_t bitrate_kbps;
+    // `PUNKTFUNK_CODEC_H264` or `PUNKTFUNK_CODEC_HEVC`.
+    uint8_t codec;
+} PunktfunkDemoSession;
+#endif
 
 
 
@@ -3204,6 +3223,82 @@ PunktfunkStatus punktfunk_reanchor_gate_poll(ReanchorGate *g,
 // # Safety
 // `g` is a valid gate handle; `out_holding` is writable or NULL.
 PunktfunkStatus punktfunk_reanchor_gate_is_holding(const ReanchorGate *g, bool *out_holding);
+
+#if defined(PUNKTFUNK_FEATURE_QUIC)
+// Start a demo host on a free loopback port. `codecs` is the `PUNKTFUNK_CODEC_*` mask the
+// embedder can encode. NULL on failure. Free with [`punktfunk_demo_host_stop`].
+PunktfunkDemoHost *punktfunk_demo_host_start(uint8_t codecs);
+#endif
+
+#if defined(PUNKTFUNK_FEATURE_QUIC)
+// Stop the host, ending any session, and free the handle. NULL is a no-op.
+//
+// # Safety
+// `h` came from [`punktfunk_demo_host_start`] and is not used after this call.
+void punktfunk_demo_host_stop(PunktfunkDemoHost *h);
+#endif
+
+#if defined(PUNKTFUNK_FEATURE_QUIC)
+// The loopback UDP port the host listens on. 0 for NULL.
+//
+// # Safety
+// `h` is a live handle or NULL.
+uint16_t punktfunk_demo_host_port(const PunktfunkDemoHost *h);
+#endif
+
+#if defined(PUNKTFUNK_FEATURE_QUIC)
+// Write the host certificate's SHA-256 to `out_sha256`: the pin to dial it with.
+//
+// # Safety
+// `h` is a live handle; `out_sha256` is writable for 32 bytes.
+PunktfunkStatus punktfunk_demo_host_fingerprint(const PunktfunkDemoHost *h, uint8_t *out_sha256);
+#endif
+
+#if defined(PUNKTFUNK_FEATURE_QUIC)
+// Write the live session to `out` and return true. False, with `out` untouched, while no
+// client is streaming.
+//
+// # Safety
+// `h` is a live handle; `out` is writable.
+bool punktfunk_demo_host_session(const PunktfunkDemoHost *h, PunktfunkDemoSession *out);
+#endif
+
+#if defined(PUNKTFUNK_FEATURE_QUIC)
+// Copy the live session's launch id, NUL-terminated, into `buf`. Returns its length without
+// the NUL; 0 when no session or no launch. Writes nothing when `cap` < length + 1.
+//
+// # Safety
+// `h` is a live handle; `buf` is writable for `cap` bytes.
+uintptr_t punktfunk_demo_host_launch(const PunktfunkDemoHost *h, char *buf, uintptr_t cap);
+#endif
+
+#if defined(PUNKTFUNK_FEATURE_QUIC)
+// True once per client keyframe request or dropped AU: encode the next frame as an IDR.
+//
+// # Safety
+// `h` is a live handle or NULL.
+bool punktfunk_demo_host_take_keyframe_request(const PunktfunkDemoHost *h);
+#endif
+
+#if defined(PUNKTFUNK_FEATURE_QUIC)
+// Pop the oldest input event the client sent into `out`. False when none is waiting.
+//
+// # Safety
+// `h` is a live handle; `out` is writable.
+bool punktfunk_demo_host_next_input(const PunktfunkDemoHost *h, PunktfunkInputEvent *out);
+#endif
+
+#if defined(PUNKTFUNK_FEATURE_QUIC)
+// Queue one Annex-B access unit, parameter sets in-band on an IDR. False: no session, or the
+// queue was full and the AU dropped — make the next frame an IDR.
+//
+// # Safety
+// `h` is a live handle; `data` is readable for `len` bytes.
+bool punktfunk_demo_host_submit_video(const PunktfunkDemoHost *h,
+                                      const uint8_t *data,
+                                      uintptr_t len,
+                                      bool keyframe);
+#endif
 
 #ifdef __cplusplus
 }  // extern "C"

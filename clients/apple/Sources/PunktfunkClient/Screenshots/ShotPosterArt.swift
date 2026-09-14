@@ -1,10 +1,7 @@
-// Procedural cover art for the screenshot shelf. The store's library frames used to render the
-// deterministic text-placeholder posters (`artLoader: nil`), which read as an empty library next
-// to the Android listing's populated one. These four posters are drawn with CoreGraphics at
-// capture time — no bundled assets, nothing in a release build, and the same designs the Android
-// harness draws in Canvas, so the two listings show the same shelf.
+// Procedural cover art for the demo host's library and the screenshot shelf: four posters drawn
+// with CoreGraphics at run time, no bundled assets. The Android harness draws the same designs
+// in Canvas, so the two store listings show the same shelf.
 
-#if DEBUG
 import CoreText
 import Foundation
 import ImageIO
@@ -261,4 +258,3 @@ enum ShotPosterArt {
         }
     }
 }
-#endif

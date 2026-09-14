@@ -118,12 +118,14 @@ struct LaunchHoldView: View {
         }
     }
 
-    /// The shelf's own loader: host-origin art over the paired identity, CDNs plain. Resolved
-    /// once on appear rather than per render — the session republishes its stats every second,
-    /// and rebuilding this on each of those would re-read the identity every second with it.
+    /// The shelf's own loader: host-origin art over the paired identity, CDNs plain; the demo
+    /// host's posters are drawn in-app. Resolved once on appear rather than per render — the
+    /// session republishes its stats every second, and rebuilding this on each of those would
+    /// re-read the identity every second with it.
     private static func hostLoader(_ host: StoredHost?) -> (any LibraryArtSource)? {
-        guard let host, let identity = (try? ClientIdentityStore.shared.load())?.identity
-        else { return nil }
+        guard let host else { return nil }
+        if DemoMode.isDemo(host) { return DemoMode.art }
+        guard let identity = (try? ClientIdentityStore.shared.load())?.identity else { return nil }
         return try? LibraryArtLoader(
             address: host.address, port: host.effectiveMgmtPort,
             certPEM: identity.certPEM, keyPEM: identity.keyPEM,

@@ -90,6 +90,11 @@ final class HostStore: ObservableObject {
     }
 
     func add(_ host: StoredHost) {
+        // The address App Review is given saves the demo host instead.
+        if DemoMode.isDemoAddress(host.address) {
+            DemoMode.enable(in: self)
+            return
+        }
         var host = host
         // Stamped here rather than in the initializer: a `StoredHost` is also built to describe a
         // host we are only dialing (the dev auto-connect hook, a deep link's confirmation), and
@@ -99,9 +104,10 @@ final class HostStore: ObservableObject {
     }
 
     /// Also drops what the device kept for it: the default-host pointer, the library position
-    /// and the favorites.
+    /// and the favorites. Removing the demo host stops it.
     func remove(_ host: StoredHost) {
         hosts.removeAll { $0.id == host.id }
+        if DemoMode.isDemo(host) { DemoMode.stop() }
         clearDefaultHostIfItNames(host)
         LibraryScrollMemory.forget(hostID: host.id.uuidString)
         LibraryFavorites.shared.forget(hostID: host.id.uuidString)

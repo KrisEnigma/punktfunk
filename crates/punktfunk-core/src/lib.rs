@@ -39,6 +39,9 @@ pub mod config;
 #[path = "crash_windows.rs"]
 pub mod crash;
 pub mod crypto;
+/// cbindgen:ignore
+#[cfg(feature = "quic")]
+pub mod demo_host;
 pub mod discovery;
 pub mod error;
 pub mod fec;
@@ -77,7 +80,7 @@ pub use stats::Stats;
 /// Not [`WIRE_VERSION`]. The C surface can grow without a wire byte changing.
 /// Pin the integer in `abi.rs` (`abi_version_is_pinned`). Per-bump notes live
 /// in `CHANGELOG.md`.
-pub const ABI_VERSION: u32 = 30;
+pub const ABI_VERSION: u32 = 31;
 
 /// punktfunk/1 wire version. `Hello`/`Welcome` carry it; hosts equality-check it.
 ///

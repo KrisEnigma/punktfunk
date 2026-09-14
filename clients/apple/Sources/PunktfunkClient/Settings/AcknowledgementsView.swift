@@ -28,16 +28,22 @@ struct AcknowledgementsView: View {
             // notice chunks visually continuous; the header block carries its own spacing + bottom pad.
             LazyVStack(alignment: .leading, spacing: 0) {
                 VStack(alignment: .leading, spacing: 18) {
-                    #if os(tvOS)
-                    TVScreenTitle("Acknowledgements")
-                    #endif
-                    Text("Punktfunk")
-                        .font(.geist(Self.titleFont, .bold, relativeTo: .title2))
-                    if let version {
-                        Text("Version \(version)")
-                            .font(.geist(Self.captionFont, relativeTo: .caption))
-                            .foregroundStyle(.secondary)
+                    // The top's own focus stop: moving up from the first license chunk scrolls
+                    // back here instead of leaving the title off screen under the tab bar.
+                    VStack(alignment: .leading, spacing: 18) {
+                        #if os(tvOS)
+                        TVScreenTitle("Acknowledgements")
+                        #endif
+                        Text("Punktfunk")
+                            .font(.geist(Self.titleFont, .bold, relativeTo: .title2))
+                        if let version {
+                            Text("Version \(version)")
+                                .font(.geist(Self.captionFont, relativeTo: .caption))
+                                .foregroundStyle(.secondary)
+                        }
                     }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .modifier(TVFocusable())
                     LicenseWall(text: Licenses.appLicense)
                         .font(.caption.monospaced())
 

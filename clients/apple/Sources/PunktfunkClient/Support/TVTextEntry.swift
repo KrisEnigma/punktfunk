@@ -40,6 +40,11 @@ final class TVTextEntryController: UIViewController, UITextFieldDelegate {
         field.placeholder = title
         field.text = text
         field.keyboardType = keyboardType
+        // An address or a number is typed exactly: no correction, no capital.
+        if keyboardType != .default {
+            field.autocorrectionType = .no
+            field.autocapitalizationType = .none
+        }
         field.returnKeyType = .done
         self.onDone = onDone
     }
