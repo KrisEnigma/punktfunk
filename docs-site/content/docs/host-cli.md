@@ -108,7 +108,7 @@ punktfunk-host ctl approve 3
 | `stop-session` | Stop the active session. |
 | `end-game` | End the launched game. |
 | `display` | The virtual-display policy, every preset (built-in and saved), and the live displays. |
-| `display preset <ID>` | Switch the policy to a preset. Reads the stored policy and edits it, so the axes a preset does not own — the streamed screen, the experimental Windows ones — survive the switch. |
+| `display preset <ID>` | Switch the policy to a preset. Reads the stored policy and edits it, so the axes a preset does not own — the streamed screen, the Windows monitor levers — survive the switch. |
 | `display release [SLOT]` | Tear down **kept** displays now, so a physical-screen user gets their screen back without waiting out the linger. Omit `SLOT` for all. Never touches a display that is actively streaming. |
 | `stats` | The live stream: mode, codec and the adaptive bitrate, plus frame timings and drops while a capture is recording. |
 | `stats record start\|stop` | Arm or disarm the performance capture. `stop` writes the recording to disk. The capture is one host-wide slot the web console shares. |

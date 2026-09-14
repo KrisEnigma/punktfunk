@@ -6322,7 +6322,7 @@
           },
           "pnp_disable_monitors": {
             "type": "boolean",
-            "description": "Windows: disable the operator's physical monitor PnP nodes for the\nstream and re-enable at teardown. Persistent so a re-HPD stays off.\nOpt-in. Inactive externals are default-on via\n[`standby_sink_neutralise`]; this flag still implies that. A crash\njournal re-enables leftovers. Orthogonal to `preset`; default off."
+            "description": "Windows: disable the PnP nodes of the physical monitors the isolate\nswitched off, for the stream; re-enabled at teardown. Persistent so a\nre-HPD stays off. Inactive externals are [`standby_sink_neutralise`]'s.\nA crash journal re-enables leftovers. Orthogonal to `preset`; default\non, and a v1 file migrates to on."
           },
           "preset": {
             "$ref": "#/components/schemas/Preset"
