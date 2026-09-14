@@ -291,7 +291,8 @@ struct LibraryDesktopTile: View {
     let action: () -> Void
 
     var body: some View {
-        Button(action: action) {
+        let m = Metrics.current
+        return Button(action: action) {
             VStack(alignment: .leading, spacing: 4) {
                 HStack {
                     Group {
@@ -301,33 +302,53 @@ struct LibraryDesktopTile: View {
                             Image(systemName: "desktopcomputer").resizable().scaledToFit()
                         }
                     }
-                    .frame(width: 22, height: 22)
+                    .frame(width: m.mark, height: m.mark)
                     .foregroundStyle(Color.brand)
                     Spacer(minLength: 0)
                     Circle()
                         .fill(isOnline ? Color.green : Color.secondary.opacity(0.4))
-                        .frame(width: 7, height: 7)
+                        .frame(width: m.dot, height: m.dot)
                 }
                 Spacer(minLength: 0)
                 Text(host.displayName)
-                    .font(.geist(15, .bold, relativeTo: .headline))
+                    .font(.geist(m.name, .bold, relativeTo: .headline))
                     .foregroundStyle(.primary)
                     .lineLimit(1)
                 Text(nowPlaying.map { "Resume \($0)" } ?? "Desktop")
-                    .font(.geist(12, relativeTo: .caption))
+                    .font(.geist(m.status, relativeTo: .caption))
                     .foregroundStyle(nowPlaying == nil ? AnyShapeStyle(.secondary) : AnyShapeStyle(Color.green))
                     .lineLimit(1)
             }
-            .padding(12)
-            .frame(width: 190, height: 108, alignment: .leading)
+            .padding(m.padding)
+            .frame(width: m.width, height: m.height, alignment: .leading)
+            #if !os(tvOS)
             .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
             .overlay {
                 RoundedRectangle(cornerRadius: 12, style: .continuous)
                     .strokeBorder(.quaternary, lineWidth: 1)
             }
+            #endif
         }
+        #if os(tvOS)
+        // The card style owns the platter and the focus lift, as on the host cards.
+        .buttonStyle(.card)
+        #else
         .buttonStyle(.plain)
+        #endif
         .accessibilityElement(children: .combine)
+    }
+
+    /// Touch and pointer sizes, and 10-foot ones on a TV.
+    private struct Metrics {
+        let width, height, padding, mark, dot, name, status: CGFloat
+
+        static var current: Metrics {
+            #if os(tvOS)
+            Metrics(width: 380, height: 200, padding: 24, mark: 40, dot: 12, name: 28, status: 22)
+            #else
+            Metrics(width: 190, height: 108, padding: 12, mark: 22, dot: 7, name: 15, status: 12)
+            #endif
+        }
     }
 }
 
