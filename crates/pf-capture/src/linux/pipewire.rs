@@ -1571,6 +1571,9 @@ pub fn pipewire_thread(
             // so the encode loop rebuilds instead of freezing on the last frame.
             ud.signals.streaming.store(streaming, Ordering::Relaxed);
             ud.signals.driving.store(driving, Ordering::Relaxed);
+            if matches!(new, pw::stream::StreamState::Error(_)) {
+                ud.signals.errored.store(true, Ordering::Relaxed);
+            }
             if let Some(p) = &ud.pacer {
                 p.on_streaming(driving);
             }
