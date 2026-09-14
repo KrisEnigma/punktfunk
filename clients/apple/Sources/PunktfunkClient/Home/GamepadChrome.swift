@@ -24,6 +24,9 @@ import GameController
 /// unknown case: a fresh install that has never seen a controller, and any button outside the six
 /// `GamepadButtonRole` names.
 ///
+/// On tvOS the middle rung is the Siri Remote instead: with no pad attached it is what drives the
+/// screen. A role the remote has no button for yields an empty glyph, and the hint bar drops it.
+///
 /// @MainActor: GamepadManager is main-actor-bound (inside a View body this was implicit).
 @MainActor
 func buttonGlyph(
@@ -34,7 +37,11 @@ func buttonGlyph(
         return live
     }
     guard let role = GamepadButtonRole(keyPath: button) else { return fallback }
+    #if os(tvOS)
+    return GamepadGlyphs.remoteSymbol(role) ?? ""
+    #else
     return GamepadGlyphs.symbol(role, for: manager.lastKnownKind)
+    #endif
 }
 
 /// Top padding for a gamepad screen's pinned title. macOS gets extra clearance — the launcher
@@ -345,7 +352,8 @@ struct GamepadHintBar: View {
 
     var body: some View {
         HStack(spacing: 18) {
-            ForEach(hints) { hint in
+            // An empty glyph names a button the input in hand doesn't have (see `buttonGlyph`).
+            ForEach(hints.filter { !$0.glyph.isEmpty }) { hint in
                 cell(hint)
             }
         }

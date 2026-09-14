@@ -68,6 +68,18 @@ public enum GamepadGlyphs {
         }
     }
 
+    /// The Siri Remote's button for `role`, or nil where the remote has none. Positions map to what
+    /// tvOS routes each press to: the clickpad selects (A), Back backs out (B), Play/Pause is the
+    /// pad's X. Y and the shoulders have no button on the remote.
+    public static func remoteSymbol(_ role: GamepadButtonRole) -> String? {
+        switch role {
+        case .a: return "smallcircle.filled.circle"
+        case .b: return "chevron.backward.circle"
+        case .x: return "playpause.circle"
+        case .y, .leftShoulder, .rightShoulder: return nil
+        }
+    }
+
     private static func faceSymbol(
         _ role: GamepadButtonRole, for kind: PunktfunkConnection.GamepadType
     ) -> String {

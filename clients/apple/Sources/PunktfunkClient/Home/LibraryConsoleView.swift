@@ -232,6 +232,11 @@ struct LibraryConsoleView: View {
             onBack: { leaveBar() })
         #endif
         .sensoryFeedback(.impact(flexibility: .rigid, intensity: 0.7), trigger: barBoundaryTick)
+        // The remote's Play/Pause is the pad's X here too, as on the launcher. A pad whose X also
+        // sends this press opens the menu once: `fieldActive` is false after the first.
+        #if os(tvOS)
+        .onPlayPauseCommand { if fieldActive { openOptions() } }
+        #endif
     }
 
     /// The arrangement — one shelf, two fields; the persisted setting picks. Keyed on the

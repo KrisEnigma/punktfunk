@@ -41,6 +41,20 @@ final class GamepadGlyphTests: XCTestCase {
         }
     }
 
+    /// The Siri Remote names only the three presses tvOS routes (select, Back, Play/Pause); a role
+    /// it has no button for must stay nil, or a legend would advertise a press that does nothing.
+    func testSiriRemoteNamesOnlyItsOwnButtons() {
+        for role in roles {
+            if let name = GamepadGlyphs.remoteSymbol(role) {
+                XCTAssertTrue(symbolExists(name), "SF Symbol \"\(name)\" (\(role), remote) does not resolve")
+            }
+        }
+        XCTAssertEqual(GamepadGlyphs.remoteSymbol(.x), "playpause.circle")
+        XCTAssertNil(GamepadGlyphs.remoteSymbol(.y))
+        XCTAssertNil(GamepadGlyphs.remoteSymbol(.leftShoulder))
+        XCTAssertNil(GamepadGlyphs.remoteSymbol(.rightShoulder))
+    }
+
     /// ✕ is the BOTTOM button on a PlayStation pad, which is `GCExtendedGamepad.buttonA` — the
     /// whole point of the table being positional. Getting this backwards would print ◯ where the
     /// user has to press ✕.
