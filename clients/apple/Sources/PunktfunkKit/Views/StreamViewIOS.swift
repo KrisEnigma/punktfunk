@@ -855,6 +855,7 @@ public final class StreamViewController: StreamViewControllerBase {
     /// Aspect-fit the stage-2 metal sublayer to the surface showing the picture — this view, or
     /// an attached monitor — at that surface's render scale (see SessionPresenter.layout).
     private func layoutMetalLayer() {
+        videoLayer.videoGravity = SessionPresenter.gravity
         #if os(iOS)
         if onExternal {
             let scale = externalVideo.traitCollection.displayScale
@@ -1428,17 +1429,20 @@ final class StreamLayerUIView: UIView {
         onScroll?(Float(t.x) * 12, Float(t.y) * 12, precise)
     }
 
-    /// Map a view-space point through the aspect-fit letterbox into host-mode pixels; points
-    /// outside the video area clamp onto its edge. nil until a mode is negotiated.
+    /// Map a view-space point through the presenter's placement into host-mode pixels, at the
+    /// display scale the drawable is sized with; points on a bar or a cropped-away edge clamp onto
+    /// the picture. nil until a mode is negotiated.
     private func hostPoint(from p: CGPoint) -> HostPoint? {
         guard let hostMode = currentHostMode?(), hostMode.width > 0, hostMode.height > 0
         else { return nil }
-        let video = AVMakeRect(aspectRatio: hostMode, insideRect: bounds)
-        guard video.width > 0, video.height > 0 else { return nil }
-        let x = Int32(((p.x - video.minX) / video.width * hostMode.width)
-            .rounded().clamped(to: 0...(hostMode.width - 1)))
-        let y = Int32(((p.y - video.minY) / video.height * hostMode.height)
-            .rounded().clamped(to: 0...(hostMode.height - 1)))
+        let s = traitCollection.displayScale > 0 ? traitCollection.displayScale : UIScreen.main.scale
+        let placement = VideoFit(name: SessionSettings.current.videoFit).place(
+            view: (Int((bounds.width * s).rounded()), Int((bounds.height * s).rounded())),
+            frame: (Int(hostMode.width), Int(hostMode.height)))
+        guard !placement.isEmpty else { return nil }
+        let f = placement.frame(fromView: CGPoint(x: p.x * s, y: p.y * s))
+        let x = Int32(f.x.rounded().clamped(to: 0...(hostMode.width - 1)))
+        let y = Int32(f.y.rounded().clamped(to: 0...(hostMode.height - 1)))
         return HostPoint(x: x, y: y, w: UInt32(hostMode.width), h: UInt32(hostMode.height))
     }
 

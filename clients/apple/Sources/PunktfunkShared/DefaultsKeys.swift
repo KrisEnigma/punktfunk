@@ -29,6 +29,9 @@ public enum DefaultsKey {
     /// sees a normal (larger/smaller) `Mode`, and Automatic bitrate scales with it. Clamped even +
     /// to the codec's max dimension at connect. Applies to the fixed mode and the match-window path.
     public static let renderScale = "punktfunk.renderScale"
+    /// How a frame whose shape differs from the view fills it: a `VideoFit` raw value, `"fit"`
+    /// (default, bars), `"crop"` or `"stretch"`. The cross-client `video_fit` key.
+    public static let videoFit = "punktfunk.videoFit"
     public static let compositor = "punktfunk.compositor"
     public static let gamepadType = "punktfunk.gamepadType"
     public static let gamepadID = "punktfunk.gamepadID"

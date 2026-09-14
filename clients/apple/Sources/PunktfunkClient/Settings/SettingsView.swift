@@ -36,6 +36,7 @@ struct SettingsView: View {
     // presenter downscales (> 1 = supersampling for sharpness) or upscales (< 1 = a lighter host /
     // link). 1.0 = Native (the prior behaviour).
     @AppStorage(DefaultsKey.renderScale) var renderScale = 1.0
+    @AppStorage(DefaultsKey.videoFit) var videoFit = VideoFit.fit.rawValue
     @AppStorage(DefaultsKey.compositor) var compositor = 0
     @AppStorage(DefaultsKey.gamepadType) var gamepadType = 0
     @AppStorage(DefaultsKey.gamepadForwarding) var gamepadForwarding = true

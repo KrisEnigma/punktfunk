@@ -97,17 +97,24 @@ private let shaderSource = """
 #include <metal_stdlib>
 using namespace metal;
 
-struct VOut { float4 pos [[position]]; float2 uv; };
+// `uv` addresses the visible part of the frame (chroma, and luma drawn as decoded); `luv` is luma's
+// own, the unit square once `lumaForTarget` has already cropped and scaled it.
+struct VOut { float4 pos [[position]]; float2 uv; float2 luv; };
+
+// Origin + size of each, in texture UV (see `UvRects` in Swift).
+struct UvRects { float4 frame; float4 luma; };
 
 // The CPU-computed CSC rows (CscRows.swift, layout-matched): rgb[i] = dot(ri.xyz, yuv) + ri.w.
 // Range expansion, the matrix, and the 10-bit MSB-packing factor are all folded in.
 struct CscUniform { float4 r0; float4 r1; float4 r2; };
 
-vertex VOut pf_vtx(uint vid [[vertex_id]]) {
+vertex VOut pf_vtx(uint vid [[vertex_id]], constant UvRects& rects [[buffer(0)]]) {
     float2 p = float2(float((vid << 1) & 2), float(vid & 2));
     VOut o;
     o.pos = float4(p * 2.0 - 1.0, 0.0, 1.0);
-    o.uv = float2(p.x, 1.0 - p.y);
+    float2 unit = float2(p.x, 1.0 - p.y);
+    o.uv = rects.frame.xy + unit * rects.frame.zw;
+    o.luv = rects.luma.xy + unit * rects.luma.zw;
     return o;
 }
 
@@ -157,7 +164,7 @@ float2 chromaUV(texture2d<float> lumaTex, texture2d<float> chromaTex, float2 uv)
 // offset self-disables). What the result MEANS depends on the stream: an SDR frame's rows yield
 // gamma-encoded RGB, an HDR frame's rows yield PQ-encoded R′G′B′ — the fragment variants below
 // differ only in what they do next.
-float3 sampleRgb(texture2d<float> lumaTex, texture2d<float> chromaTex, float2 uv,
+float3 sampleRgb(texture2d<float> lumaTex, texture2d<float> chromaTex, float2 luv, float2 uv,
                  constant CscUniform& csc) {
     constexpr sampler s(filter::linear, address::clamp_to_edge);
 #ifdef PF_BILINEAR_LUMA
@@ -165,9 +172,9 @@ float3 sampleRgb(texture2d<float> lumaTex, texture2d<float> chromaTex, float2 uv
     // the bicubic overshoot contributes to edge fringing. NOTE: at a true 1:1 present both paths
     // reduce to the identity texel, so if this toggle VISIBLY changes the picture, the present is
     // NOT 1:1 (there's a resample); if it looks identical, the fringing is upstream (codec/source/OS).
-    float lumaY = lumaTex.sample(s, uv).r;
+    float lumaY = lumaTex.sample(s, luv).r;
 #else
-    float lumaY = catmullRomLuma(lumaTex, s, uv);
+    float lumaY = catmullRomLuma(lumaTex, s, luv);
 #endif
     float3 yuv = float3(lumaY,
                         chromaTex.sample(s, chromaUV(lumaTex, chromaTex, uv)).rg);
@@ -182,7 +189,7 @@ fragment float4 pf_frag(VOut in [[stage_in]],
                         texture2d<float> lumaTex [[texture(0)]],
                         texture2d<float> chromaTex [[texture(1)]],
                         constant CscUniform& csc [[buffer(0)]]) {
-    return float4(sampleRgb(lumaTex, chromaTex, in.uv, csc), 1.0);
+    return float4(sampleRgb(lumaTex, chromaTex, in.luv, in.uv, csc), 1.0);
 }
 
 // PyroWave planar SDR: three separate R8 planes (Y full-res, Cb/Cr half-res 4:2:0) from the
@@ -195,9 +202,9 @@ fragment float4 pf_frag_planar(VOut in [[stage_in]],
                                constant CscUniform& csc [[buffer(0)]]) {
     constexpr sampler s(filter::linear, address::clamp_to_edge);
 #ifdef PF_BILINEAR_LUMA
-    float lumaY = lumaTex.sample(s, in.uv).r;
+    float lumaY = lumaTex.sample(s, in.luv).r;
 #else
-    float lumaY = catmullRomLuma(lumaTex, s, in.uv);
+    float lumaY = catmullRomLuma(lumaTex, s, in.luv);
 #endif
     float2 cuv = chromaUV(lumaTex, cbTex, in.uv);
     float3 yuv = float3(lumaY, cbTex.sample(s, cuv).r, crTex.sample(s, cuv).r);
@@ -215,7 +222,7 @@ fragment float4 pf_frag_hdr(VOut in [[stage_in]],
                             texture2d<float> lumaTex [[texture(0)]],
                             texture2d<float> chromaTex [[texture(1)]],
                             constant CscUniform& csc [[buffer(0)]]) {
-    return float4(sampleRgb(lumaTex, chromaTex, in.uv, csc), 1.0);
+    return float4(sampleRgb(lumaTex, chromaTex, in.luv, in.uv, csc), 1.0);
 }
 
 // HDR on tvOS when the display is composited WITHOUT HDR headroom (SDR output mode, or the user
@@ -258,7 +265,7 @@ fragment float4 pf_frag_hdr_tv(VOut in [[stage_in]],
                                texture2d<float> chromaTex [[texture(1)]],
                                constant CscUniform& csc [[buffer(0)]]) {
     // Y′CbCr → full-range PQ R′G′B′ via the per-frame rows (as pf_frag_hdr), then the tail.
-    return float4(pqToSdr(sampleRgb(lumaTex, chromaTex, in.uv, csc)), 1.0);
+    return float4(pqToSdr(sampleRgb(lumaTex, chromaTex, in.luv, in.uv, csc)), 1.0);
 }
 
 // PyroWave planar HDR tone-map: three separate R16 planes (P010-style studio codes; the rows
@@ -273,9 +280,9 @@ fragment float4 pf_frag_planar_tm(VOut in [[stage_in]],
                                   constant CscUniform& csc [[buffer(0)]]) {
     constexpr sampler s(filter::linear, address::clamp_to_edge);
 #ifdef PF_BILINEAR_LUMA
-    float lumaY = lumaTex.sample(s, in.uv).r;
+    float lumaY = lumaTex.sample(s, in.luv).r;
 #else
-    float lumaY = catmullRomLuma(lumaTex, s, in.uv);
+    float lumaY = catmullRomLuma(lumaTex, s, in.luv);
 #endif
     float2 cuv = chromaUV(lumaTex, cbTex, in.uv);
     float3 yuv = float3(lumaY, cbTex.sample(s, cuv).r, crTex.sample(s, cuv).r);
@@ -467,6 +474,9 @@ public final class MetalVideoPresenter {
     private let stagingLock = NSLock()
     private var pendingHdrMeta: PunktfunkConnection.HdrMeta?
     private var drawableTarget: CGSize = .zero
+    /// The visible part of the frame in texture UV, staged by `setSourceRect`. The unit square
+    /// except under Crop to fill (or a few-pixel snap).
+    private var sourceRect = CGRect(x: 0, y: 0, width: 1, height: 1)
     /// tvOS: the display's current EDR headroom (UIScreen.currentEDRHeadroom), pushed from the
     /// main thread (SessionPresenter.layout + the mode-switch observers). > 1 ⇒ the display is
     /// composited with HDR headroom, so HDR frames present as PQ passthrough; otherwise the
@@ -714,6 +724,14 @@ public final class MetalVideoPresenter {
     public func setDrawableTarget(_ size: CGSize) {
         stagingLock.lock()
         drawableTarget = size
+        stagingLock.unlock()
+    }
+
+    /// Park the visible part of the frame (texture UV, top-left origin) the drawable shows —
+    /// SessionPresenter.layout's placement. MAIN thread; drained per present.
+    public func setSourceRect(_ rect: CGRect) {
+        stagingLock.lock()
+        sourceRect = rect
         stagingLock.unlock()
     }
 
@@ -983,7 +1001,9 @@ public final class MetalVideoPresenter {
         guard let drawable = providedDrawable ?? layer.nextDrawable(),
               let commandBuffer = queue.makeCommandBuffer()
         else { return false }
-        let lumaTexture = lumaForTarget(luma, target: drawable.texture, commandBuffer: commandBuffer)
+        let (lumaTexture, uvRects) = lumaForTarget(
+            luma, target: drawable.texture, commandBuffer: commandBuffer)
+        var rects = uvRects
 
         let pass = MTLRenderPassDescriptor()
         pass.colorAttachments[0].texture = drawable.texture
@@ -995,6 +1015,7 @@ public final class MetalVideoPresenter {
         }
         encoder.setRenderPipelineState(pipeline)
         encoder.setFragmentTexture(lumaTexture, index: 0)
+        encoder.setVertexBytes(&rects, length: MemoryLayout<UvRects>.stride, index: 0)
         bind(encoder)
         encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
         encoder.endEncoding()
@@ -1108,7 +1129,9 @@ public final class MetalVideoPresenter {
               let commandBuffer = queue.makeCommandBuffer()
         else { return false }
         let slot = surfacePool[slotIndex]
-        let lumaTexture = lumaForTarget(luma, target: slot.texture, commandBuffer: commandBuffer)
+        let (lumaTexture, uvRects) = lumaForTarget(
+            luma, target: slot.texture, commandBuffer: commandBuffer)
+        var rects = uvRects
 
         let pass = MTLRenderPassDescriptor()
         pass.colorAttachments[0].texture = slot.texture
@@ -1120,6 +1143,7 @@ public final class MetalVideoPresenter {
         }
         encoder.setRenderPipelineState(pipeline)
         encoder.setFragmentTexture(lumaTexture, index: 0)
+        encoder.setVertexBytes(&rects, length: MemoryLayout<UvRects>.stride, index: 0)
         bind(encoder)
         encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
         encoder.endEncoding()
@@ -1230,15 +1254,23 @@ public final class MetalVideoPresenter {
     }
     #endif
 
-    /// Luma to bind for a draw into `target`: the plane itself, or, when the target is smaller on
-    /// either axis, the plane Lanczos-scaled to the target's size. r16Float holds a 10-bit code to
-    /// within one step and is writable and filterable on every Apple GPU. RENDER THREAD.
+    /// Luma to bind for a draw into `target`, with the UV rects that sample it. The plane itself
+    /// when the visible region is not larger than the target; otherwise that region Lanczos-scaled
+    /// to the target's size, sampled over the unit square. r16Float holds a 10-bit code to within
+    /// one step and is writable and filterable on every Apple GPU. RENDER THREAD.
     private func lumaForTarget(
         _ luma: MTLTexture, target: MTLTexture, commandBuffer: MTLCommandBuffer
-    ) -> MTLTexture {
-        guard target.width < luma.width || target.height < luma.height,
+    ) -> (MTLTexture, UvRects) {
+        stagingLock.lock()
+        let src = sourceRect
+        stagingLock.unlock()
+        let frame = SIMD4<Float>(
+            Float(src.minX), Float(src.minY), Float(src.width), Float(src.height))
+        let whole = UvRects(frame: frame, luma: frame)
+        let cropW = src.width * CGFloat(luma.width), cropH = src.height * CGFloat(luma.height)
+        guard CGFloat(target.width) < cropW - 0.5 || CGFloat(target.height) < cropH - 0.5,
               let lanczos = lanczos
-        else { return luma }
+        else { return (luma, whole) }
         if scaledLuma?.width != target.width || scaledLuma?.height != target.height {
             let desc = MTLTextureDescriptor.texture2DDescriptor(
                 pixelFormat: .r16Float, width: target.width, height: target.height,
@@ -1247,10 +1279,18 @@ public final class MetalVideoPresenter {
             desc.storageMode = .private
             scaledLuma = device.makeTexture(descriptor: desc)
         }
-        guard let scaledLuma else { return luma }
+        guard let scaledLuma else { return (luma, whole) }
+        // Scale + translate in destination pixels (MPSImageResampling.h): the visible region
+        // fills the target exactly.
+        let sx = Double(target.width) / Double(cropW), sy = Double(target.height) / Double(cropH)
+        var transform = MPSScaleTransform(
+            scaleX: sx, scaleY: sy,
+            translateX: -Double(src.minX * CGFloat(luma.width)) * sx,
+            translateY: -Double(src.minY * CGFloat(luma.height)) * sy)
+        withUnsafePointer(to: &transform) { lanczos.scaleTransform = $0 }
         lanczos.encode(
             commandBuffer: commandBuffer, sourceTexture: luma, destinationTexture: scaledLuma)
-        return scaledLuma
+        return (scaledLuma, UvRects(frame: frame, luma: SIMD4<Float>(0, 0, 1, 1)))
     }
 
     /// Returns the CVMetalTexture (not just its MTLTexture) so the caller can keep it alive past the
@@ -1292,4 +1332,11 @@ public final class MetalVideoPresenter {
     }
     #endif
 }
+
+/// `UvRects` in the shader, field for field: two `float4`, 32 bytes.
+private struct UvRects {
+    var frame: SIMD4<Float>
+    var luma: SIMD4<Float>
+}
+
 #endif

@@ -1328,6 +1328,12 @@ public final class Stage2Pipeline {
         presenter.setDrawableTarget(size)
     }
 
+    /// Forward the visible part of the frame (MAIN thread — see
+    /// `MetalVideoPresenter.setSourceRect`).
+    public func setSourceRect(_ rect: CGRect) {
+        presenter.setSourceRect(rect)
+    }
+
     #if os(macOS)
     /// Forward the windowed present mechanism (MAIN thread — see
     /// `MetalVideoPresenter.setWindowedPresent`, the DCP swapID-panic mitigation).

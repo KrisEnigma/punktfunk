@@ -406,21 +406,31 @@ final class SessionPresenter {
     /// Refresh display timing and position a Metal presentation layer.
     ///
     /// Every explicit-decode path updates its display link after reconfiguration, including tvOS's
-    /// decoded video plane. Metal paths then aspect-fit their sublayer and size its drawable in
-    /// backing pixels so the shader owns scaling. The video layer uses its own `videoGravity` and
-    /// needs no geometry here.
+    /// decoded video plane. Metal paths then place their sublayer and size its drawable in backing
+    /// pixels so the shader owns scaling. The video layer uses `videoGravity` (see
+    /// `SessionPresenter.gravity`) and needs no geometry here.
     ///
     /// No-op before a connection starts and for stage-1 beyond the harmless timing update.
+    /// The system scaler's closest match to the session's `VideoFit`, for the AVSampleBufferDisplayLayer
+    /// paths (stage 1, tvOS's decoded plane). It does not snap like the placement does.
+    static var gravity: AVLayerVideoGravity {
+        switch VideoFit(name: SessionSettings.current.videoFit) {
+        case .fit: return .resizeAspect
+        case .crop: return .resizeAspectFill
+        case .stretch: return .resize
+        }
+    }
+
     func layout(in bounds: CGRect, contentsScale: CGFloat) {
         lastLayout = (bounds, contentsScale)
         guard let connection else { return }
         let mode = connection.currentMode()
         syncFrameRate(hz: mode.refreshHz)
         guard let metalLayer else { return }
-        // Aspect source: the ACTUAL decoded dims when known (survives a lagging `currentMode()` and a
+        // Frame size: the ACTUAL decoded dims when known (survives a lagging `currentMode()` and a
         // host that delivered a different size than requested), else the negotiated mode. The shader
-        // stretches the frame across the WHOLE drawable, so this rect's aspect is the only thing that
-        // keeps the picture undistorted — a stale aspect here is the post-resize black-bars+stretch.
+        // stretches its source rect across the WHOLE drawable, so a stale size here is the
+        // post-resize black-bars+stretch.
         let aspect: CGSize? = {
             if let c = contentSize, c.width > 0, c.height > 0 { return c }
             if mode.width > 0, mode.height > 0 {
@@ -428,20 +438,37 @@ final class SessionPresenter {
             }
             return nil
         }()
-        let fit: CGRect = aspect.map { AVMakeRect(aspectRatio: $0, insideRect: bounds) } ?? bounds
-        // Snap the sublayer frame to the BACKING PIXEL GRID. AVMakeRect centers the aspect-fit rect,
-        // so its origin/size are usually fractional points; a metal sublayer whose frame doesn't land
-        // on whole device pixels is RESAMPLED by the macOS/UIKit compositor during composite — a
-        // uniform "everything looks soft" blur — even when the drawable itself is pixel-exact 1:1
-        // (verified via the stage2 "[1:1 (no resample)]" log while the picture was still soft). Round
-        // origin AND size to device pixels so the composite is a true 1:1 blit. Idempotent when the
-        // frame is already aligned (e.g. fullscreen fit == integer bounds), so it's a no-op there.
+        // Place the picture in BACKING PIXELS (`VideoPlacement`, the rule every client shares): a
+        // metal sublayer whose frame doesn't land on whole device pixels is RESAMPLED by the
+        // compositor — a uniform soft blur even when the drawable itself is 1:1 — so the layer takes
+        // the placement's whole-pixel rect, and the drawable shows its `src` part of the frame.
         let scale = contentsScale > 0 ? contentsScale : 1
-        let snapped = CGRect(
-            x: (fit.origin.x * scale).rounded() / scale,
-            y: (fit.origin.y * scale).rounded() / scale,
-            width: (fit.width * scale).rounded() / scale,
-            height: (fit.height * scale).rounded() / scale)
+        let viewPx = (width: Int((bounds.width * scale).rounded()), height: Int((bounds.height * scale).rounded()))
+        let placement = aspect.map {
+            VideoFit(name: SessionSettings.current.videoFit)
+                .place(view: viewPx, frame: (Int($0.width), Int($0.height)))
+        }
+        let snapped: CGRect
+        if let p = placement, !p.isEmpty, let frame = aspect {
+            #if os(macOS)
+            // AppKit layer geometry is bottom-left; the placement's rows count from the top.
+            let yPx = viewPx.height - p.dstY - p.dstHeight
+            #else
+            let yPx = p.dstY
+            #endif
+            snapped = CGRect(
+                x: bounds.minX + CGFloat(p.dstX) / scale, y: bounds.minY + CGFloat(yPx) / scale,
+                width: CGFloat(p.dstWidth) / scale, height: CGFloat(p.dstHeight) / scale)
+            stage2?.setSourceRect(CGRect(
+                x: p.srcX / frame.width, y: p.srcY / frame.height,
+                width: p.srcWidth / frame.width, height: p.srcHeight / frame.height))
+        } else {
+            snapped = CGRect(
+                x: (bounds.origin.x * scale).rounded() / scale,
+                y: (bounds.origin.y * scale).rounded() / scale,
+                width: CGFloat(viewPx.width) / scale, height: CGFloat(viewPx.height) / scale)
+            stage2?.setSourceRect(CGRect(x: 0, y: 0, width: 1, height: 1))
+        }
         // No implicit resize animation; contentsScale tracks the view's backing/display scale.
         CATransaction.begin()
         CATransaction.setDisableActions(true)

@@ -71,6 +71,10 @@ enum SettingsFields {
         .init(name: "render_scale", key: DefaultsKey.renderScale,
               overlay: \.renderScale, effective: \.renderScale)
     }
+    static var videoFit: SettingsField<String> {
+        .init(name: "video_fit", key: DefaultsKey.videoFit,
+              overlay: \.videoFit, effective: \.videoFit)
+    }
     static var bitrateKbps: SettingsField<Int> {
         .init(name: "bitrate_kbps", key: DefaultsKey.bitrateKbps,
               overlay: \.bitrateKbps, effective: \.bitrateKbps)
@@ -205,6 +209,7 @@ extension SettingsView {
         base.matchWindow = matchWindow
         base.bitrateKbps = bitrateKbps
         base.renderScale = renderScale
+        base.videoFit = videoFit
         base.codec = codec
         base.hdrEnabled = hdrEnabled
         base.enable444 = enable444
