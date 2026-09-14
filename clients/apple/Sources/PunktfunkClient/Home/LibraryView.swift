@@ -100,6 +100,8 @@ struct LibraryView: View {
     /// Shot harness: a section layout and favorites that never touch the device's own.
     var shotLayout: String?
     var shotFavorites: [String]?
+    /// Shot harness: opens Customize.
+    var shotCustomize = false
     #endif
     /// The same, for this view's own navigation title (the sheet/cover presentations).
     @State private var collectionLabel: String?
@@ -277,6 +279,14 @@ struct LibraryView: View {
             // system's own (dark, on an Apple TV) chrome over a light field. Off when the gamepad
             // UI isn't drawing — the plain grid belongs to the system background.
             .gamepadPaletteInk(gamepadUIActive)
+            #endif
+            #if os(tvOS)
+            // Above the palette ink, which pins a colour scheme: pinned above a List, it kept a
+            // focused row's text white on the row's white platter.
+            .sheet(isPresented: $showCustomize) { LibrarySectionsPanel() }
+            #endif
+            #if DEBUG && os(tvOS)
+            .onAppear { if shotCustomize { showCustomize = true } }
             #endif
     }
 
@@ -677,9 +687,6 @@ struct LibraryView: View {
         .popover(isPresented: $showCustomize) {
             LibrarySectionsPanel().frame(width: 320, height: 250)
         }
-        #endif
-        #if os(tvOS)
-        .sheet(isPresented: $showCustomize) { LibrarySectionsPanel() }
         #endif
     }
 

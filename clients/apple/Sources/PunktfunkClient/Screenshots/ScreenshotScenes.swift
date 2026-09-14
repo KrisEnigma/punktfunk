@@ -261,6 +261,16 @@ enum ShotScenes {
         scenes.append(ShotScene(name: "25d-tv-library-grid", orientation: .natural, colorScheme: .dark) {
             AnyView(ShotTVLibraryGrid())
         })
+        // Customize as the Library presents it, and under a pinned scheme, for the focused row.
+        scenes.append(ShotScene(name: "25e-tv-customize-sheet", orientation: .natural, colorScheme: .dark) {
+            AnyView(ShotTVCustomizeSheet())
+        })
+        scenes.append(ShotScene(name: "25f-tv-customize-pinned", orientation: .natural, colorScheme: .dark) {
+            AnyView(ShotTVCustomizePinned())
+        })
+        scenes.append(ShotScene(name: "25g-tv-customize-moved", orientation: .natural, colorScheme: .dark) {
+            AnyView(ShotTVCustomizeMoved())
+        })
         #endif
         scenes.append(ShotScene(name: "10-edithost", orientation: .natural, colorScheme: .dark) {
             AnyView(ShotEditHost())
@@ -542,6 +552,36 @@ private struct ShotTVLibraryGrid: View {
                 shotPhase: .catalog(ShotMock.games, running: []),
                 shotLayout: "games,desktops,favorites,recent,launchers")
         }
+    }
+}
+
+/// The Library opening its Customize sheet, focus on the sheet's first row.
+private struct ShotTVCustomizeSheet: View {
+    var body: some View {
+        NavigationStack {
+            LibraryView(
+                store: ShotMock.pageStore, target: LibraryTarget(host: ShotMock.pageStore.hosts[0]),
+                onLaunch: { _ in }, inTab: true,
+                shotPhase: .catalog(ShotMock.games, running: []), shotCustomize: true)
+        }
+    }
+}
+
+/// The Customize panel in a sheet under a pinned dark scheme, as the palette ink pins it, focus
+/// moved to its second row.
+private struct ShotTVCustomizePinned: View {
+    var body: some View {
+        Color.clear
+            .sheet(isPresented: .constant(true)) { LibrarySectionsPanel(shotMovesFocus: true) }
+            .environment(\.colorScheme, .dark)
+    }
+}
+
+/// The same with no scheme pinned.
+private struct ShotTVCustomizeMoved: View {
+    var body: some View {
+        Color.clear
+            .sheet(isPresented: .constant(true)) { LibrarySectionsPanel(shotMovesFocus: true) }
     }
 }
 #endif

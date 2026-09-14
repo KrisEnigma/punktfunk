@@ -11,6 +11,11 @@ struct LibrarySectionsPanel: View {
     #if DEBUG
     /// Shot harness: a layout that never touches the device's own.
     var shotLayout: String?
+    #if os(tvOS)
+    /// Shot harness: focus moves to the second row once the sheet is up.
+    var shotMovesFocus = false
+    @FocusState private var shotFocus: LibrarySection?
+    #endif
     #endif
     @Environment(\.dismiss) private var dismiss
 
@@ -73,10 +78,16 @@ struct LibrarySectionsPanel: View {
                 }
             }
             #else
-            // A TV's title scrolls with the rows, which keep to a readable width.
-            .tvPaneRoom()
-            .frame(maxWidth: 1100)
-            .frame(maxWidth: .infinity)
+            // A TV presents this as a card: the rows keep off its edges, with room inside the list
+            // for a focused row to grow.
+            .safeAreaPadding(.horizontal, 40)
+            #if DEBUG
+            .task {
+                guard shotMovesFocus else { return }
+                try? await Task.sleep(for: .seconds(1.5))
+                shotFocus = layout.entries.dropFirst().first?.section
+            }
+            #endif
             #endif
         }
         #endif
@@ -87,12 +98,7 @@ struct LibrarySectionsPanel: View {
             HStack {
                 Toggle(isOn: isOn(entry.section)) {
                     #if os(tvOS)
-                    // A TV Label sets the name against its icon: one icon column, then the name.
-                    HStack(spacing: 20) {
-                        Image(systemName: entry.section.symbol)
-                            .frame(width: 44)
-                        Text(entry.section.label)
-                    }
+                    TVRowLabel(symbol: entry.section.symbol, text: entry.section.label)
                     #else
                     Label {
                         Text(entry.section.label)
@@ -104,6 +110,9 @@ struct LibrarySectionsPanel: View {
                     }
                     #endif
                 }
+                #if DEBUG && os(tvOS)
+                .focused($shotFocus, equals: entry.section)
+                #endif
                 #if os(macOS)
                 Spacer()
                 // A Mac list draws no handle of its own; the whole row drags.
@@ -149,6 +158,23 @@ struct LibrarySectionsPanel: View {
     }
 
     #if os(tvOS)
+    /// A row's icon column and name: a TV Label sets the name against its icon. Black while the
+    /// row has focus, whatever ink it inherits, so it never sits white on the white platter.
+    private struct TVRowLabel: View {
+        let symbol: String
+        let text: String
+        @Environment(\.isFocused) private var focused
+
+        var body: some View {
+            HStack(spacing: 20) {
+                Image(systemName: symbol)
+                    .frame(width: 44)
+                Text(text)
+            }
+            .foregroundStyle(focused ? AnyShapeStyle(Color.black) : AnyShapeStyle(.primary))
+        }
+    }
+
     /// One place up or down: a remote's move, since it cannot drag.
     private func step(_ section: LibrarySection, by delta: Int) {
         var next = layout
