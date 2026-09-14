@@ -930,6 +930,13 @@ private fun InputSettings(s: Settings, update: (Settings) -> Unit, onOpenQuickAc
                 onClick = onOpenQuickActions,
             )
         }
+        ToggleRow(
+            title = "Back opens quick actions",
+            subtitle = "Off, Back does nothing mid-stream. It still opens them when no twist, " +
+                "keyboard or pad can",
+            checked = s.backOpensRing,
+            onCheckedChange = { on -> update(s.copy(backOpensRing = on)) },
+        )
     }
     SettingsGroup("Keyboard & mouse") {
         SettingDropdown(

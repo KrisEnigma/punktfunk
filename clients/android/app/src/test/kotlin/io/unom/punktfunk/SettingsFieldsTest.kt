@@ -40,7 +40,7 @@ class SettingsFieldsTest {
         backgroundKeepAlive = true, backgroundTimeoutMinutes = 30,
         rumbleOnPhone = true, gyroOnPhone = true, sc2Capture = false, dsCapture = false,
         padHaptics = false, padSpeaker = true, mouseMode = MouseMode.CAPTURE, invertScroll = true,
-        overlayActions = "{\"ring\":[]}", startIn = "library", defaultHost = "desk",
+        overlayActions = "{\"ring\":[]}", backOpensRing = false, startIn = "library", defaultHost = "desk",
     )
 
     @Test

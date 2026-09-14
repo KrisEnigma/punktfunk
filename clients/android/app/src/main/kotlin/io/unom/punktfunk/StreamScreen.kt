@@ -380,14 +380,19 @@ fun StreamScreen(session: ActiveSession, onSessionEnded: (SessionEndReason) -> U
         }
     }
 
+    // The twist and the three-finger tap live in the pointer touch models only — passthrough gives
+    // every finger to the host verbatim — and need a screen plus the POINTER grant.
+    val gestures = hasTouch && touchMode != TouchMode.TOUCH && ui.accessGrants and SessionAccess.POINTER != 0
+    // Settings can turn Back off, but only while another opener exists: the ring holds End stream.
+    val backOpensRing = initialSettings.backOpensRing || !(ui.padPresent || keyboard || gestures)
     // The quick-action ring (design/touch-client-overlay.md §2). Back opens it at the screen
-    // centre instead of ending the session — an edge swipe mid-game used to tear the session down
-    // with no confirmation (§5.3). "End stream" is a slot inside, behind a two-press arm.
+    // centre instead of ending the session; "End stream" is a slot inside, behind a two-press arm.
+    // Back never falls through: an edge swipe mid-game must not tear the session down.
     BackHandler {
         when {
             ring.sheet -> ring.sheet = false
             ring.committed -> ring.close()
-            else -> ring.openAt(Offset(containerSize.width / 2f, containerSize.height / 2f))
+            backOpensRing -> ring.openAt(Offset(containerSize.width / 2f, containerSize.height / 2f))
         }
     }
     // Host actions are PRE-FETCHED on the session tick, never fetched when the ring opens: two
@@ -722,11 +727,6 @@ fun StreamScreen(session: ActiveSession, onSessionEnded: (SessionEndReason) -> U
             if (bannerUp && !ui.motionHint && !touchHint) {
                 StreamStartBanner(
                     text = buildList {
-                        // The twist and the three-finger tap live in the pointer touch models only —
-                        // passthrough gives every finger to the host verbatim — and need a screen to
-                        // put fingers on, plus the POINTER grant (without it there is no gesture layer).
-                        val gestures = hasTouch && touchMode != TouchMode.TOUCH &&
-                            ui.accessGrants and SessionAccess.POINTER != 0
                         if (ui.padPresent) {
                             // The dial leads: it is the one chord that reaches every other action.
                             add("Select + A quick actions")
@@ -738,10 +738,15 @@ fun StreamScreen(session: ActiveSession, onSessionEnded: (SessionEndReason) -> U
                             add("Select + X stats")
                         } else {
                             // No pad: Back opens the dial (the gesture, or a TV remote's button; a
-                            // mouse's Back goes to the host). Leaving is a slot inside it, not this.
+                            // mouse's Back goes to the host) unless Settings turned it off.
+                            // Leaving is a slot inside it, not this.
                             add(
-                                if (gestures) "Back or a two-finger twist opens quick actions"
-                                else "Back opens quick actions"
+                                when {
+                                    backOpensRing && gestures -> "Back or a two-finger twist opens quick actions"
+                                    backOpensRing -> "Back opens quick actions"
+                                    gestures -> "A two-finger twist opens quick actions"
+                                    else -> "Ctrl+Alt+Shift+O opens quick actions"
+                                }
                             )
                             if (gestures) add("three-finger tap for stats")
                             // Android keeps Alt+Tab; the alias is only learnable from here.
