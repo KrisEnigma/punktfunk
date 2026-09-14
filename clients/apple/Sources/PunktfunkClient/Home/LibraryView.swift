@@ -1294,7 +1294,8 @@ struct GameCard: View {
     var body: some View {
         #if os(tvOS)
         // One card, the cover inset on it and the title under it. Focused, it turns white as a
-        // system row does, and lifts (`TVCardButtonStyle`).
+        // system row does, and lifts (`TVCardButtonStyle`). The ink covers the poster too: a
+        // launcher's placeholder mark drew white on the white card.
         VStack(alignment: .leading, spacing: 12) {
             poster
             VStack(alignment: .leading, spacing: 4) {
@@ -1309,11 +1310,11 @@ struct GameCard: View {
                         .lineLimit(1, reservesSpace: true)
                 }
             }
-            .foregroundStyle(focused ? Color.black : Color.primary)
             .padding(.horizontal, 8)
             .padding(.bottom, 4)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
+        .foregroundStyle(focused ? Color.black : Color.primary)
         .padding(Self.cardPadding)
         .background(
             focused ? Color.white : Color.primary.opacity(0.1),
