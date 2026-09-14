@@ -44,9 +44,12 @@ done
 [ -n "$STAGE" ] || { echo "ERROR: --stage is required" >&2; exit 2; }
 # The layout build-punktfunk-gamescope.sh writes under its --destdir/--prefix.
 BINARY="$STAGE/usr/bin/punktfunk-gamescope"
+REAPER="$STAGE/usr/lib/punktfunk/gamescope/gamescopereaper"
 LAYER_SO="$STAGE/usr/lib/punktfunk/libVkLayer_PUNKTFUNK_gamescope_wsi.so"
 LAYER_JSON="$STAGE/usr/lib/punktfunk/vulkan/implicit_layer.d/punktfunk_gamescope_wsi.json"
 [ -x "$BINARY" ] || { echo "ERROR: $BINARY is not an executable file" >&2; exit 1; }
+# gamescope starts every session's first child through its reaper.
+[ -x "$REAPER" ] || { echo "ERROR: $REAPER missing from the stage — a session would run nothing" >&2; exit 1; }
 # Hard, not best-effort. A package that carries the compositor without its layer looks completely
 # healthy and then silently denies every game an HDR10 swapchain — the failure this whole change
 # exists to end. Better to fail the packaging step than to ship that quietly again.
@@ -56,6 +59,8 @@ done
 
 ROOTDIR="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOTDIR"
+# The PKGBUILD's pkgrel leads the release, so a packaging-only change upgrades every channel.
+RELEASE="$(sed -n 's/^pkgrel=//p' packaging/gamescope/PKGBUILD).${RELEASE}"
 
 # Derive the version from the binary itself when not told: it is the only source that cannot drift
 # from what is actually being packaged. `gamescope version 3.16.25-1-g8c676c3+pfhdr4 (gcc …)` →
@@ -81,6 +86,7 @@ TOP="$(mktemp -d)"
 trap 'rm -rf "$TOP"' EXIT
 mkdir -p "$TOP"/{SOURCES,SPECS,BUILD,BUILDROOT,RPMS,SRPMS}
 install -m0755 "$BINARY" "$TOP/SOURCES/punktfunk-gamescope"
+install -m0755 "$REAPER" "$TOP/SOURCES/gamescopereaper"
 install -m0755 "$LAYER_SO" "$TOP/SOURCES/libVkLayer_PUNKTFUNK_gamescope_wsi.so"
 install -m0644 "$LAYER_JSON" "$TOP/SOURCES/punktfunk_gamescope_wsi.json"
 

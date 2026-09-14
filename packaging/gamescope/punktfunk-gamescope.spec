@@ -25,6 +25,9 @@ Source0:        punktfunk-gamescope
 # package is a trap.
 Source1:        libVkLayer_PUNKTFUNK_gamescope_wsi.so
 Source2:        punktfunk_gamescope_wsi.json
+# gamescope `execvp`s gamescopereaper for every child it starts. The distro's gamescope owns
+# /usr/bin/gamescopereaper, so ours goes where the host puts it first on PATH.
+Source3:        gamescopereaper
 
 # Not `Provides: gamescope` and not `Conflicts:` either — this ships a differently-named binary and
 # is designed to coexist. A box's Game Mode session keeps running the distro's gamescope; only the
@@ -55,8 +58,8 @@ packaging/gamescope/patches:
   * --pipewire-composite-external-overlay: paint the mangoapp performance overlay into the capture
     stream, so the fps/stats readout is visible to someone watching remotely.
 
-Installed as /usr/bin/punktfunk-gamescope, with its matching Vulkan WSI layer under
-/usr/lib/punktfunk. The layer carries its own name and its own enable variable, so it sits beside
+Installed as /usr/bin/punktfunk-gamescope, with its own gamescopereaper and its matching Vulkan
+WSI layer under /usr/lib/punktfunk. The layer carries its own name and its own enable variable, so it sits beside
 the one your gamescope package installs rather than replacing it, and only sessions punktfunk-host
 starts switch to it. Your system gamescope is untouched.
 
@@ -68,6 +71,7 @@ starts switch to it. Your system gamescope is untouched.
 
 %install
 install -Dm0755 %{SOURCE0} %{buildroot}%{_bindir}/punktfunk-gamescope
+install -Dm0755 %{SOURCE3} %{buildroot}/usr/lib/punktfunk/gamescope/gamescopereaper
 
 # /usr/lib, spelled literally rather than %{_libdir}, which is /usr/lib64 here. The layer's manifest
 # carries an ABSOLUTE library_path baked in at build time (/usr/lib/punktfunk/...), so this path and
@@ -102,6 +106,7 @@ LAYER_LIB="$(grep -o '"library_path"[[:space:]]*:[[:space:]]*"[^"]*"' \
 
 %files
 %{_bindir}/punktfunk-gamescope
+/usr/lib/punktfunk/gamescope/gamescopereaper
 /usr/lib/punktfunk/libVkLayer_PUNKTFUNK_gamescope_wsi.so
 /usr/lib/punktfunk/vulkan/implicit_layer.d/punktfunk_gamescope_wsi.json
 

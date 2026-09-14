@@ -3744,6 +3744,9 @@ fn launch_session(client: &str, unit_name: &str, mode: Mode, hdr: bool) -> Resul
         for arg in xkb_setenv_args() {
             cmd.arg(arg);
         }
+        if let Some(path) = discovery::reaper_path_env() {
+            cmd.arg(format!("--setenv=PATH={path}"));
+        }
         // Stale desktop DISPLAY/WAYLAND_DISPLAY in the manager env would abort gamescope.
         cmd.arg("--property=UnsetEnvironment=DISPLAY WAYLAND_DISPLAY")
             .arg("--setenv=BACKEND=headless")
@@ -4076,6 +4079,9 @@ fn spawn(
                 .ok()
         });
     let mut cmd = Command::new(gamescope_bin());
+    if let Some(path) = discovery::reaper_path_env() {
+        cmd.env("PATH", path);
+    }
     add_bare_gamescope_args(&mut cmd, w, h, hz, steam_mode, grab_cursor, hdr);
     let wsi = WsiPlan::resolve();
     if wsi == WsiPlan::DistroDisabled {
