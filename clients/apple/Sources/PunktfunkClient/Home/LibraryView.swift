@@ -194,15 +194,6 @@ struct LibraryView: View {
             #if os(iOS)
             .modifier(LibraryTitleMode(inTab: inTab))
             #endif
-            #if os(tvOS)
-            .overlay(alignment: .topTrailing) {
-                if inTab {
-                    tvActions
-                        .padding(.top, 47)
-                        .ignoresSafeArea(edges: .top)
-                }
-            }
-            #endif
             .toolbar {
                 #if os(macOS)
                 ToolbarItemGroup {
@@ -499,6 +490,9 @@ struct LibraryView: View {
             keyNavigation(sections: groups, proxy: proxy) {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 26) {
+                        #if os(tvOS)
+                        tvActions
+                        #endif
                         tabHeader
                         staleNote
                         ForEach(sectionLayout.visible) { section in
@@ -578,6 +572,10 @@ struct LibraryView: View {
                 .padding(.horizontal)
                 .padding(.vertical, Self.rowLift)
             }
+            #if os(tvOS)
+            // A focused card's shadow reaches past the row; clipped, it ended in a hard edge.
+            .scrollClipDisabled()
+            #endif
         }
         #if os(tvOS)
         // A full-width target: a move down from anywhere, the actions at the right included,
@@ -611,9 +609,9 @@ struct LibraryView: View {
     }
 
     /// A row's poster width: the grid's column minimum, so a row's posters match the grid's. On a
-    /// TV the posters also need room around them for the focused one to grow into.
+    /// TV a row's cards are larger than the grid's, with room around them for the focused one.
     #if os(tvOS)
-    private var rowTileWidth: CGFloat { 220 }
+    private var rowTileWidth: CGFloat { 280 }
     private static let rowSpacing: CGFloat = 40
     private static let rowLift: CGFloat = 20
     /// The grid's gap both ways: a row's, which leaves a focused card room to grow.
@@ -686,17 +684,19 @@ struct LibraryView: View {
     }
 
     #if os(tvOS)
-    /// Sort, Customize and Reload as round buttons in the tab bar's row, at its right: the TV's
-    /// tab has no navigation bar to hold them.
+    /// Sort, Customize and Reload over the shelf, named: the TV's tab has no navigation bar, and
+    /// focus doesn't cross from the tab bar to its row's end. A full-width target, so a move down
+    /// from the tab bar lands here.
     private var tvActions: some View {
         HStack(spacing: 24) {
             if !gamepadUIActive { sortMenu }
             customizeButton
             reloadButton
         }
-        .labelStyle(.iconOnly)
-        .buttonBorderShape(.circle)
-        .padding(.trailing)
+        .padding(.horizontal)
+        .padding(.vertical, 12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .focusSection()
     }
     #endif
 
@@ -754,7 +754,7 @@ struct LibraryView: View {
     private func card(_ game: GameEntry, caption: String?) -> GameCard {
         GameCard(
             game: game, artLoader: artLoader, selected: isKeyCursor(game),
-            isRunning: running[game.id] != nil, caption: caption)
+            isRunning: running[game.id] != nil, caption: caption, host: host)
     }
 
     /// A title's own acts, one level below a host card's (design §2.5): Play / Resume leads,
@@ -1240,6 +1240,8 @@ struct GameCard: View {
     var isRunning = false
     /// A line under the title for what the current sort or section is about.
     var caption: String? = nil
+    /// The host the title is on, named under the title with its OS mark.
+    var host: StoredHost? = nil
 
     #if os(tvOS)
     @Environment(\.isFocused) private var focused
@@ -1258,13 +1260,15 @@ struct GameCard: View {
 
     var body: some View {
         #if os(tvOS)
-        // One card, the cover inset on it and the title under it, so the whole card lifts.
+        // One card, the cover inset on it and the title under it. Focused, it turns white as a
+        // system row does, and lifts (`TVCardButtonStyle`).
         VStack(alignment: .leading, spacing: 12) {
             poster
             VStack(alignment: .leading, spacing: 4) {
                 Text(game.title)
                     .font(.geist(Self.titleSize, .semibold, relativeTo: .caption))
                     .lineLimit(2, reservesSpace: true)
+                hostLine
                 if let caption {
                     Text(caption)
                         .font(.geist(Self.captionSize, relativeTo: .caption2))
@@ -1272,13 +1276,14 @@ struct GameCard: View {
                         .lineLimit(1, reservesSpace: true)
                 }
             }
+            .foregroundStyle(focused ? Color.black : Color.primary)
             .padding(.horizontal, 8)
             .padding(.bottom, 4)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .padding(Self.cardPadding)
         .background(
-            Color.primary.opacity(focused ? 0.2 : 0.1),
+            focused ? Color.white : Color.primary.opacity(0.1),
             in: RoundedRectangle(cornerRadius: Self.cardRadius, style: .continuous))
         .contentShape(RoundedRectangle(cornerRadius: Self.cardRadius, style: .continuous))
         #else
@@ -1289,6 +1294,7 @@ struct GameCard: View {
                 // Two lines held for every title, so every tile in a row stands the same height.
                 .lineLimit(2, reservesSpace: true)
                 .foregroundStyle(.secondary)
+            hostLine
             if let caption {
                 Text(caption)
                     .font(.geist(Self.captionSize, relativeTo: .caption2))
@@ -1297,6 +1303,22 @@ struct GameCard: View {
             }
         }
         #endif
+    }
+
+    /// The host the title is on: its OS mark and name.
+    @ViewBuilder private var hostLine: some View {
+        if let host {
+            HStack(spacing: 6) {
+                if let mark = osIconImage(for: host.osChain) {
+                    mark.resizable().scaledToFit()
+                        .frame(width: Self.captionSize, height: Self.captionSize)
+                }
+                Text(host.displayName)
+                    .lineLimit(1)
+            }
+            .font(.geist(Self.captionSize, relativeTo: .caption2))
+            .foregroundStyle(.secondary)
+        }
     }
 
     private var poster: some View {

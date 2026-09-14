@@ -521,7 +521,9 @@ private struct ShotTVCards: View {
         HStack(alignment: .top, spacing: 40) {
             ForEach(Array(ShotMock.games.prefix(4))) { game in
                 Button {} label: {
-                    GameCard(game: game, artLoader: ShotPosterArt.source, caption: "2 hr ago")
+                    GameCard(
+                        game: game, artLoader: ShotPosterArt.source, caption: "2 hr ago",
+                        host: ShotMock.pageStore.hosts[0])
                 }
                 .buttonStyle(TVCardButtonStyle())
                 .frame(width: 220)
