@@ -54,9 +54,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedCard
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.material3.VerticalDivider
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
@@ -951,7 +949,7 @@ private fun InputSettings(s: Settings, update: (Settings) -> Unit, onOpenQuickAc
         )
         // Alt+Tab, the Meta chords and the Language key never reach an app; the key service
         // filters them ahead of Android. It is enabled under Accessibility, which we can only
-        // open — after the disclosure Play requires of a service that is not an accessibility tool.
+        // open, and only after [KeyCaptureDisclosure].
         val context = LocalContext.current
         var disclose by remember { mutableStateOf(false) }
         ClickableRow(
@@ -964,27 +962,7 @@ private fun InputSettings(s: Settings, update: (Settings) -> Unit, onOpenQuickAc
             },
             onClick = { if (KeyCaptureService.running) openAccessibilitySettings(context) else disclose = true },
         )
-        if (disclose) {
-            AlertDialog(
-                onDismissRequest = { disclose = false },
-                title = { Text("Keyboard shortcuts") },
-                text = {
-                    Text(
-                        "Punktfunk reads the keys you press on a hardware keyboard while a stream is " +
-                            "on screen, so Alt+Tab, the Windows key and your keyboard's language key " +
-                            "reach the host instead of Android. Outside a stream nothing is read, and " +
-                            "nothing is stored or shared. Android asks you to allow this under " +
-                            "Accessibility.",
-                    )
-                },
-                confirmButton = {
-                    TextButton(onClick = { disclose = false; openAccessibilitySettings(context) }) {
-                        Text("Continue")
-                    }
-                },
-                dismissButton = { TextButton(onClick = { disclose = false }) { Text("Not now") } },
-            )
-        }
+        if (disclose) KeyCaptureDisclosure(onDismiss = { disclose = false })
         // "Shared clipboard" is NOT here: it is a trust decision about one host, so it lives on the
         // host record and is edited from that host's Edit sheet.
     }
@@ -1276,13 +1254,6 @@ private fun ToggleRow(
             }
             Switch(checked = checked, onCheckedChange = onCheckedChange, enabled = enabled)
         }
-    }
-}
-
-/** Android's Accessibility page, where the key service is switched on; a TV without one is a no-op. */
-private fun openAccessibilitySettings(context: android.content.Context) {
-    runCatching {
-        context.startActivity(android.content.Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS))
     }
 }
 

@@ -79,9 +79,9 @@ microphone mute; the in-stream hint over the video doesn't, to stay one readable
 - **Android and Android TV** honour **Ctrl+Alt+Shift+Q** (pointer capture) and **Ctrl+Alt+Shift+O**
   (the [quick-action dial](#the-quick-action-dial)). Android keeps **Alt+Tab**, every **Win** chord
   and a keyboard's **Language** key for itself before any app sees them. Turn on **Punktfunk
-  keyboard shortcuts** under Android's Accessibility settings (**Settings → Input → Keyboard
-  shortcuts** opens the page) and they reach the host too — it reads keys only while a stream is on
-  screen. On Android 13 and newer a build installed outside the Play Store first needs **Allow
+  keyboard shortcuts** under Android's Accessibility settings and they reach the host too — it
+  sends keys only while a stream is on screen. The app offers this once at launch when a hardware
+  keyboard is attached, and **Settings → Input → Keyboard shortcuts** offers it any time. On Android 13 and newer a build installed outside the Play Store first needs **Allow
   restricted settings** from the app's info page. Without the service, **Alt+`** stands in for
   Alt+Tab (with Shift to walk backwards) and Win chords go on the dial as shortcuts. Every other
   key reaches the host: the Korean **한/영** and **한자** keys, the JIS **変換**, **無変換**,
