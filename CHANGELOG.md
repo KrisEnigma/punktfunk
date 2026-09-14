@@ -16,7 +16,7 @@ short; the version-bump commit retitles it. Older sections stay as they are.
 
 ## v0.38.0
 
-96 commits since v0.37.0. Wire stays 2. **C ABI 32**, additive. Driver protocol floor stays 9.
+98 commits since v0.37.0. Wire stays 2. **C ABI 32**, additive. Driver protocol floor stays 9.
 Deep dive: `git log v0.37.0..v0.38.0`
 
 ### Versions
@@ -61,6 +61,8 @@ Deep dive: `git log v0.37.0..v0.38.0`
   `punktfunk-scripting` with the host.
 - `pf-console-ui`'s `Ring` is public for GL hosts. `PUNKTFUNK_DOWNSCALE=bicubic` puts the Apple
   presenter back on the shader scaler for A/B; App Store builds can't set it.
+- rustls 0.23.45 for RUSTSEC-2026-0285. A distro build that unbundles rustls needs 0.23.45 or later;
+  an embedder linking `punktfunk-core` statically rebuilds.
 
 - `display-settings.json` schema 2: `pnp_disable_monitors` defaults on. A v1 file turns it on once
   at load; turning it off writes v2, which stays off. `PUNKTFUNK_STANDBY_SINK_KEEP` now vetoes both
