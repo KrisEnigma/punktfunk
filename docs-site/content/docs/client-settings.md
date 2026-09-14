@@ -62,6 +62,13 @@ your device resamples to its window. Above 1× supersamples at more bandwidth an
 1× is lighter on both. Stops 0.5×–4×; the result is floored to an even size and capped per axis at
 4096 px for H.264, 8192 px otherwise. Offered everywhere.
 
+**Picture fit** — *default: Fit.* What happens when the stream's shape differs from your window or
+screen — a 16:9 stream on a 20:9 phone, or a device that joined a display another device sized.
+**Fit** shows the whole picture with black bars. **Crop to fill** fills the screen and cuts the
+edges off. **Stretch to fill** fills the screen and distorts the picture. The mouse, touch and pen
+follow the picture you see. A size within a few pixels of 1:1, or of an exact 2× or 3×, snaps to it:
+a pixel or two of bar beats blurring the whole picture. Linux, Windows and the console home.
+
 **Video codec** — *default: Automatic.* A soft preference: your choice when the host can produce
 it, else the best codec you both speak, in the order HEVC → AV1 → H.264. **PyroWave** is never
 auto-picked — pick it explicitly on Linux, Windows, the console home, or an Apple or Android device

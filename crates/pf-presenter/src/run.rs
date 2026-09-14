@@ -33,6 +33,7 @@ use pf_client_core::video::{DecodeHealth, DecodedFrame, DecodedImage};
 use punktfunk_core::client::NativeClient;
 use punktfunk_core::config::{CompositorPref, Mode};
 use punktfunk_core::hud::{self, HudLine, StatsSnapshot};
+use punktfunk_core::video_fit::{self, VideoFit};
 use sdl3::event::{DisplayEvent, Event, WindowEvent};
 use sdl3::keyboard::Mod;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -90,6 +91,9 @@ pub struct SessionOpts {
     pub render_scale: f64,
     /// Codec per-axis ceiling for the render-scale clamp (4096 for H.264, else 8192).
     pub render_scale_max_dim: u32,
+    /// How a frame of another aspect fills the window. The blit and every absolute input
+    /// map through the same [`video_fit::place`].
+    pub video_fit: VideoFit,
 }
 
 pub enum Outcome {
@@ -588,6 +592,7 @@ fn run_inner(mut opts: SessionOpts, mut mode: ModeCtl) -> Result<Option<Outcome>
         },
     )
     .context("vulkan presenter")?;
+    presenter.set_video_fit(opts.video_fit);
     // A valid black frame immediately — the window is honest while the connect runs.
     presenter.present(&window, FrameInput::Redraw, None)?;
 
@@ -990,21 +995,20 @@ fn run_inner(mut opts: SessionOpts, mut mode: ModeCtl) -> Result<Option<Outcome>
                         let video = st.last_video;
                         if let Some(cap) = st.capture.as_mut() {
                             if cap.desktop() {
-                                // Desktop model: window position through the letterbox.
+                                // Desktop model: window position through the placement.
                                 // Before the first decoded frame there is nothing to map
                                 // onto — dropped, like touch.
                                 if let Some(video) = video {
                                     let (lw, lh) = window.size();
                                     let nx = x / lw.max(1) as f32;
                                     let ny = y / lh.max(1) as f32;
-                                    let (ax, ay, aw, ah) =
-                                        finger_to_content(window.size_in_pixels(), video, nx, ny);
-                                    cap.on_motion_abs(Abs {
-                                        x: ax,
-                                        y: ay,
-                                        w: aw,
-                                        h: ah,
-                                    });
+                                    cap.on_motion_abs(finger_to_frame(
+                                        opts.video_fit,
+                                        window.size_in_pixels(),
+                                        video,
+                                        nx,
+                                        ny,
+                                    ));
                                 }
                             } else if st.touch_mouse.leaks(xrel, yrel) {
                                 // Gaming Mode touch-as-mouse: a leaked position, not a
@@ -1092,6 +1096,7 @@ fn run_inner(mut opts: SessionOpts, mut mode: ModeCtl) -> Result<Option<Outcome>
                             x,
                             y,
                             timestamp,
+                            opts.video_fit,
                         ) {
                             on_touch_act(act, &mut stats_verbosity, &mut stream, &mut overlay);
                         }
@@ -1129,6 +1134,7 @@ fn run_inner(mut opts: SessionOpts, mut mode: ModeCtl) -> Result<Option<Outcome>
                             x,
                             y,
                             timestamp,
+                            opts.video_fit,
                         ) {
                             on_touch_act(act, &mut stats_verbosity, &mut stream, &mut overlay);
                         }
@@ -1154,6 +1160,7 @@ fn run_inner(mut opts: SessionOpts, mut mode: ModeCtl) -> Result<Option<Outcome>
                             x,
                             y,
                             timestamp,
+                            opts.video_fit,
                         ) {
                             on_touch_act(act, &mut stats_verbosity, &mut stream, &mut overlay);
                         }
@@ -1184,14 +1191,13 @@ fn run_inner(mut opts: SessionOpts, mut mode: ModeCtl) -> Result<Option<Outcome>
         // Drain forwarded cursor shape/state and drive the local OS cursor — only
         // meaningful in the desktop mouse model (capture's relative lock hides it).
         if let Some(st) = stream.as_mut() {
-            // Host-framebuffer px → cursor-surface px: aspect-fit times the content
-            // scale the backend does not already apply ([`cursor_density`]). Fit alone
-            // sizes to the streamed desktop; SDL shows a custom cursor at ~1:1 physical
-            // pixels, so without density a 200 % client draws ours at half native size.
-            let cursor_scale = st.last_video.map_or(1.0, |(vw, vh)| {
-                let (pw, ph) = window.size_in_pixels();
-                let fit = (pw as f32 / vw.max(1) as f32).min(ph as f32 / vh.max(1) as f32);
-                fit * cursor_density(&window)
+            // Host-framebuffer px → cursor-surface px: the placement scale times the
+            // content scale the backend does not already apply ([`cursor_density`]). SDL
+            // shows a custom cursor at ~1:1 physical pixels, so without density a 200 %
+            // client draws ours at half native size. Stretch keeps the shape undistorted.
+            let cursor_scale = st.last_video.map_or(1.0, |video| {
+                let p = video_fit::place(opts.video_fit, window.size_in_pixels(), video);
+                p.scale_x.min(p.scale_y) as f32 * cursor_density(&window)
             });
             if let (Some(chan), Some(c)) = (st.cursor_chan.as_mut(), st.connector.as_ref()) {
                 let desktop_active = st
@@ -1239,6 +1245,7 @@ fn run_inner(mut opts: SessionOpts, mut mode: ModeCtl) -> Result<Option<Outcome>
                                 // hand-back is seamless.
                                 if let Some(video) = video {
                                     let (wx, wy) = content_to_window(
+                                        opts.video_fit,
                                         window.size(),
                                         window.size_in_pixels(),
                                         video,
@@ -2785,9 +2792,10 @@ fn is_direct_touch(touch_id: u64) -> bool {
 
 /// Route one SDL touchscreen finger into the session's [`Capture`]. SDL delivers
 /// window-normalized `x`/`y` (0..1); the dispatcher hands physical window pixels
-/// (trackpad ballistics) and the letterboxed content rect (pointer + passthrough).
+/// (trackpad ballistics) and the frame position under `fit` (pointer + passthrough).
 /// Down/Move before the first decoded frame are dropped; an Up always dispatches so
 /// a lift can release a held contact.
+#[allow(clippy::too_many_arguments)]
 fn dispatch_finger(
     phase: FingerPhase,
     window: &sdl3::video::Window,
@@ -2796,6 +2804,7 @@ fn dispatch_finger(
     x: f32,
     y: f32,
     timestamp: u64,
+    fit: VideoFit,
 ) -> Vec<Act> {
     let Some(st) = stream.as_mut() else {
         return Vec::new();
@@ -2803,15 +2812,7 @@ fn dispatch_finger(
     let (pw, ph) = window.size_in_pixels();
     let (wx, wy) = (x * pw as f32, y * ph as f32);
     let abs = match st.last_video {
-        Some(video) => {
-            let (ax, ay, aw, ah) = finger_to_content((pw, ph), video, x, y);
-            Abs {
-                x: ax,
-                y: ay,
-                w: aw,
-                h: ah,
-            }
-        }
+        Some(video) => finger_to_frame(fit, (pw, ph), video, x, y),
         None if phase == FingerPhase::Up => Abs {
             x: 0,
             y: 0,
@@ -3034,48 +3035,39 @@ fn bump_stats_tier(verbosity: &mut StatsVerbosity, stream: &mut Option<StreamSta
     }
 }
 
-/// Contain-fit mapping (window pixels in, content pixels out) so the letterbox math
-/// is testable without a live SDL window. Mirrors [`vk::letterbox`]; a finger in the
-/// letterbox bars clamps to the nearest content edge.
-fn finger_to_content(
-    surface: (u32, u32),
-    video: (u32, u32),
-    x: f32,
-    y: f32,
-) -> (i32, i32, u32, u32) {
-    let (pw, ph) = (f64::from(surface.0), f64::from(surface.1));
-    let (vw, vh) = video;
-    let scale = (pw / f64::from(vw.max(1))).min(ph / f64::from(vh.max(1)));
-    let dw = (f64::from(vw) * scale).max(1.0);
-    let dh = (f64::from(vh) * scale).max(1.0);
-    let ox = (pw - dw) / 2.0;
-    let oy = (ph - dh) / 2.0;
-    let cx = ((f64::from(x) * pw - ox) / dw).clamp(0.0, 1.0) * dw;
-    let cy = ((f64::from(y) * ph - oy) / dh).clamp(0.0, 1.0) * dh;
-    (cx.round() as i32, cy.round() as i32, dw as u32, dh as u32)
+/// Window-normalized position → frame pixel, with the frame size as the wire extent.
+/// Same placement as the blit; a finger in a bar or on a cropped edge clamps onto the
+/// visible frame.
+fn finger_to_frame(fit: VideoFit, surface: (u32, u32), video: (u32, u32), x: f32, y: f32) -> Abs {
+    let p = video_fit::place(fit, surface, video);
+    let (fx, fy) = p.to_frame(
+        f64::from(x) * f64::from(surface.0),
+        f64::from(y) * f64::from(surface.1),
+    );
+    Abs {
+        x: fx.round() as i32,
+        y: fy.round() as i32,
+        w: video.0,
+        h: video.1,
+    }
 }
 
-/// Inverse of [`finger_to_content`] for the reappear warp: a host-frame pixel →
-/// logical window coordinates (what `warp_mouse_in_window` takes). Out-of-range host
-/// coords clamp into the content rect so the warp always lands on the video.
+/// Inverse of [`finger_to_frame`] for the reappear warp: a host-frame pixel → logical
+/// window coordinates (what `warp_mouse_in_window` takes). Coordinates outside the
+/// visible frame clamp onto it.
 fn content_to_window(
+    fit: VideoFit,
     logical: (u32, u32),
     surface: (u32, u32),
     video: (u32, u32),
     x: i32,
     y: i32,
 ) -> (f32, f32) {
-    let (pw, ph) = (f64::from(surface.0), f64::from(surface.1));
-    let (vw, vh) = (f64::from(video.0.max(1)), f64::from(video.1.max(1)));
-    let scale = (pw / vw).min(ph / vh);
-    let (dw, dh) = ((vw * scale).max(1.0), (vh * scale).max(1.0));
-    let ox = (pw - dw) / 2.0;
-    let oy = (ph - dh) / 2.0;
-    let px = ox + (f64::from(x).clamp(0.0, vw - 1.0)) * scale;
-    let py = oy + (f64::from(y).clamp(0.0, vh - 1.0)) * scale;
+    let p = video_fit::place(fit, surface, video);
+    let (px, py) = p.to_view(f64::from(x), f64::from(y));
     // Physical → logical (HiDPI): the window's logical size over its pixel size.
-    let lx = px * f64::from(logical.0) / pw.max(1.0);
-    let ly = py * f64::from(logical.1) / ph.max(1.0);
+    let lx = px * f64::from(logical.0) / f64::from(surface.0.max(1));
+    let ly = py * f64::from(logical.1) / f64::from(surface.1.max(1));
     (lx as f32, ly as f32)
 }
 
@@ -3415,18 +3407,33 @@ mod tests {
         let logical = (800u32, 600u32);
         let surface = (1600u32, 1200u32);
         let video = (1920u32, 1080u32);
-        let (wx, wy) = content_to_window(logical, surface, video, 960, 540);
+        let (wx, wy) = content_to_window(VideoFit::Fit, logical, surface, video, 960, 540);
         assert!((wx - 400.0).abs() < 1.0, "wx = {wx}");
         assert!((wy - 300.0).abs() < 1.0, "wy = {wy}");
-        // Roundtrip: normalized window pos → the same host content-rect pixel.
+        // Roundtrip: normalized window pos → the same host frame pixel.
         let (nx, ny) = (wx / logical.0 as f32, wy / logical.1 as f32);
-        let (cx, cy, dw, dh) = finger_to_content(surface, video, nx, ny);
-        assert_eq!((dw, dh), (1600, 900));
-        assert!((cx - 800).abs() <= 1, "cx = {cx}"); // 960 * (1600/1920)
-        assert!((cy - 450).abs() <= 1, "cy = {cy}"); // 540 * ( 900/1080)
-                                                     // Out-of-range host coords clamp into the video, never the bars.
-        let (_, wy_clamped) = content_to_window(logical, surface, video, 0, 10_000);
+        let abs = finger_to_frame(VideoFit::Fit, surface, video, nx, ny);
+        assert_eq!((abs.w, abs.h), video);
+        assert!((abs.x - 960).abs() <= 1, "x = {}", abs.x);
+        assert!((abs.y - 540).abs() <= 1, "y = {}", abs.y);
+        // Out-of-range host coords clamp onto the video, never the bars.
+        let (_, wy_clamped) = content_to_window(VideoFit::Fit, logical, surface, video, 0, 10_000);
         assert!(wy_clamped <= 300.0 + 225.0 + 1.0, "wy = {wy_clamped}"); // ≤ bottom of content
+    }
+
+    #[test]
+    fn crop_maps_the_window_onto_the_visible_frame() {
+        // 1920×1080 cropped into a 3216×1440 phone-shaped window: sides full, the top
+        // and bottom ~110 frame rows cut. The window's top edge is frame row ~110.
+        let surface = (3216, 1440);
+        let video = (1920, 1080);
+        let top = finger_to_frame(VideoFit::Crop, surface, video, 0.0, 0.0);
+        assert_eq!((top.x, top.y, top.w, top.h), (0, 110, 1920, 1080));
+        let corner = finger_to_frame(VideoFit::Crop, surface, video, 1.0, 1.0);
+        assert_eq!((corner.x, corner.y), (1920, 970));
+        // Stretch reaches every frame edge from every window edge.
+        let s = finger_to_frame(VideoFit::Stretch, surface, video, 1.0, 1.0);
+        assert_eq!((s.x, s.y), (1920, 1080));
     }
 
     #[test]
@@ -3728,42 +3735,34 @@ mod tests {
         assert_eq!(hdr_shown(true, false, true), hud::Hdr::Untonemapped);
     }
 
-    #[test]
-    fn finger_maps_across_a_perfectly_filled_surface() {
-        // Video exactly fills the window: normalized finger maps straight through.
-        let video = (1920, 1080);
-        assert_eq!(
-            finger_to_content((1920, 1080), video, 0.0, 0.0),
-            (0, 0, 1920, 1080)
-        );
-        assert_eq!(
-            finger_to_content((1920, 1080), video, 1.0, 1.0),
-            (1920, 1080, 1920, 1080)
-        );
-        assert_eq!(
-            finger_to_content((1920, 1080), video, 0.5, 0.5),
-            (960, 540, 1920, 1080)
-        );
+    fn frame_at(fit: VideoFit, surface: (u32, u32), x: f32, y: f32) -> (i32, i32, u32, u32) {
+        let a = finger_to_frame(fit, surface, (1920, 1080), x, y);
+        (a.x, a.y, a.w, a.h)
     }
 
     #[test]
-    fn finger_rebases_onto_the_letterboxed_content_rect() {
-        // 16:9 video in 16:10 glass (1280×800) letterboxes: content is 1280×720, centered
-        // with 40px bars. A finger in the top bar clamps to the content's top edge.
-        let surface = (1280, 800);
-        let video = (1920, 1080);
-        let (_, cy, w, h) = finger_to_content(surface, video, 0.5, 0.5);
-        assert_eq!((w, h), (1280, 720));
-        assert_eq!(cy, 360);
-        // y=0.01 → window pixel 8, above the 40px bar → clamps to content top (0).
+    fn finger_maps_across_a_perfectly_filled_surface() {
+        // Video exactly fills the window: normalized finger maps straight through.
+        let s = (1920, 1080);
+        assert_eq!(frame_at(VideoFit::Fit, s, 0.0, 0.0), (0, 0, 1920, 1080));
         assert_eq!(
-            finger_to_content(surface, video, 0.5, 0.01),
-            (640, 0, 1280, 720)
+            frame_at(VideoFit::Fit, s, 1.0, 1.0),
+            (1920, 1080, 1920, 1080)
         );
-        // Bottom-right corner of the video content.
+        assert_eq!(frame_at(VideoFit::Fit, s, 0.5, 0.5), (960, 540, 1920, 1080));
+    }
+
+    #[test]
+    fn finger_rebases_onto_the_letterboxed_frame() {
+        // 16:9 video in 16:10 glass (1280×800) letterboxes: the picture is 1280×720,
+        // centered with 40px bars. A finger in the top bar clamps to the frame's top edge.
+        let s = (1280, 800);
+        assert_eq!(frame_at(VideoFit::Fit, s, 0.5, 0.5), (960, 540, 1920, 1080));
+        // y=0.01 → window pixel 8, above the 40px bar → clamps to frame top (0).
+        assert_eq!(frame_at(VideoFit::Fit, s, 0.5, 0.01), (960, 0, 1920, 1080));
         assert_eq!(
-            finger_to_content(surface, video, 1.0, 1.0),
-            (1280, 720, 1280, 720)
+            frame_at(VideoFit::Fit, s, 1.0, 1.0),
+            (1920, 1080, 1920, 1080)
         );
     }
 }

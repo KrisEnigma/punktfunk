@@ -1,5 +1,5 @@
 //! Swapchain presenter: every decode lane writes one device-local RGBA image, then a
-//! letterboxed `vkCmdBlitImage` composite.
+//! `vkCmdBlitImage` composite placed by `punktfunk_core::video_fit`.
 //!
 //! CPU frames stage tightly-packed I420 into three R8 images (`CpuPlanes`) and share
 //! the planar CSC pass (`csc.rs`, `csc_rows`) with PyroWave. Linux dmabuf imports NV12
@@ -119,7 +119,7 @@ struct CpuPlanes {
 }
 
 /// Device-local RGBA the size of the decoded stream; every lane's CSC target before the
-/// letterboxed blit.
+/// placed blit.
 struct VideoImage {
     image: vk::Image,
     memory: vk::DeviceMemory,
@@ -219,6 +219,9 @@ pub struct Presenter {
     next_present_id: u64,
     /// Last successful id-carrying present, awaiting [`Presenter::note_presented`].
     last_presented: Option<(vk::SwapchainKHR, u64)>,
+    video_fit: punktfunk_core::video_fit::VideoFit,
+    /// Inputs of the last logged placement; a change logs the new one once.
+    placement_logged: Option<(vk::Extent2D, u32, u32)>,
 }
 
 impl Presenter {

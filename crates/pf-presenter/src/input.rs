@@ -347,7 +347,7 @@ impl Capture {
         }
     }
 
-    /// Letterboxed content position. Latest-wins: intermediates add nothing
+    /// Frame position under the video fit. Latest-wins: intermediates add nothing
     /// (deltas must sum).
     pub fn on_motion_abs(&mut self, abs: Abs) {
         if self.captured && self.desktop {
@@ -547,7 +547,7 @@ impl Capture {
     }
 
     /// `wx`/`wy` are physical window pixels (trackpad ballistics); `abs` is the
-    /// letterboxed content rect (pointer / passthrough). `Touch` goes on the
+    /// frame position under the video fit (pointer / passthrough). `Touch` goes on the
     /// wire; `Trackpad`/`Pointer` drive the gesture engine. Returns run-loop
     /// intents (`CycleStats`, dial); everything else is sent here.
     pub fn dispatch_finger(

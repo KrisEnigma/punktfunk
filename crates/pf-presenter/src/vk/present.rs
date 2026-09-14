@@ -1,4 +1,4 @@
-//! Per-frame present: `FrameInput` → video image → CSC → letterboxed blit → present.
+//! Per-frame present: `FrameInput` → video image → CSC → placed blit → present.
 //! A D3D11 RGB slot arrives converted: it is the blit source and the `Redraw` picture,
 //! with no video image. A D3D11 planar slot goes through CSC like the native lane.
 //!
@@ -28,6 +28,45 @@ use pf_client_core::video::SlotFormat;
 use pf_client_core::video::{NativeVkFrame, NativeVkLayout, RawVkFormat};
 
 impl Presenter {
+    /// How a frame of another aspect fills the swapchain. Takes effect on the next present.
+    pub fn set_video_fit(&mut self, fit: punktfunk_core::video_fit::VideoFit) {
+        self.video_fit = fit;
+        self.placement_logged = None;
+    }
+
+    /// Where a `width`×`height` frame lands in the swapchain. A new frame size or fit logs
+    /// at info; a window resize alone logs at debug, so a drag does not flood the log.
+    fn place(&mut self, width: u32, height: u32) -> punktfunk_core::video_fit::Placement {
+        let view = (self.extent.width, self.extent.height);
+        let p = punktfunk_core::video_fit::place(self.video_fit, view, (width, height));
+        let key = (self.extent, width, height);
+        if self.placement_logged != Some(key) {
+            let new_frame = self
+                .placement_logged
+                .is_none_or(|(_, w, h)| (w, h) != (width, height));
+            self.placement_logged = Some(key);
+            macro_rules! log_placement {
+                ($level:ident) => {
+                    tracing::$level!(
+                        fit = self.video_fit.name(),
+                        view = ?view,
+                        frame = ?(width, height),
+                        dst = ?(p.dst_x, p.dst_y, p.dst_w, p.dst_h),
+                        src = ?(p.src_x, p.src_y, p.src_w, p.src_h),
+                        scale = ?(p.scale_x, p.scale_y),
+                        "video placement"
+                    )
+                };
+            }
+            if new_frame {
+                log_placement!(info);
+            } else {
+                log_placement!(debug);
+            }
+        }
+        p
+    }
+
     /// Present one frame. `false` means the swapchain is out of date — the
     /// caller recreates it (current window state) and may retry.
     pub fn present(
@@ -532,20 +571,28 @@ impl Presenter {
             let source = self.video.as_ref().map(|v| (v.image, v.width, v.height));
             #[cfg(windows)]
             let source = slot.map(|(f, w, h)| (f.image, w, h)).or(source);
-            if let Some((image, width, height)) = source {
-                let (dst0, dst1) = letterbox(self.extent, width, height);
+            let placement = source.map(|(_, width, height)| self.place(width, height));
+            if let (Some((image, _, _)), Some(p)) = (source, placement.filter(|p| !p.is_empty())) {
+                let corner = |x: f64, y: f64, z: i32| vk::Offset3D {
+                    x: x.round() as i32,
+                    y: y.round() as i32,
+                    z,
+                };
                 let blit = vk::ImageBlit::default()
                     .src_subresource(subresource_layers())
                     .src_offsets([
-                        vk::Offset3D { x: 0, y: 0, z: 0 },
-                        vk::Offset3D {
-                            x: width as i32,
-                            y: height as i32,
-                            z: 1,
-                        },
+                        corner(p.src_x, p.src_y, 0),
+                        corner(p.src_x + p.src_w, p.src_y + p.src_h, 1),
                     ])
                     .dst_subresource(subresource_layers())
-                    .dst_offsets([dst0, dst1]);
+                    .dst_offsets([
+                        corner(f64::from(p.dst_x), f64::from(p.dst_y), 0),
+                        corner(
+                            f64::from(p.dst_x + p.dst_w),
+                            f64::from(p.dst_y + p.dst_h),
+                            1,
+                        ),
+                    ]);
                 self.device.cmd_blit_image(
                     self.cmd_buf,
                     image,

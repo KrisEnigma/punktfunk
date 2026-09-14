@@ -47,23 +47,6 @@ impl Presenter {
     }
 }
 
-pub(super) fn letterbox(extent: vk::Extent2D, vw: u32, vh: u32) -> (vk::Offset3D, vk::Offset3D) {
-    let (ew, eh) = (f64::from(extent.width), f64::from(extent.height));
-    let scale = (ew / f64::from(vw.max(1))).min(eh / f64::from(vh.max(1)));
-    let dw = (f64::from(vw) * scale).round();
-    let dh = (f64::from(vh) * scale).round();
-    let ox = ((ew - dw) / 2.0).floor() as i32;
-    let oy = ((eh - dh) / 2.0).floor() as i32;
-    (
-        vk::Offset3D { x: ox, y: oy, z: 0 },
-        vk::Offset3D {
-            x: (ox + dw as i32).min(extent.width as i32),
-            y: (oy + dh as i32).min(extent.height as i32),
-            z: 1,
-        },
-    )
-}
-
 pub(super) fn subresource_layers() -> vk::ImageSubresourceLayers {
     vk::ImageSubresourceLayers::default()
         .aspect_mask(vk::ImageAspectFlags::COLOR)
@@ -224,39 +207,5 @@ pub(super) fn barrier(
             &[],
             &[b],
         );
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn letterbox_pillarboxes_a_wide_window() {
-        let (a, b) = letterbox(
-            vk::Extent2D {
-                width: 3440,
-                height: 1440,
-            },
-            1280,
-            800,
-        );
-        assert_eq!((a.y, b.y), (0, 1440));
-        assert_eq!(b.x - a.x, 2304); // 1280 * (1440/800)
-        assert_eq!(a.x, (3440 - 2304) / 2);
-    }
-
-    #[test]
-    fn letterbox_matches_exact_fit() {
-        let (a, b) = letterbox(
-            vk::Extent2D {
-                width: 1280,
-                height: 800,
-            },
-            1280,
-            800,
-        );
-        assert_eq!((a.x, a.y), (0, 0));
-        assert_eq!((b.x, b.y), (1280, 800));
     }
 }

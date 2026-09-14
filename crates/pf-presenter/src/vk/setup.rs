@@ -645,6 +645,8 @@ impl Presenter {
             present_timer,
             next_present_id: 0,
             last_presented: None,
+            video_fit: Default::default(),
+            placement_logged: None,
         };
         p.recreate_swapchain(window)?;
         Ok(p)

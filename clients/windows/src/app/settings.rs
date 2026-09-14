@@ -120,6 +120,12 @@ const MOUSE_MODES: &[(&str, &str)] = &[
     ("capture", "Capture (games)"),
     ("desktop", "Desktop (absolute)"),
 ];
+/// `video_fit`: `(stored value, display label)`. Unknown values show as Fit.
+const VIDEO_FITS: &[(&str, &str)] = &[
+    ("fit", "Fit"),
+    ("crop", "Crop to fill"),
+    ("stretch", "Stretch to fill"),
+];
 /// Presentation intent: `(stored value, display label)` — the `present_priority` key the
 /// Apple and Android clients share, so one preset means the same thing everywhere.
 const PRESENT_PRIORITIES: &[(&str, &str)] =
@@ -505,6 +511,7 @@ struct OverrideFlags {
     guide_gesture: bool,
     stats_verbosity: bool,
     fullscreen_on_stream: bool,
+    video_fit: bool,
     present_priority: bool,
     smooth_buffer: bool,
     vsync: bool,
@@ -545,6 +552,7 @@ impl OverrideFlags {
             guide_gesture: o.guide_gesture.is_some(),
             stats_verbosity: o.stats_verbosity.is_some(),
             fullscreen_on_stream: o.fullscreen_on_stream.is_some(),
+            video_fit: o.video_fit.is_some(),
             present_priority: o.present_priority.is_some(),
             smooth_buffer: o.smooth_buffer.is_some(),
             vsync: o.vsync.is_some(),
@@ -969,6 +977,10 @@ pub(crate) fn settings_page(
     // Presentation intent (design/desktop-presentation-rebuild.md). The buffer row is
     // rendered only under Smoothness — `commit` bumps the revision, so flipping the
     // intent re-renders the section and the row appears/disappears with it.
+    let (fit_names, fit_i) = presets(VIDEO_FITS, |v| *v == s.video_fit);
+    let fit_combo = setting_combo(ctx, scope, (rev, set_rev), fit_names, fit_i, |s, i| {
+        s.video_fit = VIDEO_FITS[i].0.to_string();
+    });
     let (present_names, present_i) = presets(PRESENT_PRIORITIES, |v| *v == s.present_priority);
     let present_combo = setting_combo(
         ctx,
@@ -1346,6 +1358,17 @@ pub(crate) fn settings_page(
                     let mut fields = vec![described_overridable(
                         (rev, set_rev),
                         scope,
+                        "video_fit",
+                        "Picture fit",
+                        over.video_fit,
+                        fit_combo,
+                        "When the stream's shape differs from the window. Fit shows the whole \
+                         picture with black bars, Crop to fill cuts the edges off, Stretch to \
+                         fill distorts it.",
+                    )];
+                    fields.push(described_overridable(
+                        (rev, set_rev),
+                        scope,
                         "present_priority",
                         "Prioritize",
                         over.present_priority,
@@ -1353,7 +1376,7 @@ pub(crate) fn settings_page(
                         "Lowest latency shows each frame the moment the display can take \
                          it \u{2014} a network hiccup becomes an occasional repeated or \
                          skipped frame. Smoothness buffers a little to even those out.",
-                    )];
+                    ));
                     if smoothing {
                         fields.push(described_overridable(
                             (rev, set_rev),
