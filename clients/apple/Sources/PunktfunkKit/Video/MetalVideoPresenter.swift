@@ -18,6 +18,7 @@ import CoreVideo
 import IOSurface
 #endif
 import Metal
+import MetalPerformanceShaders
 import QuartzCore
 import os
 
@@ -110,13 +111,9 @@ vertex VOut pf_vtx(uint vid [[vertex_id]]) {
     return o;
 }
 
-// Bicubic (Catmull-Rom) sampling of the single-channel luma plane. The drawable is sized to the
-// LAYER's pixels (see `render`), so this kernel performs the decoded→on-screen scale: when the
-// window/view is bigger than the host's fixed mode a bilinear upscale looks soft; Catmull-Rom
-// keeps edges crisp — matching AVSampleBufferDisplayLayer's (stage-1) scaler — and reduces to the
-// exact texel at 1:1, so a native-resolution present stays pixel-exact.
-// Nine bilinear taps (TheRealMJP's optimisation of the 16-tap kernel); `s` MUST be a linear
-// sampler. Luma carries the perceived detail, so only it gets bicubic; chroma stays bilinear.
+// Catmull-Rom luma for a drawable at or above the frame size: crisp upscale, exact texel at 1:1.
+// A smaller drawable binds luma already Lanczos-scaled to its size (`lumaForTarget`), sampled 1:1.
+// Nine bilinear taps (TheRealMJP's 16-tap optimisation); `s` MUST be linear. Chroma stays bilinear.
 float catmullRomLuma(texture2d<float> tex, sampler s, float2 uv) {
     float2 texSize = float2(tex.get_width(), tex.get_height());
     float2 samplePos = uv * texSize;
@@ -144,12 +141,10 @@ float catmullRomLuma(texture2d<float> tex, sampler s, float2 uv) {
     return r;
 }
 
-// 4:2:0 chroma is left-cosited horizontally (H.273 chroma_loc type 0 — the MPEG convention the
-// host encodes and VideoToolbox decodes as-is), but sampling the half-res plane at the luma UV
-// assumes CENTER siting — a ~0.5-luma-px rightward chroma shift on hard colored edges. Offset the
-// sample by +0.25 chroma texels to re-align (libplacebo/mpv's correction). Vertical siting for
-// type 0 is centered, which plain sampling already matches. A full-size 4:4:4 plane has no
-// subsampling to correct — the offset self-disables when the plane widths match.
+// 4:2:0 chroma is left-cosited horizontally, centered vertically (H.273 chroma_loc 0); sampling at
+// the luma UV assumes center siting, so shift +0.25 chroma texels. The shift self-disables when
+// chroma is not narrower than the bound luma: 4:4:4, and 4:2:0 luma pre-scaled under 0.5×, where
+// the missed shift stays under a quarter output pixel.
 float2 chromaUV(texture2d<float> lumaTex, texture2d<float> chromaTex, float2 uv) {
     if (chromaTex.get_width() < lumaTex.get_width()) {
         uv.x += 0.25 / float(chromaTex.get_width());
@@ -424,6 +419,18 @@ public final class MetalVideoPresenter {
     private let pipelinePlanarHDR: MTLRenderPipelineState
     private let pipelinePlanarToneMap: MTLRenderPipelineState
     private var textureCache: CVMetalTextureCache?
+    /// Apple's Lanczos scaler for luma whenever the render target is smaller than the frame; nil
+    /// without MPS or under `PUNKTFUNK_DOWNSCALE=bicubic` (the shader's Catmull-Rom scales then).
+    /// Render-thread confined, like `scaledLuma`, the reused target it writes.
+    private lazy var lanczos: MPSImageLanczosScale? = {
+        guard ProcessInfo.processInfo.environment["PUNKTFUNK_DOWNSCALE"] != "bicubic",
+              MPSSupportsMTLDevice(device)
+        else { return nil }
+        let kernel = MPSImageLanczosScale(device: device)
+        kernel.edgeMode = .clamp
+        return kernel
+    }()
+    private var scaledLuma: MTLTexture?
 
     /// The PyroWave Metal decoder records on the presenter's device + queue: one device means
     /// decode, CSC and present share textures with zero interop, and one queue means Metal's
@@ -833,7 +840,8 @@ public final class MetalVideoPresenter {
               let luma = makeTexture(
                 pixelBuffer, plane: 0, format: tenBit ? .r16Unorm : .r8Unorm, cache: textureCache),
               let chroma = makeTexture(
-                pixelBuffer, plane: 1, format: tenBit ? .rg16Unorm : .rg8Unorm, cache: textureCache)
+                pixelBuffer, plane: 1, format: tenBit ? .rg16Unorm : .rg8Unorm, cache: textureCache),
+              let lumaTexture = CVMetalTextureGetTexture(luma)
         else { return false }
         // The cache holds a reference to every IOSurface it has wrapped until asked not to, which
         // pins the decoder pool's buffers — including the previous mode's full-size ones across a
@@ -854,12 +862,11 @@ public final class MetalVideoPresenter {
         return encodePresent(
             decodedSize: decodedSize, targetFromLayout: targetFromLayout, pipeline: pipeline,
             presentAtMediaTime: presentAtMediaTime, providedDrawable: drawable,
-            onPresented: onPresented,
+            onPresented: onPresented, luma: lumaTexture,
             // Hold the CVMetalTextures + source pixel buffer (its IOSurface) alive until the GPU
             // finishes sampling — releasing them at scope exit could free the backing mid-read.
             keepAlive: [luma, chroma, pixelBuffer]
         ) { encoder in
-            encoder.setFragmentTexture(CVMetalTextureGetTexture(luma), index: 0)
             encoder.setFragmentTexture(CVMetalTextureGetTexture(chroma), index: 1)
             encoder.setFragmentBytes(&csc, length: MemoryLayout<CscUniform>.stride, index: 0)
         }
@@ -901,12 +908,11 @@ public final class MetalVideoPresenter {
             decodedSize: CGSize(width: planes.width, height: planes.height),
             targetFromLayout: targetFromLayout, pipeline: planarPipeline,
             presentAtMediaTime: presentAtMediaTime, providedDrawable: drawable,
-            onPresented: onPresented,
+            onPresented: onPresented, luma: planes.y,
             // The ring textures stay valid by ring depth; retaining them here also pins the
             // slot's set until the sample completes (mirrors the biplanar keep-alive).
             keepAlive: [planes.y, planes.cb, planes.cr]
         ) { encoder in
-            encoder.setFragmentTexture(planes.y, index: 0)
             encoder.setFragmentTexture(planes.cb, index: 1)
             encoder.setFragmentTexture(planes.cr, index: 2)
             encoder.setFragmentBytes(&csc, length: MemoryLayout<CscUniform>.stride, index: 0)
@@ -914,8 +920,8 @@ public final class MetalVideoPresenter {
     }
 
     /// The shared present tail of `render`/`renderPlanar`: size the drawable, encode one
-    /// fullscreen triangle with `pipeline` (`bind` supplies the fragment resources), schedule
-    /// the present and the on-glass callback.
+    /// fullscreen triangle with `pipeline` (`luma` through `lumaForTarget` at index 0, `bind` the
+    /// rest), schedule the present and the on-glass callback.
     ///
     /// `providedDrawable` (deadline pacing) is the CAMetalDisplayLink-vended drawable to render
     /// into instead of `nextDrawable()`. It was vended against the layer's config at vend time,
@@ -927,16 +933,11 @@ public final class MetalVideoPresenter {
         decodedSize: CGSize, targetFromLayout: CGSize, pipeline: MTLRenderPipelineState,
         presentAtMediaTime: CFTimeInterval?, providedDrawable: CAMetalDrawable? = nil,
         onPresented: ((Int64?) -> Void)?,
-        keepAlive: [Any], bind: (MTLRenderCommandEncoder) -> Void
+        luma: MTLTexture, keepAlive: [Any], bind: (MTLRenderCommandEncoder) -> Void
     ) -> Bool {
-        // Size the drawable to the LAYER's pixels (its laid-out frame × contentsScale, pushed here by
-        // SessionPresenter.layout via `setDrawableTarget` — not read off the layer, whose geometry the
-        // main thread owns) so the Catmull-Rom shader performs the decoded→on-screen scale in one pass:
-        // a native-mode session stays exactly 1:1 (the kernel reduces to the identity texel), and a
-        // window bigger than the host's mode gets bicubic luma instead of the compositor's bilinear.
-        // Before the first layout (zero target) fall back to the decoded size. drawableSize does NOT
-        // track bounds (defaults to 0), so set it BEFORE nextDrawable; re-set only on a change
-        // (layout / Reconfigure / HDR flip — and every frame of a live resize, which is fine).
+        // The drawable takes the layer's pixel size (staged by SessionPresenter.layout), so this draw
+        // is the only decoded→on-screen scale; before the first layout it takes the frame size.
+        // drawableSize never tracks bounds: set it before nextDrawable, and only on a change.
         let targetSize = (targetFromLayout.width > 0 && targetFromLayout.height > 0)
             ? targetFromLayout : decodedSize
         // Under a provided (link-vended) drawable this sizes the NEXT vend — the one in hand
@@ -972,7 +973,7 @@ public final class MetalVideoPresenter {
             // sibling layer's contents. The drawable/queue tail below never runs.
             return encodeToSurface(
                 targetSize: targetSize, pipeline: pipeline, onPresented: onPresented,
-                keepAlive: keepAlive, bind: bind)
+                luma: luma, keepAlive: keepAlive, bind: bind)
         }
         #endif
         if let providedDrawable,
@@ -982,6 +983,7 @@ public final class MetalVideoPresenter {
         guard let drawable = providedDrawable ?? layer.nextDrawable(),
               let commandBuffer = queue.makeCommandBuffer()
         else { return false }
+        let lumaTexture = lumaForTarget(luma, target: drawable.texture, commandBuffer: commandBuffer)
 
         let pass = MTLRenderPassDescriptor()
         pass.colorAttachments[0].texture = drawable.texture
@@ -992,6 +994,7 @@ public final class MetalVideoPresenter {
             return false
         }
         encoder.setRenderPipelineState(pipeline)
+        encoder.setFragmentTexture(lumaTexture, index: 0)
         bind(encoder)
         encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
         encoder.endEncoding()
@@ -1098,13 +1101,14 @@ public final class MetalVideoPresenter {
     private func encodeToSurface(
         targetSize: CGSize, pipeline: MTLRenderPipelineState,
         onPresented: ((Int64?) -> Void)?,
-        keepAlive: [Any], bind: (MTLRenderCommandEncoder) -> Void
+        luma: MTLTexture, keepAlive: [Any], bind: (MTLRenderCommandEncoder) -> Void
     ) -> Bool {
         ensureSurfacePool(size: targetSize, hdr: hdrActive)
         guard let slotIndex = takeSurfaceSlot(),
               let commandBuffer = queue.makeCommandBuffer()
         else { return false }
         let slot = surfacePool[slotIndex]
+        let lumaTexture = lumaForTarget(luma, target: slot.texture, commandBuffer: commandBuffer)
 
         let pass = MTLRenderPassDescriptor()
         pass.colorAttachments[0].texture = slot.texture
@@ -1115,6 +1119,7 @@ public final class MetalVideoPresenter {
             return false
         }
         encoder.setRenderPipelineState(pipeline)
+        encoder.setFragmentTexture(lumaTexture, index: 0)
         bind(encoder)
         encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
         encoder.endEncoding()
@@ -1225,6 +1230,29 @@ public final class MetalVideoPresenter {
     }
     #endif
 
+    /// Luma to bind for a draw into `target`: the plane itself, or, when the target is smaller on
+    /// either axis, the plane Lanczos-scaled to the target's size. r16Float holds a 10-bit code to
+    /// within one step and is writable and filterable on every Apple GPU. RENDER THREAD.
+    private func lumaForTarget(
+        _ luma: MTLTexture, target: MTLTexture, commandBuffer: MTLCommandBuffer
+    ) -> MTLTexture {
+        guard target.width < luma.width || target.height < luma.height,
+              let lanczos = lanczos
+        else { return luma }
+        if scaledLuma?.width != target.width || scaledLuma?.height != target.height {
+            let desc = MTLTextureDescriptor.texture2DDescriptor(
+                pixelFormat: .r16Float, width: target.width, height: target.height,
+                mipmapped: false)
+            desc.usage = [.shaderRead, .shaderWrite]
+            desc.storageMode = .private
+            scaledLuma = device.makeTexture(descriptor: desc)
+        }
+        guard let scaledLuma else { return luma }
+        lanczos.encode(
+            commandBuffer: commandBuffer, sourceTexture: luma, destinationTexture: scaledLuma)
+        return scaledLuma
+    }
+
     /// Returns the CVMetalTexture (not just its MTLTexture) so the caller can keep it alive past the
     /// draw — the MTLTexture is only valid while its CVMetalTexture is retained.
     private func makeTexture(
@@ -1254,7 +1282,9 @@ public final class MetalVideoPresenter {
             let sy = decoded.height > 0 ? drawable.height / decoded.height : 0
             let verdict = decoded == drawable
                 ? "1:1 (no resample)"
-                : String(format: "RESAMPLE scale=%.4fx%.4f", sx, sy)
+                : String(
+                    format: "RESAMPLE scale=%.4fx%.4f %@", sx, sy,
+                    (sx < 1 || sy < 1) && lanczos != nil ? "lanczos" : "catmull-rom")
             let msg =
                 "stage2: decoded \(Int(decoded.width))x\(Int(decoded.height)) → drawable \(Int(drawable.width))x\(Int(drawable.height)) [\(verdict)] hdr=\(hdrActive)"
             presenterLog.info("\(msg, privacy: .public)")
