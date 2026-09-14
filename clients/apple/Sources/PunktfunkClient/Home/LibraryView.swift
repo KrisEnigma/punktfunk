@@ -743,11 +743,15 @@ struct LibraryView: View {
     }
 
     /// One poster: a tap launches it, a long-press or right-click offers the title's own acts.
-    /// `scope` keeps a row's copy of a title from sharing the grid's scroll id.
+    /// `scope` keeps a row's copy of a title from sharing the grid's scroll id or its tile rect,
+    /// so the launch flies out of the copy that was pressed.
     private func tile(_ game: GameEntry, caption: String? = nil, scope: String = "") -> some View {
-        Group {
-            if let launch = launchAndRemember {
-                Button { launch(game.id) } label: { card(game, caption: caption) }
+        let key = scope.isEmpty ? game.id : "\(scope):\(game.id)"
+        return Group {
+            if launchAndRemember != nil {
+                Button { launch(game.id, frameID: key) } label: {
+                    card(game, caption: caption, frameID: key)
+                }
                     // A TV's plain style draws a platter round the label, a second card round the
                     // card; this one lifts the card itself.
                     #if os(tvOS)
@@ -756,17 +760,17 @@ struct LibraryView: View {
                     .buttonStyle(.plain)
                     #endif
             } else {
-                card(game, caption: caption)
+                card(game, caption: caption, frameID: key)
             }
         }
-        .id(scope.isEmpty ? game.id : "\(scope):\(game.id)")
+        .id(key)
         .contextMenu { titleMenu(game) }
     }
 
-    private func card(_ game: GameEntry, caption: String?) -> GameCard {
+    private func card(_ game: GameEntry, caption: String?, frameID: String) -> GameCard {
         GameCard(
             game: game, artLoader: artLoader, selected: isKeyCursor(game),
-            isRunning: running[game.id] != nil, caption: caption, host: host)
+            isRunning: running[game.id] != nil, caption: caption, host: host, frameID: frameID)
     }
 
     /// A title's own acts, one level below a host card's (design §2.5): Play / Resume leads,
@@ -1129,19 +1133,23 @@ struct LibraryView: View {
     /// exactly one path however they picked the title — a tap, the keyboard, or the coverflow.
     /// `nil` in browse-only mode, which is what keeps the tiles untappable there.
     private var launchAndRemember: ((String) -> Void)? {
-        guard let onLaunch else { return nil }
-        return { id in
-            // The desktop tile is the host, not one of its titles: it connects with no launch
-            // id, and there is no position to remember for something that is not in the catalog.
-            // Every pick lands here — tap, keyboard, coverflow — so one guard covers all three.
-            if id == LibraryCollation.desktopID {
-                onConnect?()
-                return
-            }
-            LibraryScrollMemory.remember(id, forHost: host.id.uuidString)
-            LaunchedEntry.remember(games.first { $0.id == id }, from: TileFrames.rect(id))
-            onLaunch(id)
+        guard onLaunch != nil else { return nil }
+        return { launch($0) }
+    }
+
+    /// `frameID` names the pressed tile's rect when a title shows more than once; otherwise the
+    /// entry's own id.
+    private func launch(_ id: String, frameID: String? = nil) {
+        guard let onLaunch else { return }
+        // The desktop tile is the host, not one of its titles: it connects with no launch id, and
+        // there is no position to remember for something that is not in the catalog.
+        if id == LibraryCollation.desktopID {
+            onConnect?()
+            return
         }
+        LibraryScrollMemory.remember(id, forHost: host.id.uuidString)
+        LaunchedEntry.remember(games.first { $0.id == id }, from: TileFrames.rect(frameID ?? id))
+        onLaunch(id)
     }
 
     /// `host` → `host · preset` (a pinned card's shelf) → `host · preset · collection` (drilled
@@ -1265,6 +1273,8 @@ struct GameCard: View {
     var caption: String? = nil
     /// The host the title is on, named under the title with its OS mark.
     var host: StoredHost? = nil
+    /// The key the poster publishes its rect under (`TileFrames`); the entry's id when nil.
+    var frameID: String? = nil
 
     #if os(tvOS)
     @Environment(\.isFocused) private var focused
@@ -1347,7 +1357,7 @@ struct GameCard: View {
     private var poster: some View {
         PosterImage(
             candidates: game.art.posterCandidates, title: game.title, loader: artLoader,
-            icon: game.iconToken, frameID: game.id)
+            icon: game.iconToken, frameID: frameID ?? game.id)
             .aspectRatio(2.0 / 3.0, contentMode: .fit)
             .frame(maxWidth: .infinity)
             .clipShape(RoundedRectangle(cornerRadius: Self.coverRadius, style: .continuous))
