@@ -134,7 +134,6 @@ struct HostPresetMenu {
 struct HostActions {
     var connect: () -> Void
     var pair: () -> Void
-    var edit: () -> Void
     var forget: () -> Void
     var remove: () -> Void
     var browseLibrary: (() -> Void)?
@@ -154,7 +153,6 @@ struct HostActions {
 struct HostActionSurface {
     var connect: (PresetSelection) -> Void
     var pair: () -> Void
-    var edit: () -> Void
     var browse: (PresetSelection) -> Void
     var speedTest: () -> Void
     var sendLogs: () -> Void
@@ -180,7 +178,6 @@ extension HostActions {
         self.init(
             connect: { surface.connect(selection) },
             pair: surface.pair,
-            edit: surface.edit,
             forget: { store.forgetIdentity(host) },
             remove: { store.remove(host) },
             browseLibrary: paired ? { surface.browse(selection) } : nil,
@@ -376,6 +373,10 @@ struct HostCardView: View {
             #endif
             .disabled(isBusy)
             .contextMenu { menuItems }
+            #if os(tvOS)
+            // A TV card has no ⓘ: Play/Pause opens the page, as the menu's Host Details… does.
+            .onPlayPauseCommand { actions.showDetails?() }
+            #endif
             #if !os(tvOS)
             // A sibling of the card, not part of its label: a button inside a button never
             // receives the tap. tvOS reaches the page from the context menu instead.

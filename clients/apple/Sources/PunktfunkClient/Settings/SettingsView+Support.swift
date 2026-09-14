@@ -46,7 +46,8 @@ extension SettingsView {
     /// choice.
     /// `field` is the overlay's name for this row (see `SettingsField`). Passing it puts the
     /// override marker + Reset in the caption line while a preset is being edited — with the row
-    /// it belongs to, which is the only place the state is legible.
+    /// it belongs to, which is the only place the state is legible. On a TV the caption goes to
+    /// the pane's band instead (`SettingsCaptionBand`).
     @ViewBuilder
     func described<Content: View>(
         _ caption: String, field: String? = nil, @ViewBuilder content: () -> Content
@@ -56,6 +57,16 @@ extension SettingsView {
         // debug rather than by noticing a missing badge.
         assert(field.map { OverlayField.isModelled($0) } ?? true,
                "described(field:) got \(field ?? "") — not a field SettingsOverlay models")
+        #if os(tvOS)
+        // A TV row carries no caption of its own: its focus names the one the pane's band shows,
+        // and an overridden row wears a dot and resets from its context menu.
+        let overridden = field.map(isOverridden) ?? false
+        return content()
+            .modifier(TVOverrideMark(overridden: overridden) {
+                if let field { resetOverride(field) }
+            })
+            .focused($tvCaption, equals: SettingsCaption(text: caption, overridden: overridden))
+        #else
         return VStack(alignment: .leading, spacing: 5) {
             content()
             Text(caption)
@@ -72,6 +83,24 @@ extension SettingsView {
             }
         }
         .padding(.vertical, 2)
+        #endif
+    }
+
+    /// One picker row for every platform: the system `Picker`, or on tvOS the pushed selection
+    /// list (`Picker`'s own push draws its rows in the focused style while it animates).
+    @ViewBuilder
+    func settingPicker<Tag: Hashable>(
+        _ title: String, options: [(label: String, tag: Tag)], selection: Binding<Tag>
+    ) -> some View {
+        #if os(tvOS)
+        TVSelectionRow(title: title, options: options, selection: selection)
+        #else
+        Picker(title, selection: selection) {
+            ForEach(options, id: \.tag) { option in
+                Text(option.label).tag(option.tag)
+            }
+        }
+        #endif
     }
 
     // MARK: - Bitrate
@@ -81,13 +110,6 @@ extension SettingsView {
     /// first pixels.
     private static let minSliderKbps = 2_000.0
     private static let maxSliderKbps = 3_000_000.0
-
-    /// tvOS's cluster caption (the touch/desktop forms describe bitrate per-row instead).
-    ///
-    /// Deliberately says nothing about the speed test: it is reached from a host card's context
-    /// menu, and tvOS has no context menus — the old wording sent Apple TV users after a control
-    /// that does not exist there.
-    static let bitrateFooter = "Automatic bitrate uses the host's default, 20 Mbps."
 
     static let gigabitWarning =
         "Above 1 Gbps — more than the link sustains causes loss and stutter. Speed-test first."
@@ -141,11 +163,6 @@ extension SettingsView {
     static let statsDocsURL = URL(string: "https://docs.punktfunk.unom.io/docs/stats")!
 
     // MARK: - Controllers
-
-    /// tvOS's cluster caption (the touch/desktop form describes each row inline instead).
-    static let controllersFooter =
-        "Automatic uses the newest pad as player 1 and matches its type on the host. "
-        + "Applies from the next session."
 
     /// "Use controller" choices for this view's manager (see `SettingsOptions.controllerOptions`).
     var controllerOptions: [(label: String, tag: String)] {
@@ -244,3 +261,123 @@ extension SettingsView {
     }
     #endif
 }
+
+extension View {
+    /// A settings footer: caption-sized in hand; near body size and brighter on a TV, where 12 pt
+    /// can't be read from the couch.
+    func settingsFooter() -> some View {
+        #if os(tvOS)
+        font(.geist(26, relativeTo: .body)).foregroundStyle(Color.primary.opacity(0.7))
+        #else
+        font(.geist(12, relativeTo: .caption)).foregroundStyle(.secondary)
+        #endif
+    }
+}
+
+#if os(tvOS)
+/// A settings row's caption and whether the edited preset overrides it: the value a row's focus
+/// binds in `described`, for the band under the rows.
+struct SettingsCaption: Hashable {
+    let text: String
+    let overridden: Bool
+}
+
+/// The caption of whichever row has focus, in one place under the rows: per-row text does not
+/// scale to 10-foot type, and a caption per cluster can't be matched to its row.
+struct SettingsCaptionBand: View {
+    let caption: SettingsCaption?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            if caption?.overridden == true {
+                Label("Overrides Default settings — hold to reset", systemImage: "circle.fill")
+                    .foregroundStyle(Color.brand)
+            }
+            Text(caption?.text ?? "")
+                .foregroundStyle(Color.primary.opacity(0.8))
+                .lineLimit(3, reservesSpace: true)
+        }
+        // Near body size and near white, to read from the couch.
+        .font(.geist(28, relativeTo: .body))
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.vertical, 20)
+        .animation(.easeOut(duration: 0.15), value: caption)
+    }
+}
+
+/// An overridden row's dot, in the row's leading padding, and the long-press reset.
+struct TVOverrideMark: ViewModifier {
+    let overridden: Bool
+    let reset: () -> Void
+
+    @ViewBuilder func body(content: Content) -> some View {
+        if overridden {
+            content
+                .overlay(alignment: .leading) {
+                    // In the platter's padding, left of the text (the row's frame starts at
+                    // the text); past the platter the list clips it.
+                    Circle()
+                        .fill(Color.brand)
+                        .frame(width: 10, height: 10)
+                        .offset(x: -15)
+                        .accessibilityHidden(true)
+                }
+                .contextMenu {
+                    Button("Reset to Default settings", systemImage: "arrow.uturn.backward",
+                           action: reset)
+                }
+        } else {
+            content
+        }
+    }
+}
+
+/// A TV sidebar row: bare until focused, when it lifts on a white platter as a system row does.
+/// The chosen row keeps a faint platter, so the open pane stays marked while focus is in it.
+struct TVSidebarRowStyle: ButtonStyle {
+    let chosen: Bool
+
+    func makeBody(configuration: Configuration) -> some View {
+        Row(label: configuration.label, pressed: configuration.isPressed, chosen: chosen)
+    }
+
+    private struct Row: View {
+        let label: ButtonStyleConfiguration.Label
+        let pressed: Bool
+        let chosen: Bool
+        @Environment(\.isFocused) private var focused
+
+        var body: some View {
+            label
+                .padding(.horizontal, 24)
+                .padding(.vertical, 10)
+                .frame(maxWidth: .infinity, minHeight: 66, alignment: .leading)
+                .foregroundStyle(focused ? Color.black : Color.primary)
+                .background(
+                    focused ? Color.white : Color.primary.opacity(chosen ? 0.1 : 0),
+                    in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                .scaleEffect(focused ? 1.04 : 1)
+                .shadow(color: .black.opacity(focused ? 0.35 : 0), radius: 16, y: 8)
+                .opacity(pressed ? 0.85 : 1)
+                .animation(.easeOut(duration: 0.15), value: focused)
+        }
+    }
+}
+
+extension View {
+    /// The card a TV sidebar's rows sit on, so they read as navigation beside the fields.
+    func tvSidebarCard() -> some View {
+        padding(12)
+            .background(
+                Color.primary.opacity(0.07),
+                in: RoundedRectangle(cornerRadius: 28, style: .continuous))
+    }
+
+    /// Room past a pane's sides for a focused row's lift and shadow: the pane's frame, where its
+    /// list clips, grows 40 pt a side, and the safe area puts the rows back. Layout, not an
+    /// environment value, so a list pushed from the pane keeps its own clip.
+    func tvPaneRoom() -> some View {
+        safeAreaPadding(.horizontal, 40).padding(.horizontal, -40)
+    }
+}
+#endif

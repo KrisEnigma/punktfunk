@@ -65,10 +65,22 @@ impl ProbeState {
     }
 
     /// Throughput denominator, ms: client receive interval when the burst
-    /// produced one, else the host send-window duration.
-    pub(crate) fn throughput_window_ms(&self) -> u32 {
-        if self.client_interval_ms > 0 {
+    /// produced one, else the host send-window duration. While bursting the
+    /// interval is live, first to latest arrival over `delivered_packets`, so
+    /// a partial read carries a window; the host report freezes it.
+    pub(crate) fn throughput_window_ms(&self, delivered_packets: u64) -> u32 {
+        let client_ms = if self.done {
             self.client_interval_ms
+        } else {
+            Self::measured_interval_ms(
+                self.first_arrival_ns,
+                self.last_arrival_ns,
+                delivered_packets,
+            )
+            .unwrap_or(0)
+        };
+        if client_ms > 0 {
+            client_ms
         } else {
             self.host_duration_ms
         }
@@ -86,10 +98,10 @@ pub struct ProbeOutcome {
     /// Application goodput bytes / access units the host offered.
     pub host_bytes: u64,
     pub host_packets: u32,
-    /// Throughput denominator, ms: client first→last arrival once `done`;
-    /// host send-window when fewer than two probe packets arrived. Host
-    /// duration alone overstates: its window closes while the bottleneck
-    /// still drains toward the client.
+    /// Throughput denominator, ms: client first→last arrival, live while
+    /// bursting and final once `done`; host send-window when fewer than two
+    /// probe packets arrived. Host duration alone overstates: its window
+    /// closes while the bottleneck still drains toward the client.
     pub elapsed_ms: u32,
     /// Delivered wire throughput = `recv_bytes * 8 / elapsed_ms` (kbps).
     /// Drive [`Hello::bitrate_kbps`] from this; leave headroom for FEC + loss.
@@ -146,14 +158,28 @@ mod tests {
         // No client interval (<2 packets) → host send window.
         let p = ProbeState {
             host_duration_ms: 800,
+            done: true,
             ..Default::default()
         };
-        assert_eq!(p.throughput_window_ms(), 800);
+        assert_eq!(p.throughput_window_ms(1), 800);
         let p = ProbeState {
             client_interval_ms: 1_010,
             host_duration_ms: 800,
+            done: true,
             ..Default::default()
         };
-        assert_eq!(p.throughput_window_ms(), 1_010);
+        assert_eq!(p.throughput_window_ms(1_000), 1_010);
+    }
+
+    #[test]
+    fn throughput_window_is_live_while_bursting() {
+        // Before the host report: first → latest arrival, so a partial read has a window.
+        let p = ProbeState {
+            first_arrival_ns: 1_000_000,
+            last_arrival_ns: 201_000_000,
+            ..Default::default()
+        };
+        assert_eq!(p.throughput_window_ms(40), 200);
+        assert_eq!(p.throughput_window_ms(1), 0); // one packet: no interval yet
     }
 }

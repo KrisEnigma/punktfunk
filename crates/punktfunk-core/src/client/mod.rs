@@ -1231,9 +1231,9 @@ impl NativeClient {
                 p.rx_bytes_now.saturating_sub(base_b),
             )
         };
-        // Client-measured receive interval, else host send-window (host window alone
-        // overstates the link). 0 until the report lands → partial reads report 0 kbps.
-        let window_ms = p.throughput_window_ms();
+        // Client-measured receive interval, live while bursting, else host send-window (host
+        // window alone overstates the link).
+        let window_ms = p.throughput_window_ms(delivered_packets);
         let throughput_kbps = if window_ms > 0 {
             (delivered_bytes.saturating_mul(8) / window_ms as u64) as u32
         } else {

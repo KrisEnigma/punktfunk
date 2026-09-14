@@ -1,16 +1,6 @@
-// App settings. The host creates a virtual output at exactly the chosen size/refresh; the only
-// deliberate resample is the opt-in Render Scale (the host renders at size × scale and this device
-// downscales — supersampling for sharpness, or under-rendering for a lighter host/link).
-//
-// Navigation differs per platform, but all three follow the same category map (General =
-// session/app behavior, Display = everything about the picture, Input, Audio, Controllers,
-// About — see SettingsCategory): macOS uses a tabbed preferences window; iOS/iPadOS uses an
-// adaptive NavigationSplitView — a category sidebar + detail pane on iPad, auto-collapsing to
-// a hierarchical push list on iPhone (the system Settings idiom on each); tvOS uses a
-// focus-native pushed-picker layout in the same order. The individual sections
-// (`resolutionSection`, `audioSection`, …) are shared across all three so a setting is defined
-// exactly once — they live in SettingsView+Sections.swift, with their helpers (including the
-// per-field `described` caption idiom) in SettingsView+Support.swift.
+// App settings: one category map on every platform (SettingsCategory) — macOS tabs, an iOS
+// split view, a tvOS sidebar with the focused row's caption in a band. Each row is defined once,
+// in SettingsView+Sections.swift; helpers such as `described` are in SettingsView+Support.swift.
 
 #if os(macOS)
 import AppKit
@@ -22,8 +12,7 @@ import SwiftUI
 struct SettingsView: View {
     @Environment(\.dismiss) private var dismiss
     // Which LAYER this surface is editing (SettingsView+Scope): the global defaults, or one
-    // preset's overrides. tvOS keeps defaults-only in v1 — controller-first surfaces honor
-    // presets and render pinned cards, but don't edit them (design §5.4).
+    // preset's overrides. A TV picks it in its Editing pane; the gamepad UI never edits presets.
     @ObservedObject var presets = PresetStore.shared
     @State var scope: SettingsScope = .defaults
     /// The preset editor (create / duplicate / edit), when it is open, and the preset a delete
@@ -89,9 +78,9 @@ struct SettingsView: View {
     /// When the switch above takes over — read (and shown) only while it is on.
     @AppStorage(DefaultsKey.gamepadUIMode) var gamepadUIMode =
         GamepadUIEnvironment.modeWhenConnected
-    /// The gamepad UI's background palette. Edited here on tvOS only (see `tvBody`) — every other
-    /// platform reaches it through the gamepad settings screen, which an Apple TV without a
-    /// controller cannot open.
+    /// The gamepad UI's background palette. Edited here on tvOS only (`controllersSection`) —
+    /// every other platform reaches it through the gamepad settings screen, which an Apple TV
+    /// without a controller cannot open.
     @AppStorage(DefaultsKey.uiPalette) var uiPalette = "violet"
     @AppStorage(DefaultsKey.autoWake) var autoWakeEnabled = true
     @AppStorage(DefaultsKey.backgroundKeepAlive) var backgroundKeepAlive = false
@@ -128,6 +117,19 @@ struct SettingsView: View {
     // when this is false (see `isCustomResolution`), so it survives relaunches without persisting.
     @State var customMode = false
     #endif
+    #if os(tvOS)
+    /// What the TV's pane shows: the Editing row's preset manager, or a category.
+    enum TVPane: Hashable {
+        case editing
+        case category(SettingsCategory)
+    }
+
+    /// Focus on a sidebar row picks what the pane shows, as on a tab bar.
+    @State private var tvPane: TVPane = .category(.general)
+    @FocusState private var tvFocusedPane: TVPane?
+    /// The focused row's caption: each row binds it in `described`, and the band shows it.
+    @FocusState var tvCaption: SettingsCaption?
+    #endif
     /// Steam Controller 2 passthrough (device tier). Every platform shows the row, so the
     /// storage sits outside the per-platform blocks.
     @AppStorage(DefaultsKey.sc2Capture) var sc2Capture = false
@@ -158,13 +160,29 @@ struct SettingsView: View {
     init(initialCategory: SettingsCategory? = nil) {
         _settingsSelection = State(initialValue: initialCategory)
     }
+    #elseif os(tvOS)
+    #if DEBUG
+    /// Shot harness: the sidebar sits out focus, so focus starts on the pane's first row.
+    var shotFocusesPane = false
+    /// Shot harness: the dial's editor opens a slot's list and goes back.
+    var shotPushPop = false
+    #endif
+
+    /// The app opens on General in Default settings; the screenshot harness opens a specific
+    /// pane and layer.
+    init(
+        initialCategory: SettingsCategory = .general, initialScope: SettingsScope = .defaults,
+        startsOnEditing: Bool = false
+    ) {
+        _tvPane = State(initialValue: startsOnEditing ? .editing : .category(initialCategory))
+        _scope = State(initialValue: initialScope)
+    }
     #endif
 
     var body: some View {
         #if os(tvOS)
-        // Native tv pattern: no inline text entry (typing numbers with a remote is
-        // miserable and the inline field chrome fights the focus system). Modes are
-        // preset pickers that push selection lists like the system Settings app.
+        // No inline text entry on a TV: values are picked from pushed lists, as in the system
+        // Settings app.
         tvBody
         #elseif os(macOS)
         macBody
@@ -396,193 +414,210 @@ struct SettingsView: View {
     }
     #endif
 
-    // MARK: - tvOS
+    // MARK: - tvOS: a sidebar of categories
 
     #if os(tvOS)
-    private static let presets: [(label: String, tag: String)] = [
-        ("720p @ 60", "1280x720x60"),
-        ("1080p @ 60", "1920x1080x60"),
-        ("4K @ 60", "3840x2160x60"),
-    ]
-
-    private var modeTag: Binding<String> {
-        Binding(
-            get: { "\(width)x\(height)x\(hz)" },
-            set: { tag in
-                let parts = tag.split(separator: "x").compactMap { Int($0) }
-                guard parts.count == 3 else { return }
-                width = parts[0]
-                height = parts[1]
-                hz = parts[2]
-            })
-    }
-
-    private var hdrEnabledTag: Binding<String> {
-        Binding(get: { hdrEnabled ? "on" : "off" }, set: { hdrEnabled = $0 == "on" })
-    }
-
-    /// The gamepad-UI switch as an on/off row (same shape as HDR above) — the escape hatch back
-    /// to this focus-engine home for someone who prefers it with a controller connected.
-    private var gamepadUIEnabledTag: Binding<String> {
-        Binding(get: { gamepadUIEnabled ? "on" : "off" }, set: { gamepadUIEnabled = $0 == "on" })
-    }
-
-    private var sc2CaptureTag: Binding<String> {
-        Binding(get: { sc2Capture ? "on" : "off" }, set: { sc2Capture = $0 == "on" })
-    }
-
-    private var autoWakeEnabledTag: Binding<String> {
-        Binding(get: { autoWakeEnabled ? "on" : "off" }, set: { autoWakeEnabled = $0 == "on" })
-    }
-
-    private var advancedStatsTag: Binding<String> {
-        Binding(get: { advancedStats ? "on" : "off" }, set: { advancedStats = $0 == "on" })
-    }
-
-    /// One cluster caption, TV-legible — the 10-foot analogue of the touch/desktop per-row
-    /// `described` captions (per-row text doesn't scale to TV type sizes).
-    private func tvCaption(_ text: String) -> some View {
-        Text(text)
-            .font(.geist(20, relativeTo: .caption))
-            .foregroundStyle(.secondary)
-            .multilineTextAlignment(.center)
-            .padding(.top, 8)
-    }
-
+    /// The Editing row and the categories beside the chosen pane, the focused row's caption in a
+    /// band under it (design/apple-tvos-ui-overhaul.md §2.2). Two focus sections side by side:
+    /// focus on a sidebar row picks the pane, as on a tab bar, and a swipe right enters it.
     private var tvBody: some View {
-        let currentTag = "\(width)x\(height)x\(hz)"
-        let bounds = UIScreen.main.nativeBounds
-        let nativeTag = "\(Int(max(bounds.width, bounds.height)))x"
-            + "\(Int(min(bounds.width, bounds.height)))x\(UIScreen.main.maximumFramesPerSecond)"
-        var options = Self.presets
-        if !options.contains(where: { $0.tag == nativeTag }) {
-            options.insert(("This TV (native)", nativeTag), at: 0)
-        }
-        if !options.contains(where: { $0.tag == currentTag }) {
-            options.insert(("Custom (\(width)×\(height) @ \(hz))", currentTag), at: 0)
-        }
-        // Row order mirrors the touch/desktop category map: Display (mode → quality →
-        // presentation → host output), then Audio, General, Statistics, Controllers — with one
-        // short caption per cluster (per-row captions don't scale to 10-foot type sizes).
-        return ScrollView {
-            VStack(spacing: 16) {
-                TVSelectionRow(title: "Stream mode", options: options, selection: modeTag)
-                TVSelectionRow(
-                    title: "Render scale",
-                    options: RenderScale.presets.map { (label: RenderScale.label($0), tag: $0) },
-                    selection: $renderScale)
-                // PyroWave is always Automatic (ABR overhaul RFC §5.2): the session sends 0
-                // and the host pins a per-mode rate. tvOS has no codec picker, so this only
-                // fires on a codec synced from another device — but the row must not offer a
-                // rate the session ignores. The stored value is kept.
-                if codec == "pyrowave", MetalWaveletDecoder.supported {
-                    tvCaption("PyroWave sets its own rate from the stream mode — the bitrate "
-                        + "setting doesn't apply.")
-                } else {
-                    TVSelectionRow(
-                        title: "Bitrate",
-                        options: SettingsOptions.bitrateOptions(current: bitrateKbps),
-                        selection: $bitrateKbps)
-                    if bitrateKbps > 1_000_000 {
-                        Label(Self.gigabitWarning, systemImage: "exclamationmark.triangle.fill")
-                            .font(.geist(20, relativeTo: .caption)) // TV-legible caption size
-                            .foregroundStyle(.orange)
-                            .multilineTextAlignment(.center)
+        presetPrompts(
+            HStack(alignment: .top, spacing: 48) {
+                tvSidebar
+                    .frame(width: 460)
+                    .focusSection()
+                    #if DEBUG
+                    .disabled(shotFocusesPane)
+                    #endif
+                VStack(spacing: 0) {
+                    tvPaneContent
+                        .tvPaneRoom()
+                    SettingsCaptionBand(caption: tvCaption)
+                }
+                .frame(maxWidth: .infinity)
+                .focusSection()
+            }
+            .padding(.horizontal, 60))
+            // Focus enters on the chosen pane, so coming back finds the category left open.
+            .defaultFocus($tvFocusedPane, tvPane)
+            .onChange(of: tvFocusedPane) { _, pane in
+                if let pane { tvPane = pane }
+            }
+            .onAppear {
+                gamepads.refresh()
+                gamepads.startDiscovery()
+            }
+            .onDisappear { gamepads.stopDiscovery() }
+    }
+
+    private var tvSidebar: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            VStack(alignment: .leading, spacing: 8) {
+                // The layer every category below edits, never off screen while you edit it.
+                Button {
+                    tvPane = .editing
+                } label: {
+                    HStack(spacing: 14) {
+                        scopeDot
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Editing")
+                                .font(.geist(20, relativeTo: .caption))
+                                .foregroundStyle(.secondary)
+                            Text(scopeName)
+                                .lineLimit(1)
+                        }
+                        Spacer(minLength: 16)
+                        if tvPane == .editing {
+                            Image(systemName: "chevron.forward")
+                                .foregroundStyle(.secondary)
+                        }
                     }
                 }
-                TVSelectionRow(
-                    title: "10-bit HDR",
-                    options: [("On", "on"), ("Off", "off")], selection: hdrEnabledTag)
-                TVSelectionRow(
-                    title: "Prioritize",
-                    options: SettingsOptions.presentPriorities,
-                    selection: $presentPriority)
-                if presentPriority == "smooth" {
-                    TVSelectionRow(
-                        title: "Smoothness buffer",
-                        options: SettingsOptions.smoothBuffers(refreshHz: hz),
-                        selection: $smoothBuffer)
+                .buttonStyle(TVSidebarRowStyle(chosen: tvPane == .editing))
+                .focused($tvFocusedPane, equals: .editing)
+                .padding(.bottom, 12)
+                ForEach(SettingsCategory.allCases) { category in
+                    Button {
+                        tvPane = .category(category)
+                    } label: {
+                        HStack {
+                            Label(category.title, systemImage: category.symbol)
+                            Spacer(minLength: 16)
+                            if tvPane == .category(category) {
+                                Image(systemName: "chevron.forward")
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                    .buttonStyle(TVSidebarRowStyle(chosen: tvPane == .category(category)))
+                    .focused($tvFocusedPane, equals: .category(category))
                 }
-                TVSelectionRow(
-                    title: "Compositor", options: SettingsOptions.compositors,
-                    selection: $compositor)
-                tvCaption("The host drives a real output at exactly the chosen mode. "
-                    + "\(Self.bitrateFooter) Lowest latency shows frames immediately; "
-                    + "Smoothness buffers a few. A compositor is honored only if available. "
-                    + "Applies from the next session.")
-                TVSelectionRow(
-                    title: "Audio channels",
-                    options: SettingsOptions.audioChannels,
-                    selection: $audioChannels)
-                // Offered at every channel count — the lossless plane is no longer stereo-only,
-                // because the frame ladder is sized per channel count and surround simply
-                // negotiates a shorter frame (see SettingsOptions.audioFormats).
-                TVSelectionRow(
-                    title: "Audio quality",
-                    options: SettingsOptions.audioFormats,
-                    selection: $audioFormat)
-                tvCaption("Lossless sends bit-exact PCM — 2.3 Mbps at 48 kHz, up to 8.5 at "
-                    + "176.4. Falls back to Standard if the host or this TV declines it.")
-                TVSelectionRow(
-                    title: "Auto-wake on connect",
-                    options: [("On", "on"), ("Off", "off")], selection: autoWakeEnabledTag)
-                tvCaption("Sends Wake-on-LAN to a sleeping saved host and waits for it.")
-                TVSelectionRow(
-                    title: "Statistics overlay",
-                    options: SettingsOptions.statsVerbosities, selection: $statsVerbosityRaw)
-                TVSelectionRow(
-                    title: "Advanced statistics",
-                    options: [("On", "on"), ("Off", "off")], selection: advancedStatsTag)
-                tvCaption(Self.advancedStatisticsDescription
-                    + " What each number means: docs.punktfunk.unom.io/docs/stats")
-                TVSelectionRow(
-                    title: "Statistics position", options: SettingsOptions.hudPlacements,
-                    selection: $hudPlacement)
-                ForEach(gamepads.controllers) { controller in
-                    controllerRow(controller)
-                        .padding(.horizontal, 24)
-                }
-                TVSelectionRow(
-                    title: "Use controller", options: controllerOptions,
-                    selection: $gamepads.preferredID)
-                TVSelectionRow(
-                    title: "Controller type", options: SettingsOptions.padTypes,
-                    selection: $gamepadType)
-                TVSelectionRow(
-                    title: "Steam Controller 2 passthrough",
-                    options: [("On", "on"), ("Off", "off")], selection: sc2CaptureTag)
-                tvCaption(Self.sc2CaptureCaption)
-                TVSelectionRow(
-                    title: "Gamepad-optimized browsing",
-                    options: [("On", "on"), ("Off", "off")], selection: gamepadUIEnabledTag)
-                // Hidden while the switch above is off — see the touch settings' identical gate.
-                if gamepadUIEnabled {
-                    TVSelectionRow(
-                        title: "Show it",
-                        options: SettingsOptions.gamepadUIModes, selection: $gamepadUIMode)
-                    // The Apple TV's only route to the shared `ui_palette`: elsewhere the row lives
-                    // on the gamepad settings screen, whose launcher needs an extended-profile
-                    // controller, out of reach of a Siri Remote. It sits beside "Show it" since
-                    // both describe the interface this row sets the look of.
-                    TVSelectionRow(
-                        title: "Background",
-                        options: GamepadPalette.all.map { (label: $0.name, tag: $0.id) },
-                        selection: $uiPalette)
-                }
-                tvCaption(Self.controllersFooter)
-                NavigationLink("About") { AboutView() }
-                    .padding(.top, 8)
             }
-            .frame(maxWidth: 1000)
-            .frame(maxWidth: .infinity)
-            .padding(60)
+            .tvSidebarCard()
+            Spacer(minLength: 0)
         }
-        .navigationTitle("Settings")
-        .onAppear {
-            gamepads.refresh()
-            gamepads.startDiscovery()
+    }
+
+    @ViewBuilder private var tvPaneContent: some View {
+        switch tvPane {
+        case .editing:
+            tvPresetManager
+        case .category(.general):
+            Form {
+                sessionSection
+                overlaySection
+                librarySection
+            }
+        case .category(.display):
+            Form {
+                resolutionSection
+                qualitySection
+                presentationSection
+                hostOutputSection
+            }
+        case .category(.audio):
+            Form { audioSection }
+        case .category(.controllers):
+            Form { controllersSection }
+        case .category(.quickActions):
+            tvQuickActions
+        case .category(.about):
+            AboutView()
         }
-        .onDisappear { gamepads.stopDiscovery() }
+    }
+
+    private var tvQuickActions: TVQuickActionsEditor {
+        var editor = TVQuickActionsEditor(
+            blob: scoped(SettingsFields.overlayActions),
+            overridden: isOverridden("overlay_actions")
+        ) {
+            if inPresetScope {
+                resetOverride("overlay_actions")
+            } else {
+                scoped(SettingsFields.overlayActions).wrappedValue = ""
+            }
+        }
+        #if DEBUG
+        editor.shotPushPop = shotPushPop
+        #endif
+        return editor
+    }
+
+    /// The Editing pane: which layer the categories edit, and the edited preset's own acts as
+    /// rows — the iPhone's scope menu, without a menu inside a menu.
+    private var tvPresetManager: some View {
+        Form {
+            Section {
+                tvLayerRow(.defaults, name: "Default settings", color: nil, detail: nil)
+                ForEach(presets.presets) { preset in
+                    tvLayerRow(
+                        .preset(preset.id), name: preset.name, color: preset.accentColor,
+                        detail: tvUsage(of: preset))
+                }
+                Button {
+                    presetDraft = .create()
+                } label: {
+                    Label("New Preset…", systemImage: "plus")
+                }
+            } header: {
+                Text("Editing")
+            } footer: {
+                Text(scopeCaption)
+            }
+            if let active = activePreset {
+                Section(active.name) {
+                    Button {
+                        presetDraft = .edit(active)
+                    } label: {
+                        Label("Name and Color…", systemImage: "pencil")
+                    }
+                    Button {
+                        presetDraft = .duplicate(
+                            active, name: Self.copyName(of: active.name, in: presets))
+                    } label: {
+                        Label("Duplicate…", systemImage: "plus.square.on.square")
+                    }
+                    Button(role: .destructive) {
+                        presetPendingDelete = active
+                    } label: {
+                        Label("Delete…", systemImage: "trash")
+                    }
+                }
+            }
+        }
+    }
+
+    private func tvLayerRow(
+        _ layer: SettingsScope, name: String, color: Color?, detail: String?
+    ) -> some View {
+        Button {
+            scope = layer
+        } label: {
+            HStack(spacing: 16) {
+                if let color {
+                    Circle().fill(color).frame(width: 18, height: 18)
+                } else {
+                    Image(systemName: "gearshape")
+                }
+                Text(name)
+                Spacer(minLength: 16)
+                if let detail {
+                    Text(detail).foregroundStyle(.secondary)
+                }
+                if scope == layer {
+                    Image(systemName: "checkmark")
+                }
+            }
+        }
+    }
+
+    /// What a delete would change, said before anyone asks: bound hosts and pinned cards.
+    private func tvUsage(of preset: StreamPreset) -> String {
+        let (bound, pinned) = presets.usage(of: preset.id)
+        var parts: [String] = []
+        if bound > 0 { parts.append(bound == 1 ? "1 host" : "\(bound) hosts") }
+        if pinned > 0 { parts.append(pinned == 1 ? "1 card" : "\(pinned) cards") }
+        return parts.isEmpty ? "Not used" : parts.joined(separator: " · ")
     }
     #endif
 }

@@ -11,15 +11,12 @@ field and every client resolves against the set it ships.
 | `lutris` | Lutris | punktfunk-plugin-lutris | Simple Icons (CC0 1.0) |
 | `heroic` | Heroic Games Launcher | punktfunk-plugin-heroic | Simple Icons (CC0 1.0, slug `heroicgameslauncher`) |
 | `playnite` | Playnite | punktfunk-plugin-playnite | JosefNemec/Playnite (MIT) |
-| `epic` | Epic Games | punktfunk-plugin-epic — **dormant** | Simple Icons (CC0 1.0, slug `epicgames`) |
-| `gog` | GOG.com | punktfunk-plugin-gog — **dormant** | Simple Icons (CC0 1.0, slug `gogdotcom`) |
-| `xbox` | Xbox | punktfunk-plugin-xbox — **dormant** | Font Awesome Free brands (CC BY 4.0) |
+| `epic` | Epic Games | punktfunk-plugin-epic | Simple Icons (CC0 1.0, slug `epicgames`) |
+| `gog` | GOG.com | punktfunk-plugin-gog | Simple Icons (CC0 1.0, slug `gogdotcom`) |
+| `xbox` | Xbox | punktfunk-plugin-xbox | Font Awesome Free brands (CC BY 4.0) |
 
-The last three are **dormant on purpose**: those plugins carry a `launcher` config switch that
-is off by default and whose `launcherEntries` returns nothing, because the host has no verified
-`launcher_ui` activation for them yet — a tile would be a card that does nothing. Their marks
-ship anyway so that turning one on stays the one-line plugin change those plugins promise,
-instead of also needing a release of all six clients.
+The Epic, GOG and Xbox tiles need a Windows host that knows their `launcher_ui` values; an
+older host drops the tile and still syncs the games.
 
 `steam` is the same mark as `assets/os-icons/steam.svg`, generated from that file rather than
 re-sourced, so the SteamOS host badge and the Steam launcher tile can never drift apart.

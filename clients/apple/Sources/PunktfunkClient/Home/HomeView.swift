@@ -42,10 +42,6 @@ struct HomeView: View {
     /// Explicit Wake-on-LAN of an offline host — fires the packet and waits for it to come online
     /// (the "Waking…" overlay), without connecting. Routed through ContentView's HostWaker.
     let wake: (StoredHost) -> Void
-    /// Game-library browser (default ON; the Settings toggle opts out) — the host-card
-    /// "Browse Library…" action.
-    /// The host being edited (name / address / port / Wake-on-LAN MAC) — drives the edit sheet.
-    @State private var editTarget: StoredHost?
     #if os(macOS)
     @Environment(\.openWindow) private var openWindow
     #else
@@ -56,7 +52,9 @@ struct HomeView: View {
     @Environment(\.horizontalSizeClass) private var sizeClass
     /// The host whose page is up as the iPad's sheet of sections.
     @State private var sectionsHost: StoredHost?
-    /// An act that sheet handed back, run once the sheet is gone.
+    #endif
+    #if os(iOS) || os(tvOS)
+    /// An act the sectioned page handed back, run once the page is gone.
     @State private var pendingHandOff: HostPageRequest?
     #endif
     /// The start-screen pointer; the default host's card carries the accent bar.
@@ -126,11 +124,6 @@ struct HomeView: View {
                             } label: {
                                 Label("Add Host", systemImage: "plus")
                             }
-                            Button {
-                                showSettings = true
-                            } label: {
-                                Label("Settings", systemImage: "gearshape")
-                            }
                             refreshButton
                         }
                         .padding(.top, 24)
@@ -149,7 +142,10 @@ struct HomeView: View {
                     #endif
                 }
             }
+            // A TV's tab bar names the place, so its root carries no title.
+            #if !os(tvOS)
             .navigationTitle("Punktfunk")
+            #endif
             // Browse the LAN for advertised hosts only while the grid is up — not during a
             // session. The home appears/disappears as the stream swaps in and out.
             .onAppear { discovery.start() }
@@ -179,8 +175,17 @@ struct HomeView: View {
             // from it. The Mac opens both in the host's own window (`MacHostWindow`).
             #if !os(macOS)
             .navigationDestination(item: $detailTarget) { id in
+                #if os(tvOS)
+                // The iPad's sectioned page; what it hands back runs once the pop has finished.
+                HostSectionsView(hostID: id, store: store) { request in
+                    pendingHandOff = request
+                    detailTarget = nil
+                }
+                .onDisappear(perform: runHandOff)
+                #else
                 HostDetailView(
                     store: store, hostID: id, actions: { hostActions(for: $0, pinned: nil) })
+                #endif
             }
             .navigationDestination(item: $speedTestTarget) { host in
                 SpeedTestView(host: host)
@@ -196,28 +201,8 @@ struct HomeView: View {
             .navigationDestination(isPresented: $showAddHost) {
                 AddHostSheet { store.add($0) }
             }
-            .navigationDestination(isPresented: $showSettings) {
-                SettingsView()
-            }
             .navigationDestination(item: $pairingTarget) { host in
                 PairSheet(host: host) { fingerprint in onPaired(host, fingerprint) }
-            }
-            .navigationDestination(item: $editTarget) { host in
-                AddHostSheet(
-                    existing: host,
-                    suggestedMacs: discovery.hosts.first { host.matches($0) }?.macAddresses ?? [],
-                    onSave: { store.update($0) })
-            }
-            .navigationDestination(item: $editTarget) { host in
-                AddHostSheet(
-                    existing: host,
-                    suggestedMacs: discovery.hosts.first { host.matches($0) }?.macAddresses ?? [],
-                    onSave: { store.update($0) })
-            }
-            .navigationDestination(item: $libraryTarget) { shelf in
-                LibraryView(
-                    store: store, target: shelf, onLaunch: { onLaunchTitle(shelf, $0) },
-                    onConnect: { onConnectShelf(shelf) })
             }
             #endif
             #if !os(tvOS)
@@ -301,24 +286,10 @@ struct HomeView: View {
         #if os(macOS)
         .frame(minWidth: 480, minHeight: 360)
         #endif
-        #if os(tvOS) && canImport(SwiftUINavigationTransitions)
-        // The Settings-app slide for every push in this stack (top-level routes AND
-        // the pickers' drill-ins) — SwiftUI's default on tvOS is a bare crossfade.
-        // Spring-driven (UISpringTimingParameters): ~0.87 damping ratio — settles fast
-        // with just a hint of life, no visible overshoot ping-pong.
-        .customNavigationTransition(
-            .slide.animation(.interpolatingSpring(stiffness: 300, damping: 30)))
-        #endif
+        .tvPushSlide()
         #if !os(tvOS)
         .sheet(isPresented: $showAddHost) {
             AddHostSheet { store.add($0) }
-        }
-        .sheet(item: $editTarget) { host in
-            // Prefill the MAC from the live advert when the host hasn't stored one yet.
-            AddHostSheet(
-                existing: host,
-                suggestedMacs: discovery.hosts.first { host.matches($0) }?.macAddresses ?? [],
-                onSave: { store.update($0) })
         }
         #if os(iOS)
         // SettingsView owns its own NavigationSplitView (sidebar + detail) and Done button, so it
@@ -397,7 +368,6 @@ struct HomeView: View {
             surface: HostActionSurface(
                 connect: { connect(host, $0) },
                 pair: { if !model.isBusy { pairingTarget = host } },
-                edit: { editTarget = host },
                 browse: { libraryTarget = LibraryTarget(host: host, preset: $0) },
                 speedTest: { if !model.isBusy { speedTestTarget = host } },
                 sendLogs: { Task { sendLogsResult = await SendLogs.toHost(host) } },
@@ -418,8 +388,9 @@ struct HomeView: View {
         #endif
     }
 
-    #if os(iOS)
-    /// The iPad's host sheet closed on an act that belongs to the grid: run it now it is gone.
+    #if os(iOS) || os(tvOS)
+    /// The iPad's host sheet or the TV's host page closed on an act that belongs to the grid: run
+    /// it now it is gone.
     private func runHandOff() {
         guard let request = pendingHandOff else { return }
         pendingHandOff = nil
@@ -506,9 +477,6 @@ struct HomeView: View {
                 #if os(iOS)
                 .controlSize(.large)
                 #endif
-            #if os(tvOS)
-            Button("Settings") { showSettings = true }
-            #endif
         }
     }
 
@@ -597,6 +565,19 @@ struct HomeView: View {
         48 // the focused card scales up — give it room instead of overlapping siblings
         #else
         16
+        #endif
+    }
+}
+
+extension View {
+    /// The Settings-app slide for every push in a tvOS stack; SwiftUI's own is a bare crossfade.
+    /// Spring-driven at ~0.87 damping: it settles fast, with no visible overshoot.
+    @ViewBuilder func tvPushSlide() -> some View {
+        #if os(tvOS) && canImport(SwiftUINavigationTransitions)
+        customNavigationTransition(
+            .slide.animation(.interpolatingSpring(stiffness: 300, damping: 30)))
+        #else
+        self
         #endif
     }
 }

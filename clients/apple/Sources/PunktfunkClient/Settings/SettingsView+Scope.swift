@@ -335,9 +335,8 @@ extension SettingsView {
     /// (`scopeRow`) — a form sheet has no window header to hang a button off, and a bordered
     /// button dropped into a `List` renders as neither a row nor a control.
     ///
-    /// Absent on tvOS: controller-first surfaces honor presets and render pinned cards, but don't
-    /// EDIT them in v1 (design §5.4) — a name prompt and a nested management menu are not what a
-    /// remote does well, and the pattern should prove itself on the primary surfaces first.
+    /// A TV shows the same choices and acts as rows in its Editing pane (`tvPresetManager`): a
+    /// remote does menus inside menus badly.
     @ViewBuilder
     var scopeMenuContent: some View {
         // A Picker rather than hand-rolled buttons: the platform owns the selection checkmark
@@ -412,13 +411,19 @@ extension SettingsView {
         if let preset = activePreset {
             Circle()
                 .fill(preset.accentColor)
-                .frame(width: 9, height: 9)
+                .frame(width: Self.scopeDotSize, height: Self.scopeDotSize)
                 .accessibilityHidden(true) // the name is right beside it
         } else {
             Image(systemName: "gearshape")
                 .foregroundStyle(.secondary)
         }
     }
+
+    #if os(tvOS)
+    static let scopeDotSize: CGFloat = 16
+    #else
+    static let scopeDotSize: CGFloat = 9
+    #endif
 
     var scopeCaption: String {
         activePreset == nil
@@ -481,8 +486,9 @@ extension SettingsView {
     }
     #endif
 
-    /// The editor and the delete confirmation, attached wherever the menu lives.
-    private func presetPrompts<Content: View>(_ content: Content) -> some View {
+    /// The editor and the delete confirmation, attached wherever the menu or the TV's Editing
+    /// pane lives.
+    func presetPrompts<Content: View>(_ content: Content) -> some View {
         content
             .sheet(item: $presetDraft) { draft in
                 PresetEditorSheet(draft: draft) { scope = $0 }
@@ -533,7 +539,7 @@ extension SettingsView {
 
     /// "Game copy", "Game copy 2", … — the first name that isn't taken, so Duplicate never opens
     /// with a name the accept button refuses.
-    private static func copyName(of name: String, in store: PresetStore) -> String {
+    static func copyName(of name: String, in store: PresetStore) -> String {
         let base = "\(name) copy"
         if !store.nameTaken(base) { return base }
         for n in 2...99 where !store.nameTaken("\(base) \(n)") { return "\(base) \(n)" }

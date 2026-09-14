@@ -546,7 +546,6 @@ mod tests {
             })
             .context("open video encoder")
         };
-        use pf_driver_proto::encode::{SET_ENCODE_NO_BACKEND, SET_ENCODE_NO_DEVICE};
         assert!(is_driver_no_device(&open(SET_ENCODE_NO_DEVICE)));
         assert!(!is_driver_no_device(&open(SET_ENCODE_NO_BACKEND)));
     }

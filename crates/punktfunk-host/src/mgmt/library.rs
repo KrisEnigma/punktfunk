@@ -63,7 +63,8 @@ fn check_privileged_fields(
                         "`{field}` can become a command the host runs as the host user, so it may \
                          only be set with the operator's admin token — a plugin may publish entries \
                          with any host-resolved launch kind (steam_appid, steam_ui, launcher_ui, \
-                         epic, gog, aumid, xbox, lutris_id, heroic, playnite) or `plugin` instead"
+                         epic, gog, aumid, xbox, lutris_id, heroic, playnite, uplay, amazon, \
+                         battlenet) or `plugin` instead"
                     ),
                 ),
             ));

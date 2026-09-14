@@ -4,8 +4,13 @@
 
 use super::*;
 
-/// Playnite only. Unverified Epic/GOG/Xbox activation would ship a dead tile.
-pub(super) const LAUNCHER_UI_STORES: &[&str] = &["playnite"];
+/// Each activation below was checked on a real install; an unverified one ships a dead tile.
+pub(super) const LAUNCHER_UI_STORES: &[&str] = &["playnite", "epic", "gog", "xbox"];
+
+/// The Xbox app's package identity and app id (its `AppxManifest.xml`). The publisher hash
+/// is read from AppRepository at launch, like the `xbox` kind.
+const XBOX_APP_IDENTITY: &str = "Microsoft.GamingApp";
+const XBOX_APP_ID: &str = "Microsoft.Xbox.App";
 
 /// Recipe is resolved in [`launch_title`]; a missing one still yields a target here.
 pub(super) fn launch_target(
@@ -26,12 +31,15 @@ pub fn launch_is_resolvable(_id: &str) -> bool {
     false
 }
 
-/// Can this box open a known `launcher_ui` value now? Playnite: its Fullscreen exe was found.
+/// Can this box open a known `launcher_ui` value now? Yes once its exe or package is found.
 pub(super) fn launcher_ui_installed(value: &str) -> bool {
-    if value == "playnite" {
-        return playnite_fullscreen_exe().is_some();
+    match value {
+        "playnite" => playnite_fullscreen_exe().is_some(),
+        "epic" => epic_launcher_exe().is_some(),
+        "gog" => galaxy_exe().is_some(),
+        "xbox" => xbox_pfn(XBOX_APP_IDENTITY).is_some(),
+        _ => false,
     }
-    true
 }
 
 /// Command line, working dir, and whether the started process **is** the game.
@@ -50,6 +58,15 @@ pub struct WinRecipe {
 }
 
 impl WinRecipe {
+    /// A launcher exe started in its own dir. It forwards to a running instance and exits.
+    fn handoff_exe(exe: std::path::PathBuf) -> Self {
+        Self {
+            cmdline: format!("\"{}\"", exe.display()),
+            workdir: exe.parent().map(std::path::Path::to_path_buf),
+            owns_game: false,
+        }
+    }
+
     fn handoff(cmdline: String) -> Self {
         Self {
             cmdline,
@@ -209,12 +226,20 @@ fn windows_launch_for(spec: &LaunchSpec) -> Option<WinRecipe> {
                 spec.value
             )))
         }
-        // Playnite Fullscreen (design D4). `playnite://` opens the desktop app, so spawn the exe.
-        // Workdir is the install dir; a .NET app expects it.
+        // Launcher UIs (design D4). Playnite Fullscreen is spawned directly: `playnite://` opens
+        // the desktop app, and the .NET app expects its install dir as workdir. The store
+        // clients forward to a running instance, so they are hand-offs.
         "launcher_ui" => match spec.value.as_str() {
             "playnite" => playnite_fullscreen_exe().map(|exe| {
                 let dir = exe.parent().map(std::path::Path::to_path_buf);
                 WinRecipe::game(format!("\"{}\"", exe.display()), dir)
+            }),
+            "epic" => epic_launcher_exe().map(WinRecipe::handoff_exe),
+            "gog" => galaxy_exe().map(WinRecipe::handoff_exe),
+            "xbox" => xbox_pfn(XBOX_APP_IDENTITY).map(|pfn| {
+                WinRecipe::handoff(format!(
+                    "explorer.exe \"shell:AppsFolder\\{pfn}!{XBOX_APP_ID}\""
+                ))
             }),
             _ => None,
         },
@@ -241,20 +266,48 @@ fn steam_exe() -> Option<std::path::PathBuf> {
     None
 }
 
-/// The Battle.net client's exe: the machine-wide `battlenet://` handler registration first
-/// (it follows a non-default install), else the default under Program Files (x86).
-fn battlenet_exe() -> Option<std::path::PathBuf> {
+/// Exe of a machine-wide protocol handler, `<scheme>\shell\open\command` under HKCR. A
+/// per-user registration lives in HKCU, which LocalSystem does not see.
+fn handler_exe(scheme: &str) -> Option<std::path::PathBuf> {
     use winreg::enums::{HKEY_CLASSES_ROOT, KEY_READ};
     use winreg::RegKey;
 
-    let registered = RegKey::predef(HKEY_CLASSES_ROOT)
-        .open_subkey_with_flags(r"battlenet\shell\open\command", KEY_READ)
+    RegKey::predef(HKEY_CLASSES_ROOT)
+        .open_subkey_with_flags(format!(r"{scheme}\shell\open\command"), KEY_READ)
         .and_then(|k| k.get_value::<String, _>(""))
         .ok()
         .and_then(|c| exe_from_shell_command(&c).map(std::path::PathBuf::from))
-        .filter(|p| p.is_file());
-    if registered.is_some() {
-        return registered;
+        .filter(|p| p.is_file())
+}
+
+/// The Epic launcher registers `com.epicgames.launcher://` machine-wide.
+fn epic_launcher_exe() -> Option<std::path::PathBuf> {
+    handler_exe("com.epicgames.launcher")
+}
+
+/// GOG Galaxy's exe from its HKLM install paths. Its `goggalaxy://` handler is per-user.
+fn galaxy_exe() -> Option<std::path::PathBuf> {
+    use winreg::enums::{HKEY_LOCAL_MACHINE, KEY_READ};
+    use winreg::RegKey;
+
+    let key = RegKey::predef(HKEY_LOCAL_MACHINE)
+        .open_subkey_with_flags(r"SOFTWARE\WOW6432Node\GOG.com\GalaxyClient", KEY_READ)
+        .ok()?;
+    let dir: String = key
+        .open_subkey_with_flags("paths", KEY_READ)
+        .and_then(|k| k.get_value("client"))
+        .ok()?;
+    let exe: String = key
+        .get_value("clientExecutable")
+        .unwrap_or_else(|_| "GalaxyClient.exe".into());
+    Some(std::path::PathBuf::from(dir).join(exe)).filter(|p| p.is_file())
+}
+
+/// The Battle.net client's exe: its `battlenet://` handler first (it follows a non-default
+/// install), else the default under Program Files (x86).
+fn battlenet_exe() -> Option<std::path::PathBuf> {
+    if let Some(exe) = handler_exe("battlenet") {
+        return Some(exe);
     }
     for var in ["ProgramFiles(x86)", "ProgramFiles"] {
         if let Some(pf) = std::env::var_os(var) {
@@ -578,15 +631,41 @@ mod tests {
     use super::*;
 
     #[test]
-    fn launcher_ui_accepts_only_playnite_and_only_when_installed() {
-        // Vocabulary vs installed: separate so a missing Playnite cannot 400 the library.
-        assert!(known_launcher_ui("playnite"));
+    fn launcher_ui_knows_the_windows_launchers_and_probes_each() {
+        // Vocabulary vs installed: separate so a missing launcher cannot 400 the library.
+        for v in ["playnite", "epic", "gog", "xbox"] {
+            assert!(known_launcher_ui(v), "{v}");
+        }
         assert_eq!(
             resolvable_launcher_ui("playnite"),
             playnite_fullscreen_exe().is_some()
         );
+        assert_eq!(resolvable_launcher_ui("gog"), galaxy_exe().is_some());
         assert!(!known_launcher_ui("heroic"));
-        assert!(!known_launcher_ui("gog"));
+        assert!(!known_launcher_ui("lutris"));
+    }
+
+    /// Store clients forward to a running instance, so none owns the session.
+    #[test]
+    fn store_launchers_are_handoffs() {
+        let ui = |v: &str| {
+            windows_launch_for(&LaunchSpec {
+                kind: "launcher_ui".into(),
+                value: v.into(),
+            })
+        };
+        if let Some(r) = ui("xbox") {
+            assert!(
+                r.cmdline.ends_with("!Microsoft.Xbox.App\""),
+                "{}",
+                r.cmdline
+            );
+            assert!(!r.owns_game);
+        }
+        if let Some(r) = ui("gog") {
+            assert!(r.cmdline.ends_with("GalaxyClient.exe\""), "{}", r.cmdline);
+            assert!(!r.owns_game);
+        }
     }
 
     /// Parse `playnite://` command lines (portable probe, works off-Windows).
@@ -624,7 +703,7 @@ mod tests {
                 value: v.into(),
             })
         };
-        assert!(ui("gog").is_none());
+        assert!(ui("lutris").is_none());
         assert!(ui("heroic").is_none());
         assert!(ui("").is_none());
 

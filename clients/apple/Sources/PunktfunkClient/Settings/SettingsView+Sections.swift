@@ -87,6 +87,8 @@ extension SettingsView {
             LabeledContent("") {
                 displayModeControl
             }
+            #elseif os(tvOS)
+            tvStreamModeRow
             #endif
         }
     }
@@ -214,21 +216,68 @@ extension SettingsView {
     }
     #endif
 
+    #if os(tvOS)
+    // MARK: - Display: Stream mode (tvOS)
+
+    /// A TV picks size and rate together, as its own settings do: this TV's mode, the common
+    /// ones, and whatever is stored today.
+    private var tvStreamModeRow: some View {
+        described("The host drives a real output at exactly this mode — no scaling.",
+                  field: OverlayField.resolution) {
+            TVSelectionRow(title: "Stream mode", options: tvModeOptions, selection: tvModeTag)
+        }
+    }
+
+    private static let tvModes: [(label: String, tag: String)] = [
+        ("720p @ 60", "1280x720x60"),
+        ("1080p @ 60", "1920x1080x60"),
+        ("4K @ 60", "3840x2160x60"),
+    ]
+
+    private var tvModeOptions: [(label: String, tag: String)] {
+        let s = effective
+        let current = "\(s.width)x\(s.height)x\(s.refreshHz)"
+        let bounds = UIScreen.main.nativeBounds
+        let native = "\(Int(max(bounds.width, bounds.height)))x"
+            + "\(Int(min(bounds.width, bounds.height)))x\(UIScreen.main.maximumFramesPerSecond)"
+        var options = Self.tvModes
+        if !options.contains(where: { $0.tag == native }) {
+            options.insert(("This TV (native)", native), at: 0)
+        }
+        if !options.contains(where: { $0.tag == current }) {
+            options.insert(("Custom (\(s.width)×\(s.height) @ \(s.refreshHz))", current), at: 0)
+        }
+        return options
+    }
+
+    /// Size and rate in one write, through the scoped setters, so a preset records both.
+    private var tvModeTag: Binding<String> {
+        Binding(
+            get: { "\(effective.width)x\(effective.height)x\(effective.refreshHz)" },
+            set: { tag in
+                let parts = tag.split(separator: "x").compactMap { Int($0) }
+                guard parts.count == 3 else { return }
+                setResolution(width: parts[0], height: parts[1])
+                scoped(SettingsFields.refreshHz).wrappedValue = parts[2]
+            })
+    }
+    #endif
+
     // MARK: - Display: Quality
 
     @ViewBuilder var qualitySection: some View {
         Section("Quality") {
-            #if !os(tvOS)
             renderScaleRow
+            #if os(tvOS)
+            tvBitrateRow
+            #else
             bitrateRows
             #endif
             described("A preference — the host falls back if it can't encode it.",
                       field: "codec") {
-                Picker("Video codec", selection: scoped(SettingsFields.codec)) {
-                    ForEach(SettingsOptions.codecs, id: \.tag) { option in
-                        Text(option.label).tag(option.tag)
-                    }
-                }
+                settingPicker(
+                    "Video codec", options: SettingsOptions.codecs,
+                    selection: scoped(SettingsFields.codec))
             }
             described("HDR10 when the host sends it and this display supports it. HEVC only.",
                 field: "hdr_enabled") {
@@ -246,17 +295,15 @@ extension SettingsView {
         }
     }
 
-    #if !os(tvOS)
     /// Render-scale picker + the resulting host resolution. > 1 supersamples (sharper, at more
     /// bandwidth AND client decode); < 1 renders under native (lighter). The presenter resamples the
     /// decoded frame to this display, so the multiplier is where the sharpness/cost trade-off lives.
     @ViewBuilder var renderScaleRow: some View {
         described(renderScaleDescription, field: "render_scale") {
-            Picker("Render scale", selection: scoped(SettingsFields.renderScale)) {
-                ForEach(RenderScale.presets, id: \.self) { scale in
-                    Text(RenderScale.label(scale)).tag(scale)
-                }
-            }
+            settingPicker(
+                "Render scale",
+                options: RenderScale.presets.map { (label: RenderScale.label($0), tag: $0) },
+                selection: scoped(SettingsFields.renderScale))
         }
     }
 
@@ -276,6 +323,7 @@ extension SettingsView {
         return text
     }
 
+    #if !os(tvOS)
     /// The automatic-bitrate toggle + manual slider (and the >1 Gbps warning) rows.
     @ViewBuilder private var bitrateRows: some View {
         // PyroWave is always Automatic (ABR overhaul RFC §5.2): the session sends 0 and the
@@ -313,6 +361,26 @@ extension SettingsView {
             }
         }
     }
+    #else
+    /// The TV's bitrate: a list of steps, where the touch and desktop forms have a switch and a
+    /// slider. PyroWave sets its own rate, so it shows none.
+    @ViewBuilder private var tvBitrateRow: some View {
+        if effective.codec == "pyrowave", MetalWaveletDecoder.supported {
+            described("PyroWave sets its own rate from the stream mode — a fixed bitrate "
+                + "doesn't apply.", field: "bitrate_kbps") {
+                LabeledContent("Bitrate", value: "Automatic")
+            }
+        } else {
+            described(effective.bitrateKbps > 1_000_000
+                ? Self.gigabitWarning : "Automatic uses the host's default, 20 Mbps.",
+                field: "bitrate_kbps") {
+                TVSelectionRow(
+                    title: "Bitrate",
+                    options: SettingsOptions.bitrateOptions(current: effective.bitrateKbps),
+                    selection: scoped(SettingsFields.bitrateKbps))
+            }
+        }
+    }
     #endif
 
     // MARK: - Display: Presentation
@@ -326,25 +394,21 @@ extension SettingsView {
                 ? "A small buffer evens out network hiccups, at its worth of added latency."
                 : "Frames show as soon as they arrive; a hiccup repeats or skips one.",
                 field: "present_priority") {
-                Picker("Prioritize", selection: scoped(SettingsFields.presentPriority)) {
-                    ForEach(SettingsOptions.presentPriorities, id: \.tag) { option in
-                        Text(option.tag == SettingsOptions.presentPriorityDefault
-                            ? "\(option.label) (default)" : option.label)
-                            .tag(option.tag)
-                    }
-                }
+                settingPicker(
+                    "Prioritize",
+                    options: SettingsOptions.presentPriorities.map { option in
+                        (label: option.tag == SettingsOptions.presentPriorityDefault
+                            ? "\(option.label) (default)" : option.label, tag: option.tag)
+                    },
+                    selection: scoped(SettingsFields.presentPriority))
             }
             if effective.presentPriority == "smooth" {
                 described("Each frame costs one refresh of latency and absorbs one of jitter.",
                     field: "smooth_buffer") {
-                    Picker("Buffer", selection: scoped(SettingsFields.smoothBuffer)) {
-                        ForEach(
-                            SettingsOptions.smoothBuffers(refreshHz: effective.refreshHz),
-                            id: \.tag
-                        ) { option in
-                            Text(option.label).tag(option.tag)
-                        }
-                    }
+                    settingPicker(
+                        "Buffer",
+                        options: SettingsOptions.smoothBuffers(refreshHz: effective.refreshHz),
+                        selection: scoped(SettingsFields.smoothBuffer))
                 }
             }
             // Non-tvOS: the Apple TV drives a fixed HDMI mode, so there's no adaptive refresh.
@@ -381,19 +445,16 @@ extension SettingsView {
             described("The backend the host drives its virtual output with — honored only if "
                 + "available.",
                 field: "compositor") {
-                Picker("Compositor", selection: scoped(SettingsFields.compositor)) {
-                    ForEach(SettingsOptions.compositors, id: \.tag) { option in
-                        Text(option.label).tag(option.tag)
-                    }
-                }
+                settingPicker(
+                    "Compositor", options: SettingsOptions.compositors,
+                    selection: scoped(SettingsFields.compositor))
             }
         } header: {
             Text("Host output")
         } footer: {
             // The one form-level note (deliberately not repeated on every row above).
             Text("Display changes apply from the next session.")
-                .font(.geist(12, relativeTo: .caption))
-                .foregroundStyle(.secondary)
+                .settingsFooter()
         }
     }
 
@@ -426,21 +487,19 @@ extension SettingsView {
                         Toggle("Auto-wake on connect", isOn: $autoWakeEnabled)
                     }
                 }
-                #if os(iOS)
+                #if os(iOS) || os(tvOS)
                 if !inPresetScope {
                     described("Audio and the connection stay live when you switch away; video "
                         + "pauses.") {
                         Toggle("Keep streaming in background", isOn: $backgroundKeepAlive)
                     }
                     if backgroundKeepAlive {
-                        described("Ends a backgrounded session so it can't run down the "
-                            + "battery.") {
-                            Picker("Disconnect after", selection: $backgroundTimeoutMinutes) {
-                                Text("1 minute").tag(1)
-                                Text("5 minutes").tag(5)
-                                Text("10 minutes").tag(10)
-                                Text("30 minutes").tag(30)
-                            }
+                        described(Self.backgroundTimeoutCaption) {
+                            settingPicker(
+                                "Disconnect after",
+                                options: [("1 minute", 1), ("5 minutes", 5), ("10 minutes", 10),
+                                          ("30 minutes", 30)],
+                                selection: $backgroundTimeoutMinutes)
                         }
                     }
                 }
@@ -449,26 +508,38 @@ extension SettingsView {
         }
     }
 
+    /// A phone's reason is its battery; a TV's is only not holding a host it has left.
+    private static var backgroundTimeoutCaption: String {
+        #if os(tvOS)
+        "Ends a session left in the background after this long."
+        #else
+        "Ends a backgrounded session so it can't run down the battery."
+        #endif
+    }
+
+    private static var gamepadUIModeCaption: String {
+        #if os(tvOS)
+        "Always keeps it up — otherwise this screen returns when the last controller disconnects."
+        #else
+        "Always keeps it up — otherwise touch returns when the last controller disconnects."
+        #endif
+    }
+
     // MARK: - General: Statistics overlay
 
     @ViewBuilder var overlaySection: some View {
         Section("Statistics") {
             described(Self.statisticsDescription, field: "stats_verbosity") {
-                Picker("Statistics overlay", selection: scoped(SettingsFields.statsVerbosity)) {
-                    ForEach(StatsVerbosity.allCases, id: \.rawValue) { tier in
-                        Text(tier.label).tag(tier.rawValue)
-                    }
-                }
+                settingPicker(
+                    "Statistics overlay", options: SettingsOptions.statsVerbosities,
+                    selection: scoped(SettingsFields.statsVerbosity))
             }
             // Which corner the overlay sits in is a property of this device's screen, not of a
             // preset (tier G).
             if !inPresetScope {
-                Picker("Position", selection: $hudPlacement) {
-                    ForEach(HUDPlacement.allCases) { placement in
-                        Text(placement.label).tag(placement.rawValue)
-                    }
-                }
-                .disabled(effective.statsVerbosity == StatsVerbosity.off.rawValue)
+                settingPicker(
+                    "Position", options: SettingsOptions.hudPlacements, selection: $hudPlacement)
+                    .disabled(effective.statsVerbosity == StatsVerbosity.off.rawValue)
                 // The vocabulary is this device's choice, never a preset's (tier G).
                 described(Self.advancedStatisticsDescription) {
                     Toggle("Advanced statistics", isOn: $advancedStats)
@@ -490,22 +561,20 @@ extension SettingsView {
             Section("Library") {
                 described("How the controller-optimized library arranges titles: Shelf is the "
                     + "coverflow, Grid shows more at once.") {
-                    Picker("Library view", selection: $libraryViewRaw) {
-                        ForEach(LibraryArrangement.all, id: \.stored) { arrangement in
-                            Text(arrangement.label).tag(arrangement.stored)
-                        }
-                    }
+                    settingPicker(
+                        "Library view",
+                        options: LibraryArrangement.all.map { (label: $0.label, tag: $0.stored) },
+                        selection: $libraryViewRaw)
                 }
                 described("Opens a library on its platform groups first; a library with one "
                     + "platform still opens on the shelf.") {
                     Toggle("Start in collections", isOn: $libraryCollections)
                 }
                 described(startInFooter) {
-                    Picker("Start in", selection: $startInRaw) {
-                        ForEach(StartIn.allCases, id: \.stored) { value in
-                            Text(value.label).tag(value.stored)
-                        }
-                    }
+                    settingPicker(
+                        "Start in",
+                        options: StartIn.allCases.map { (label: $0.label, tag: $0.stored) },
+                        selection: $startInRaw)
                 }
             }
         }
@@ -712,11 +781,9 @@ extension SettingsView {
     @ViewBuilder var audioSection: some View {
         Section {
             described("The speaker layout requested from the host.", field: "audio_channels") {
-                Picker("Audio channels", selection: scoped(SettingsFields.audioChannels)) {
-                    ForEach(SettingsOptions.audioChannels, id: \.tag) { option in
-                        Text(option.label).tag(option.tag)
-                    }
-                }
+                settingPicker(
+                    "Audio channels", options: SettingsOptions.audioChannels,
+                    selection: scoped(SettingsFields.audioChannels))
             }
             // Offered at every channel count. This row used to be hidden unless the session was
             // stereo; the frame ladder is channel-aware, so surround negotiates a shorter frame
@@ -724,11 +791,9 @@ extension SettingsView {
             // not fit are stated (see `audioFormatCaption`). A hidden row silently discards a
             // choice and explains nothing.
             described(audioFormatCaption, field: "audio_format") {
-                Picker("Audio quality", selection: scoped(SettingsFields.audioFormat)) {
-                    ForEach(SettingsOptions.audioFormats, id: \.tag) { option in
-                        Text(option.label).tag(option.tag)
-                    }
-                }
+                settingPicker(
+                    "Audio quality", options: SettingsOptions.audioFormats,
+                    selection: scoped(SettingsFields.audioFormat))
             }
             described("The host's speakers or headphones keep playing while you stream — "
                       + "needs a host on 0.32+",
@@ -752,6 +817,8 @@ extension SettingsView {
                 }
             }
             #endif
+            // An Apple TV has no microphone an app can open.
+            #if !os(tvOS)
             described("This device's microphone feeds the host's virtual mic.",
                       field: "mic_enabled") {
                 Toggle("Send microphone to the host", isOn: scoped(SettingsFields.micEnabled))
@@ -760,6 +827,7 @@ extension SettingsView {
                 Toggle("Echo cancellation", isOn: scoped(SettingsFields.echoCancel))
                     .disabled(!effective.micEnabled)
             }
+            #endif
             #if os(macOS)
             if !inPresetScope {
                 Picker("Microphone", selection: $micUID) {
@@ -797,8 +865,7 @@ extension SettingsView {
             // doc comment: the picker must never read as a promise of the resolved format.
             Text("Applies from the next session. Lossless falls back to Standard if the host or "
                 + "this device's output declines it.")
-                .font(.geist(12, relativeTo: .caption))
-                .foregroundStyle(.secondary)
+                .settingsFooter()
         }
     }
 
@@ -881,12 +948,10 @@ extension SettingsView {
                     }
                 }
                 described("Which pad is player 1. Automatic picks the newest connection.") {
-                    Picker("Use controller", selection: $gamepads.preferredID) {
-                        ForEach(controllerOptions, id: \.tag) { option in
-                            Text(option.label).tag(option.tag)
-                        }
-                    }
-                    .disabled(!effective.gamepadForwarding)
+                    settingPicker(
+                        "Use controller", options: controllerOptions,
+                        selection: $gamepads.preferredID)
+                        .disabled(!effective.gamepadForwarding)
                 }
                 // Steam Controller 2 as-is passthrough — device tier like the pad rows above
                 // (EffectiveSettings.sc2Capture is not presetable). The capture engages at the
@@ -898,31 +963,25 @@ extension SettingsView {
             }
             described("The virtual pad the host creates — Automatic matches your controller.",
                 field: "gamepad") {
-                Picker("Controller type", selection: scoped(SettingsFields.gamepadType)) {
-                    ForEach(SettingsOptions.padTypes, id: \.tag) { option in
-                        Text(option.label).tag(option.tag)
-                    }
-                }
-                .disabled(!effective.gamepadForwarding)
+                settingPicker(
+                    "Controller type", options: SettingsOptions.padTypes,
+                    selection: scoped(SettingsFields.gamepadType))
+                    .disabled(!effective.gamepadForwarding)
             }
             described("Where guide and share presses go while streaming.",
                 field: "system_buttons") {
-                Picker("Guide button", selection: scoped(SettingsFields.systemButtons)) {
-                    Text("Automatic").tag("auto")
-                    Text("Send to host").tag("forward")
-                    Text("This device").tag("local")
-                }
-                .disabled(!effective.gamepadForwarding)
+                settingPicker(
+                    "Guide button", options: SettingsOptions.systemButtons,
+                    selection: scoped(SettingsFields.systemButtons))
+                    .disabled(!effective.gamepadForwarding)
             }
             described("Hold Select for the host's guide button; keep holding for its "
                 + "quick-access menu.",
                 field: "guide_gesture") {
-                Picker("Hold Select for guide", selection: scoped(SettingsFields.guideGesture)) {
-                    Text("Automatic").tag("auto")
-                    Text("On").tag("on")
-                    Text("Off").tag("off")
-                }
-                .disabled(!effective.gamepadForwarding)
+                settingPicker(
+                    "Hold Select for guide", options: SettingsOptions.guideGestures,
+                    selection: scoped(SettingsFields.guideGesture))
+                    .disabled(!effective.gamepadForwarding)
             }
             #if os(iOS)
             // iPhone only in practice: hidden where the device itself can't play haptics (iPad).
@@ -942,7 +1001,6 @@ extension SettingsView {
                 }
             }
             #endif
-            #if !os(tvOS)
             if !inPresetScope {
                 described("A controller-friendly layout for the host list and library.") {
                     Toggle("Gamepad-optimized browsing", isOn: $gamepadUIEnabled)
@@ -951,17 +1009,23 @@ extension SettingsView {
                 // disabled when it isn't: a picker whose every option decides nothing is worse
                 // than no picker, and this Section is short enough that nothing jumps far.
                 if gamepadUIEnabled {
-                    described("Always keeps it up — otherwise touch returns when the last "
-                        + "controller disconnects.") {
-                        Picker("Show it", selection: $gamepadUIMode) {
-                            ForEach(SettingsOptions.gamepadUIModes, id: \.tag) { option in
-                                Text(option.label).tag(option.tag)
-                            }
-                        }
+                    described(Self.gamepadUIModeCaption) {
+                        settingPicker(
+                            "Show it", options: SettingsOptions.gamepadUIModes,
+                            selection: $gamepadUIMode)
                     }
+                    #if os(tvOS)
+                    // A TV's only route to `ui_palette`: the gamepad settings that carry it
+                    // elsewhere need a controller to open.
+                    described("The background of the controller-optimized screens.") {
+                        settingPicker(
+                            "Background",
+                            options: GamepadPalette.all.map { (label: $0.name, tag: $0.id) },
+                            selection: $uiPalette)
+                    }
+                    #endif
                 }
             }
-            #endif
             #if DEBUG && !os(tvOS)
             if !inPresetScope {
                 Button("Test Controller…") { showControllerTest = true }
@@ -973,8 +1037,7 @@ extension SettingsView {
             Text("Controllers")
         } footer: {
             Text("Applies from the next session.")
-                .font(.geist(12, relativeTo: .caption))
-                .foregroundStyle(.secondary)
+                .settingsFooter()
         }
     }
 }

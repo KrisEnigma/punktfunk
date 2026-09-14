@@ -1,12 +1,19 @@
-//! POSIX art roots and the handle-resolved path check: `$HOME` (native and Flatpak launcher
-//! layouts already sit under it) and the fd's link-resolved path.
+//! POSIX art roots and the handle-resolved path check: `$HOME`, the system icon themes, and
+//! the fd's link-resolved path.
 
 use super::*;
 
 /// `$HOME` is the POSIX analogue of the Windows users base. An empty list here would silently
 /// serve no plugin art: POSIX absolute paths are classified as local.
+///
+/// The system icon dirs are world-readable package data, so a `.desktop` entry's icon can be
+/// served. `/var/lib/flatpak` is whole because its exported icons are symlinks into `app/`,
+/// and confinement judges the resolved path.
 pub(super) fn extra_roots() -> Vec<PathBuf> {
-    let mut roots = Vec::new();
+    let mut roots: Vec<PathBuf> = ["/usr/share/icons", "/usr/share/pixmaps", "/var/lib/flatpak"]
+        .into_iter()
+        .map(PathBuf::from)
+        .collect();
     if let Some(home) = std::env::var_os("HOME") {
         let home = PathBuf::from(home);
         if !home.as_os_str().is_empty() {

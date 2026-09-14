@@ -16,90 +16,17 @@ import PunktfunkKit
 import PunktfunkShared
 import SwiftUI
 
-private struct SlotOption: Identifiable {
-    let id: String
-    let label: String
-    var note: String? = nil
-}
-
-private struct SlotGroup: Identifiable {
-    /// The section title.
-    let id: String
-    let options: [SlotOption]
-}
-
-/// The catalogue by group (§3.3), with each entry's availability note. The preset's own
-/// shortcuts and the empty slot are appended per config.
-private let builtinGroups: [SlotGroup] = [
-    .init(id: "Session", options: [
-        .init(id: "end_stream", label: "End stream"),
-        .init(id: "disconnect_linger", label: "Disconnect, keep the game running"),
-    ]),
-    .init(id: "Input", options: [
-        .init(id: "touch_mode", label: "Touch mode", note: noMacNote),
-        .init(id: "keyboard", label: "Keyboard", note: macKeyboardNote),
-        .init(id: "pad", label: "Virtual controller",
-              note: noMacNote ?? "Shows or hides the on-screen controller"),
-        .init(id: "send_text", label: "Send text", note: "Not on this device yet"),
-        .init(id: "guide", label: "Guide button", note: "The host's Xbox / PS / Steam button"),
-        .init(id: "qam", label: "Quick access menu",
-              note: "Only where the host's pad is Steam-shaped"),
-    ]),
-    .init(id: "View", options: [.init(id: "stats", label: "Statistics")]),
-    .init(id: "Audio", options: [.init(id: "mic", label: "Microphone")]),
-    .init(id: "Host", options: [
-        .init(id: "host:power.sleep", label: "Sleep host", note: "Only where the host offers it"),
-        .init(id: "host:power.reboot", label: "Restart host", note: "Only where the host offers it"),
-        .init(id: "host:power.shutdown", label: "Shut down host", note: "Only where the host offers it"),
-    ]),
-]
-
 #if os(macOS)
-/// The slots a Mac cannot serve, said once in the catalogue so a dimmed disc is never a surprise
-/// found after picking it. The preset still syncs — an iPhone on the same preset runs them.
-private let noMacNote: String? = "Not on a Mac — no touch screen"
-private let macKeyboardNote: String? = "Not on a Mac — use its own keyboard"
 /// The pointer verb, so the instructions name what the reader is actually holding.
 private let pickVerb = "Click"
 #else
-private let noMacNote: String? = nil
-private let macKeyboardNote: String? = nil
 private let pickVerb = "Tap"
 #endif
-
-private let modifierKeys = ["ctrl", "alt", "shift", "win"]
-
-/// The keys a chord can end on, as the keyboard the editor draws lays them out — every name
-/// `keyVk` knows, grouped the way a keyboard groups them.
-private let keyGroups: [(title: String, keys: [String])] = [
-    ("Function", ["escape"] + (1...12).map { "f\($0)" }),
-    ("Letters", "qwertyuiopasdfghjklzxcvbnm".map(String.init)),
-    ("Numbers", (1...9).map(String.init) + ["0"]),
-    ("Editing", ["tab", "space", "enter", "backspace", "delete", "insert"]),
-    ("Navigation", ["home", "end", "pageup", "pagedown", "up", "down", "left", "right"]),
-    ("Other", ["printscreen", "pause", "capslock"]),
-]
 
 private struct PickSlot: Identifiable {
     let k: Int
     var id: Int { k }
 }
-
-/// A shortcut on the editing sheet, new or existing.
-private struct ShortcutDraft: Identifiable {
-    var id: String
-    var label: String
-    var keys: [String]
-    var isNew: Bool
-}
-
-/// The three power actions as the ring would show them on a host that offers all three; the
-/// editor has no host on the line, and a dimmed "does not offer it" would lie about the slot.
-private let previewHosts = [
-    HostAction(id: "power.sleep", title: "Sleep"),
-    HostAction(id: "power.reboot", title: "Restart", danger: true),
-    HostAction(id: "power.shutdown", title: "Shut down", danger: true),
-]
 
 struct QuickActionsEditor: View {
     /// The `overlay_actions` blob of the layer being edited; empty is the platform default.
@@ -146,7 +73,7 @@ struct QuickActionsEditor: View {
                         // button above it, so closing the ring here closed it on every pick.
                         DialCatcher(onDial: { ring.handle($0) }) { ring.sheet = false }
                         #endif
-                        RingOverlay(state: ring, cfg: cfg, actions: preview,
+                        RingOverlay(state: ring, cfg: cfg, actions: previewRingActions,
                                     editing: RingEditing(pick: { picking = PickSlot(k: $0) }, swap: swap))
                     }
                     .environment(\.colorScheme, .dark)
@@ -226,8 +153,7 @@ struct QuickActionsEditor: View {
                 }
                 #endif
                 Button {
-                    let next = (cfg.shortcuts.compactMap { Int($0.id.dropFirst()) }.max() ?? 0) + 1
-                    editingShortcut = ShortcutDraft(id: "s\(next)", label: "", keys: [], isNew: true)
+                    editingShortcut = ShortcutDraft(id: cfg.nextShortcutID, label: "", keys: [], isNew: true)
                 } label: {
                     Label("Add shortcut", systemImage: "plus")
                 }
@@ -273,31 +199,7 @@ struct QuickActionsEditor: View {
         #endif
     }
 
-    /// The ring's commands with nothing behind them: the editor shows, it never fires (§3.3).
-    private var preview: RingActions {
-        RingActions(
-            endStream: {}, disconnectLinger: {},
-            touchMode: { .trackpad }, cycleTouchMode: {},
-            keyboard: {},
-            stats: { .compact }, cycleStats: {},
-            micAvailable: { true }, micMuted: { false }, toggleMic: {},
-            hostActions: { previewHosts }, invokeHost: { _ in },
-            sendShortcut: { _ in },
-            padAvailable: { true }, padShown: { false }, togglePad: {}, tapPadButton: { _ in },
-            currentMode: { (1920, 1080, 60) }, requestMode: { _, _, _ in })
-    }
-
-    private var groups: [SlotGroup] {
-        var g = builtinGroups
-        if !cfg.shortcuts.isEmpty {
-            g.append(SlotGroup(id: "Shortcuts", options: cfg.shortcuts.map {
-                SlotOption(id: "shortcut:\($0.id)", label: $0.label.isEmpty ? chordChip($0.keys) : $0.label,
-                           note: $0.label.isEmpty ? nil : chordChip($0.keys))
-            }))
-        }
-        g.append(SlotGroup(id: "Empty", options: [SlotOption(id: "", label: "Empty slot")]))
-        return g
-    }
+    private var groups: [SlotGroup] { slotGroups(for: cfg) }
 
     private func set(_ k: Int, _ id: String) {
         var c = cfg
@@ -319,25 +221,13 @@ struct QuickActionsEditor: View {
 
     private func save(_ d: ShortcutDraft) {
         var c = cfg
-        let sc = OverlayShortcut(id: d.id, label: d.label, keys: d.keys)
-        if let i = c.shortcuts.firstIndex(where: { $0.id == d.id }) {
-            c.shortcuts[i] = sc
-        } else {
-            c.shortcuts.append(sc)
-            if let k = c.ring.firstIndex(where: { $0 == nil }) { c.ring[k] = .shortcut(sc.id) }
-        }
+        c.saveShortcut(OverlayShortcut(id: d.id, label: d.label, keys: d.keys))
         blob = c.toJSON()
     }
 
     private func remove(_ id: String) {
         var c = cfg
-        c.shortcuts.removeAll { $0.id == id }
-        // `parse` would empty a dangling slot on the next read; write it empty now so the
-        // ring shows it at once.
-        c.ring = c.ring.map { s in
-            if case .shortcut(let sid) = s, sid == id { return nil }
-            return s
-        }
+        c.removeShortcut(id)
         blob = c.toJSON()
     }
 }

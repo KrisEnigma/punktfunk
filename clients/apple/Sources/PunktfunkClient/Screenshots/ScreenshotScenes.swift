@@ -192,9 +192,93 @@ enum ShotScenes {
             AnyView(LibrarySectionsPanel(shotLayout: "desktops,favorites,recent,-launchers,games"))
         })
         #endif
-        scenes.append(ShotScene(name: "10-edithost", orientation: .natural, colorScheme: .dark) {
-            AnyView(ShotEditHost())
+        #if os(tvOS)
+        // The TV's tab bar: the hosts, and the Library tab on the mock catalog.
+        scenes.append(ShotScene(name: "20-tv-hosts-tab", orientation: .natural, colorScheme: .dark) {
+            AnyView(ShotTVTabs(tab: .hosts))
         })
+        scenes.append(ShotScene(name: "20b-tv-library-tab", orientation: .natural, colorScheme: .dark) {
+            AnyView(ShotTVTabs(tab: .library))
+        })
+        // The settings sidebar on General and on Display.
+        scenes.append(ShotScene(name: "21-tv-settings-general", orientation: .natural, colorScheme: .dark) {
+            AnyView(ShotTVTabs(tab: .settings))
+        })
+        scenes.append(ShotScene(name: "21b-tv-settings-display", orientation: .natural, colorScheme: .dark) {
+            AnyView(ShotTVTabs(tab: .settings, category: .display))
+        })
+        // A focused row with its caption, About with the app's icon, and Audio's footer.
+        scenes.append(ShotScene(name: "21c-tv-settings-row-focus", orientation: .natural, colorScheme: .dark) {
+            AnyView(ShotTVSettingsRowFocus())
+        })
+        scenes.append(ShotScene(name: "21d-tv-settings-about", orientation: .natural, colorScheme: .dark) {
+            AnyView(ShotTVTabs(tab: .settings, category: .about))
+        })
+        scenes.append(ShotScene(name: "21e-tv-settings-audio", orientation: .natural, colorScheme: .dark) {
+            AnyView(ShotTVTabs(tab: .settings, category: .audio))
+        })
+        // Presets on the TV: the Editing pane, and Display edited in the "4K HDR" preset.
+        scenes.append(ShotScene(name: "22-tv-presets", orientation: .natural, colorScheme: .dark) {
+            AnyView(ShotTVTabs(tab: .settings, scope: .preset(ShotMock.hdrPresetID), editing: true))
+        })
+        scenes.append(ShotScene(name: "22b-tv-preset-scope", orientation: .natural, colorScheme: .dark) {
+            AnyView(ShotTVTabs(
+                tab: .settings, category: .display, scope: .preset(ShotMock.hdrPresetID)))
+        })
+        // The dial's editor: the TV default ring beside its shortcuts.
+        scenes.append(ShotScene(name: "23-tv-quick-actions", orientation: .natural, colorScheme: .dark) {
+            AnyView(ShotTVTabs(tab: .settings, category: .quickActions))
+        })
+        // Back from a slot's list: the tab bar comes back with the pane.
+        scenes.append(ShotScene(name: "23b-tv-quick-actions-back", orientation: .natural, colorScheme: .dark) {
+            AnyView(ShotTVTabs(tab: .settings, category: .quickActions, pushPop: true))
+        })
+        // The host page as the TV pushes it, its speed test waiting for Start, its Connection fields.
+        scenes.append(ShotScene(name: "24-tv-host-page", orientation: .natural, colorScheme: .dark) {
+            AnyView(NavigationStack {
+                HostSectionsView(
+                    hostID: ShotMock.battlestationID, store: ShotMock.pageStore, handOff: { _ in })
+            })
+        })
+        scenes.append(ShotScene(name: "24b-tv-host-speed-test", orientation: .natural, colorScheme: .dark) {
+            AnyView(NavigationStack {
+                HostSectionsView(
+                    hostID: ShotMock.battlestationID, store: ShotMock.pageStore, section: .speedTest,
+                    handOff: { _ in })
+            })
+        })
+        scenes.append(ShotScene(name: "24c-tv-host-connection", orientation: .natural, colorScheme: .dark) {
+            AnyView(NavigationStack {
+                HostSectionsView(
+                    hostID: ShotMock.battlestationID, store: ShotMock.pageStore, section: .connection,
+                    handOff: { _ in })
+            })
+        })
+        // The Library's details: a title's sheet, and Customize with one section off.
+        scenes.append(ShotScene(name: "25-tv-title-details", orientation: .natural, colorScheme: .dark) {
+            AnyView(ShotTitleDetails())
+        })
+        scenes.append(ShotScene(name: "25b-tv-library-customize", orientation: .natural, colorScheme: .dark) {
+            AnyView(LibrarySectionsPanel(shotLayout: "desktops,favorites,recent,-launchers,games"))
+        })
+        // Cover cards, the first focused, and the tab's games grid first, for its gaps.
+        scenes.append(ShotScene(name: "25c-tv-cards-focus", orientation: .natural, colorScheme: .dark) {
+            AnyView(ShotTVCards())
+        })
+        scenes.append(ShotScene(name: "25d-tv-library-grid", orientation: .natural, colorScheme: .dark) {
+            AnyView(ShotTVLibraryGrid())
+        })
+        // Customize as the Library presents it, and under a pinned scheme, for the focused row.
+        scenes.append(ShotScene(name: "25e-tv-customize-sheet", orientation: .natural, colorScheme: .dark) {
+            AnyView(ShotTVCustomizeSheet())
+        })
+        scenes.append(ShotScene(name: "25f-tv-customize-pinned", orientation: .natural, colorScheme: .dark) {
+            AnyView(ShotTVCustomizePinned())
+        })
+        scenes.append(ShotScene(name: "25g-tv-customize-moved", orientation: .natural, colorScheme: .dark) {
+            AnyView(ShotTVCustomizeMoved())
+        })
+        #endif
         return scenes
     }
 }
@@ -214,7 +298,14 @@ enum ShotMock {
 
     static let hdrPresetID = "a71c4e0d9f22"
     static let couchPresetID = "3e88b107c4da"
-    static let hdrPreset = StreamPreset(name: "4K HDR", id: hdrPresetID, accent: "#8B7BF7")
+    /// Overrides a few Display rows, so a scene editing it shows the marks.
+    static let hdrPreset: StreamPreset = {
+        var preset = StreamPreset(name: "4K HDR", id: hdrPresetID, accent: "#8B7BF7")
+        preset.overrides.width = 3840
+        preset.overrides.height = 2160
+        preset.overrides.hdrEnabled = true
+        return preset
+    }()
     static let couchPreset = StreamPreset(
         name: "Couch 1080p", id: couchPresetID, accent: "#4FD1A5")
 
@@ -390,6 +481,114 @@ private struct ShotHome: View {
         #endif
     }
 }
+
+#if os(tvOS)
+/// The TV's tab bar as the app draws it, over the mock hosts and catalog.
+private struct ShotTVTabs: View {
+    let tab: TouchTab
+    var category: SettingsCategory = .general
+    var scope: SettingsScope = .defaults
+    var editing = false
+    var pushPop = false
+
+    var body: some View {
+        TabView(selection: .constant(tab)) {
+            ShotHome()
+                .tabItem { TouchTab.hostsLabel }
+                .tag(TouchTab.hosts)
+            ShotLibraryFilter()
+                .tabItem { Label("Library", systemImage: "square.grid.2x2") }
+                .tag(TouchTab.library)
+            NavigationStack { settings }
+                .tabItem { Label("Settings", systemImage: "gearshape") }
+                .tag(TouchTab.settings)
+        }
+        .onAppear { ShotMock.installPresets() }
+    }
+
+    private var settings: SettingsView {
+        var view = SettingsView(initialCategory: category, initialScope: scope, startsOnEditing: editing)
+        view.shotPushPop = pushPop
+        return view
+    }
+}
+
+/// Settings with focus on the pane's first row, for its lift and caption. No tab bar: a TV's
+/// focus starts on the tab bar.
+private struct ShotTVSettingsRowFocus: View {
+    var body: some View {
+        NavigationStack { settings }
+            .onAppear { ShotMock.installPresets() }
+    }
+
+    private var settings: SettingsView {
+        var view = SettingsView()
+        view.shotFocusesPane = true
+        return view
+    }
+}
+
+/// Cover cards with the first focused, as the Library draws them. No tab bar, which takes focus
+/// first.
+private struct ShotTVCards: View {
+    var body: some View {
+        HStack(alignment: .top, spacing: 40) {
+            ForEach(Array(ShotMock.games.prefix(4))) { game in
+                Button {} label: {
+                    GameCard(
+                        game: game, artLoader: ShotPosterArt.source, caption: "2 hr ago",
+                        host: ShotMock.pageStore.hosts[0])
+                }
+                .buttonStyle(TVCardButtonStyle())
+                .frame(width: 220)
+            }
+        }
+    }
+}
+
+/// The Library tab with its games grid first, for the grid's gaps.
+private struct ShotTVLibraryGrid: View {
+    var body: some View {
+        NavigationStack {
+            LibraryView(
+                store: ShotMock.pageStore, target: LibraryTarget(host: ShotMock.pageStore.hosts[0]),
+                onLaunch: { _ in }, inTab: true,
+                shotPhase: .catalog(ShotMock.games, running: []),
+                shotLayout: "games,desktops,favorites,recent,launchers")
+        }
+    }
+}
+
+/// The Library opening its Customize sheet, focus on the sheet's first row.
+private struct ShotTVCustomizeSheet: View {
+    var body: some View {
+        NavigationStack {
+            LibraryView(
+                store: ShotMock.pageStore, target: LibraryTarget(host: ShotMock.pageStore.hosts[0]),
+                onLaunch: { _ in }, inTab: true,
+                shotPhase: .catalog(ShotMock.games, running: []), shotCustomize: true)
+        }
+    }
+}
+
+/// The Customize panel in a sheet under a pinned dark scheme, as the palette ink pins it, focus
+/// moved to its second row.
+private struct ShotTVCustomizePinned: View {
+    var body: some View {
+        Color.clear
+            .sheet(isPresented: .constant(true)) { LibrarySectionsPanel(shotMovesFocus: true) }
+            .environment(\.colorScheme, .dark)
+    }
+}
+
+/// The same with no scheme pinned.
+private struct ShotTVCustomizeMoved: View {
+    var body: some View {
+        Color.clear
+            .sheet(isPresented: .constant(true)) { LibrarySectionsPanel(shotMovesFocus: true) }
+    }
+}
+#endif
 
 // MARK: - Library
 
@@ -624,25 +823,6 @@ private struct ShotControllers: View {
     ]
 }
 #endif
-
-// MARK: - Edit host (add/edit sheet with the Wake-on-LAN MAC field)
-
-private struct ShotEditHost: View {
-    var body: some View {
-        ZStack {
-            ShotHome().blur(radius: 24).overlay(Color.black.opacity(0.45))
-            AddHostSheet(
-                existing: StoredHost(
-                    name: "Battlestation", address: "192.168.1.20", port: 9777,
-                    pinnedSHA256: ShotMock.fingerprint, macAddresses: ["a4:b1:c2:d3:e4:f5"]),
-                onSave: { _ in })
-                #if os(macOS)
-                .clipShape(RoundedRectangle(cornerRadius: 12))
-                .shadow(radius: 40, y: 16)
-                #endif
-        }
-    }
-}
 
 // MARK: - Settings
 

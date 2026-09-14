@@ -1,8 +1,7 @@
-// A saved host's page as sections beside a sidebar: the Mac's host window and the iPad's host
-// sheet. Acts that belong to the grid's window (connect, browse, wake, pair) go back through
-// `handOff`, which closes the page; edits, power, logs and the speed test stay on it.
+// A saved host's page as sections beside a sidebar: the Mac's host window, the iPad's host
+// sheet and the TV's pushed page. Acts that belong to the grid (connect, browse, wake, pair) go
+// back through `handOff`, which closes the page; edits, power, logs and the speed test stay on it.
 
-#if os(iOS) || os(macOS)
 import PunktfunkKit
 import SwiftUI
 
@@ -29,10 +28,12 @@ struct HostSectionsView: View {
     @ObservedObject private var hostPower = HostPowerStore.shared
     @Environment(\.dismiss) private var dismiss
     @State private var section: HostSection
-    @State private var editTarget: StoredHost?
     @State private var confirmPower: PendingHostAction?
     /// The last send-logs or power outcome, for its alert.
     @State private var outcome: (title: String, message: String)?
+    #if os(tvOS)
+    @FocusState private var focusedSection: HostSection?
+    #endif
 
     init(
         hostID: StoredHost.ID, store: HostStore, section: HostSection = .overview,
@@ -45,34 +46,31 @@ struct HostSectionsView: View {
     }
 
     var body: some View {
-        NavigationSplitView {
-            List(HostSection.allCases, selection: sectionSelection) { section in
-                Label(section.title, systemImage: section.symbol)
-            }
-            #if os(macOS)
-            .navigationSplitViewColumnWidth(min: 150, ideal: 170, max: 220)
+        Group {
+            #if os(tvOS)
+            tvContent
             #else
-            .navigationTitle(store.hosts.first { $0.id == hostID }?.displayName ?? "")
-            .toolbar {
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Done") { dismiss() }
+            NavigationSplitView {
+                List(HostSection.allCases, selection: sectionSelection) { section in
+                    Label(section.title, systemImage: section.symbol)
                 }
+                #if os(macOS)
+                .navigationSplitViewColumnWidth(min: 150, ideal: 170, max: 220)
+                #else
+                .navigationTitle(store.hosts.first { $0.id == hostID }?.displayName ?? "")
+                .toolbar {
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("Done") { dismiss() }
+                    }
+                }
+                #endif
+            } detail: {
+                sectionPane
+                    #if os(macOS)
+                    .navigationSubtitle(section.title)
+                    #endif
             }
             #endif
-        } detail: {
-            Group {
-                if section == .speedTest {
-                    speedTestPane
-                } else {
-                    HostDetailView(store: store, hostID: hostID, actions: actions, only: section)
-                }
-            }
-            #if os(macOS)
-            .navigationSubtitle(section.title)
-            #endif
-        }
-        .sheet(item: $editTarget) { host in
-            AddHostSheet(existing: host, onSave: { store.update($0) })
         }
         .alert(
             confirmPower.map { "\($0.action.label)?" } ?? "",
@@ -111,6 +109,15 @@ struct HostSectionsView: View {
         #endif
     }
 
+    /// The chosen section: the speed test's own page, or the host page cut to that section.
+    @ViewBuilder private var sectionPane: some View {
+        if section == .speedTest {
+            speedTestPane
+        } else {
+            HostDetailView(store: store, hostID: hostID, actions: actions, only: section)
+        }
+    }
+
     /// The speed test waits for Start here: picking the row is not asking for a burst.
     @ViewBuilder private var speedTestPane: some View {
         if let host = store.hosts.first(where: { $0.id == hostID }) {
@@ -118,7 +125,7 @@ struct HostSectionsView: View {
                 SpeedTestView(host: host, startsOnAppear: false)
                     #if os(macOS)
                     .navigationTitle(host.displayName)
-                    #else
+                    #elseif os(iOS)
                     .navigationTitle(HostSection.speedTest.title)
                     #endif
             } else {
@@ -142,7 +149,6 @@ struct HostSectionsView: View {
             surface: HostActionSurface(
                 connect: { handOff(.connect(host.id, $0)) },
                 pair: { handOff(.pair(host.id)) },
-                edit: { editTarget = host },
                 browse: { _ in handOff(.browse(host.id)) },
                 speedTest: { section = .speedTest },
                 sendLogs: {
@@ -175,6 +181,55 @@ struct HostSectionsView: View {
         Task {
             let done = await hostPower.invoke(action, on: host)
             outcome = (done.ok ? "On its way" : "Couldn't do that", done.message)
+        }
+    }
+}
+
+#if os(tvOS)
+extension HostSectionsView {
+    /// On a TV the sections are a sidebar that focus picks, beside the chosen one, as in Settings;
+    /// the host's name heads the page over both, left-aligned.
+    var tvContent: some View {
+        VStack(alignment: .leading, spacing: 28) {
+            Text(store.hosts.first { $0.id == hostID }?.displayName ?? "")
+                .font(.geist(48, .bold, relativeTo: .title))
+                .lineLimit(1)
+            HStack(alignment: .top, spacing: 48) {
+                VStack(alignment: .leading, spacing: 0) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        ForEach(HostSection.allCases) { item in
+                            Button {
+                                section = item
+                            } label: {
+                                HStack {
+                                    Label(item.title, systemImage: item.symbol)
+                                    Spacer(minLength: 16)
+                                    if item == section {
+                                        Image(systemName: "chevron.forward")
+                                            .foregroundStyle(.secondary)
+                                    }
+                                }
+                            }
+                            .buttonStyle(TVSidebarRowStyle(chosen: item == section))
+                            .focused($focusedSection, equals: item)
+                        }
+                    }
+                    .tvSidebarCard()
+                    Spacer(minLength: 0)
+                }
+                .frame(width: 460)
+                .focusSection()
+                sectionPane
+                    .tvPaneRoom()
+                    .frame(maxWidth: .infinity)
+                    .focusSection()
+            }
+        }
+        .padding(.horizontal, 60)
+        // Focus enters on the chosen section, so a page opened on one stays on it.
+        .defaultFocus($focusedSection, section)
+        .onChange(of: focusedSection) { _, item in
+            if let item { section = item }
         }
     }
 }

@@ -80,7 +80,7 @@ fun PunktfunkDialog(
 
 /** A prompt's body paragraph, dimmed to sit under the title. */
 @Composable
-private fun PromptText(text: String) {
+internal fun PromptText(text: String) {
     Text(
         text,
         style = MaterialTheme.typography.bodyMedium,

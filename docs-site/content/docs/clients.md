@@ -23,13 +23,13 @@ protocol — the lowest-latency, most resilient path, with the full feature set:
 - **PIN pairing** built in, and pinned reconnects after that.
 - **Controllers**, including DualSense — rumble, adaptive triggers, lightbar, motion, and touchpad.
 - A **[game library](/docs/game-library)** — browse the host's installed games with cover art and
-  launch one straight into the stream. On iPhone and iPad it is the **Library** tab, on the Mac the
-  **Library** row of the window's sidebar, with the host picked from its title menu: desktops,
-  recently played, favorites, launchers and games, in sections you reorder or hide with
-  **Customize**.
+  launch one straight into the stream. On iPhone, iPad and Apple TV it is the **Library** tab, on
+  the Mac the **Library** row of the window's sidebar, with the host picked from the chips across
+  its top: desktops, recently played, favorites, launchers and games, in sections you reorder or
+  hide with **Customize**.
 - A **host page** behind each card's ⓘ: presets, address, pairing, power and support in one place.
   On the Mac it opens in its own window, with a sidebar for its sections. ⌘1 and ⌘2 switch the
-  main window between Hosts and the Library.
+  main window between Hosts and the Library. On Apple TV, hold a card or press Play/Pause on it.
 - A live **stats overlay** (resolution, fps, bitrate, latency) and a built-in **network speed test**
   on the host page, which charts your link's throughput as it measures and suggests a bitrate.
 - **Widgets, Live Activities and Shortcuts** — a hosts widget and a game-library widget for the
