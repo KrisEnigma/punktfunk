@@ -164,6 +164,9 @@ pub struct Presenter {
     /// Shared device handles for the Vulkan Video decode lane. `None` if the stack cannot.
     video_export: Option<pf_client_core::video::VulkanDecodeDevice>,
     overlay_pipe: OverlayPipe,
+    /// Filtered video scale into the swapchain; its output pass shares the overlay's
+    /// framebuffers. Rebuilt with the overlay pipe on an HDR flip.
+    scale: crate::scale::ScalePass,
     /// In-flight hardware frame; released after the next fence wait.
     retired_hw: Option<Retired>,
     /// D3D11 lane: the slot last composited and its picture size, which `Redraw` blits
@@ -220,8 +223,8 @@ pub struct Presenter {
     /// Last successful id-carrying present, awaiting [`Presenter::note_presented`].
     last_presented: Option<(vk::SwapchainKHR, u64)>,
     video_fit: punktfunk_core::video_fit::VideoFit,
-    /// Inputs of the last logged placement; a change logs the new one once.
-    placement_logged: Option<(vk::Extent2D, u32, u32)>,
+    /// Extent, frame size and draw path of the last logged placement.
+    placement_logged: Option<(vk::Extent2D, u32, u32, &'static str)>,
 }
 
 impl Presenter {
@@ -423,6 +426,7 @@ impl Drop for Presenter {
                 p.destroy(&self.device);
             }
             self.overlay_pipe.destroy(&self.device);
+            self.scale.destroy(&self.device);
             for s in self.render_sems.drain(..) {
                 self.device.destroy_semaphore(s, None);
             }

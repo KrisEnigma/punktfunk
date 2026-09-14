@@ -276,6 +276,9 @@ impl Presenter {
             }
         }
         old_pipe.destroy(&self.device);
+        // The scale pass renders into the swapchain format too; fence quiesce above.
+        self.scale.destroy(&self.device);
+        self.scale = crate::scale::ScalePass::new(&self.device, target.format)?;
         self.format = target;
         self.hdr_active = on;
         self.recreate_swapchain(window)

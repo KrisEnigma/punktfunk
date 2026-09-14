@@ -1,4 +1,4 @@
-//! Per-frame present: `FrameInput` → video image → CSC → placed blit → present.
+//! Per-frame present: `FrameInput` → video image → CSC → placed scale or blit → present.
 //! A D3D11 RGB slot arrives converted: it is the blit source and the `Redraw` picture,
 //! with no video image. A D3D11 planar slot goes through CSC like the native lane.
 //!
@@ -34,37 +34,44 @@ impl Presenter {
         self.placement_logged = None;
     }
 
-    /// Where a `width`×`height` frame lands in the swapchain. A new frame size or fit logs
-    /// at info; a window resize alone logs at debug, so a drag does not flood the log.
-    fn place(&mut self, width: u32, height: u32) -> punktfunk_core::video_fit::Placement {
-        let view = (self.extent.width, self.extent.height);
-        let p = punktfunk_core::video_fit::place(self.video_fit, view, (width, height));
-        let key = (self.extent, width, height);
-        if self.placement_logged != Some(key) {
-            let new_frame = self
-                .placement_logged
-                .is_none_or(|(_, w, h)| (w, h) != (width, height));
-            self.placement_logged = Some(key);
-            macro_rules! log_placement {
-                ($level:ident) => {
-                    tracing::$level!(
-                        fit = self.video_fit.name(),
-                        view = ?view,
-                        frame = ?(width, height),
-                        dst = ?(p.dst_x, p.dst_y, p.dst_w, p.dst_h),
-                        src = ?(p.src_x, p.src_y, p.src_w, p.src_h),
-                        scale = ?(p.scale_x, p.scale_y),
-                        "video placement"
-                    )
-                };
-            }
-            if new_frame {
-                log_placement!(info);
-            } else {
-                log_placement!(debug);
-            }
+    /// Log where a `width`×`height` frame lands and how it is drawn (`path`). A new frame
+    /// size, fit or path logs at info; a window resize alone logs at debug, so a drag does
+    /// not flood the log.
+    fn log_placement(
+        &mut self,
+        width: u32,
+        height: u32,
+        p: &punktfunk_core::video_fit::Placement,
+        path: &'static str,
+    ) {
+        let key = (self.extent, width, height, path);
+        if self.placement_logged == Some(key) {
+            return;
         }
-        p
+        let new_frame = self
+            .placement_logged
+            .is_none_or(|(_, w, h, was)| (w, h, was) != (width, height, path));
+        self.placement_logged = Some(key);
+        macro_rules! log_placement {
+            ($level:ident) => {
+                tracing::$level!(
+                    fit = self.video_fit.name(),
+                    path,
+                    view = ?(self.extent.width, self.extent.height),
+                    frame = ?(width, height),
+                    dst = ?(p.dst_x, p.dst_y, p.dst_w, p.dst_h),
+                    src = ?(p.src_x, p.src_y, p.src_w, p.src_h),
+                    scale = ?(p.scale_x, p.scale_y),
+                    kernel = ?(p.kernel_x().name(), p.kernel_y().name()),
+                    "video placement"
+                )
+            };
+        }
+        if new_frame {
+            log_placement!(info);
+        } else {
+            log_placement!(debug);
+        }
     }
 
     /// Present one frame. `false` means the swapchain is out of date — the
@@ -306,6 +313,55 @@ impl Presenter {
             unsafe { self.device.update_descriptor_sets(&writes, &[]) };
         }
 
+        // Where the picture lands and which path draws it. A fractional scale goes through the
+        // filter ladder (`scale.rs`); whole-number scales blit exactly. The shader samples the
+        // video image and draws through the overlay's framebuffers, so both must exist.
+        #[cfg(windows)]
+        let slot = win_frame
+            .as_ref()
+            .filter(|(_, f)| f.planes.is_none())
+            .map(|(d, f)| (*f, d.width, d.height))
+            .or(self.retained_slot.filter(|_| redraw));
+        #[cfg(windows)]
+        let from_slot = slot.is_some();
+        #[cfg(not(windows))]
+        let from_slot = false;
+        let source = self.video.as_ref().map(|v| (v.image, v.width, v.height));
+        #[cfg(windows)]
+        let source = slot.map(|(f, w, h)| (f.image, w, h)).or(source);
+        let view = (self.extent.width, self.extent.height);
+        let placement = source
+            .map(|(_, w, h)| punktfunk_core::video_fit::place(self.video_fit, view, (w, h)))
+            .filter(|p| !p.is_empty());
+        let targets_ready = self.overlay_pipe.framebuffers.len() == self.images.len();
+        let filtered = match (placement, &self.video) {
+            (Some(p), Some(v)) if !from_slot && targets_ready && crate::scale::needs_filter(&p) => {
+                let (device, mem_props) = (&self.device, &self.mem_props);
+                self.scale.prepare(device, v.height, &p, v.view, |reqs| {
+                    allocate(
+                        device,
+                        mem_props,
+                        reqs,
+                        vk::MemoryPropertyFlags::DEVICE_LOCAL,
+                    )
+                })?;
+                Some(p)
+            }
+            _ => None,
+        };
+        if let (Some((_, w, h)), Some(p)) = (source, placement) {
+            // A D3D11 RGB ring slot is imported TRANSFER_SRC only, so a fractional scale of it
+            // stays a bilinear blit until the import also asks for SAMPLED.
+            let path = if filtered.is_some() {
+                "filtered"
+            } else if crate::scale::needs_filter(&p) {
+                "bilinear blit"
+            } else {
+                "exact blit"
+            };
+            self.log_placement(w, h, &p, path);
+        }
+
         let acquire_started = std::time::Instant::now();
         // SAFETY: `swapchain` and `acquire_sem` are owned here. Fence wait above
         // completed the last submit that waited `acquire_sem`, so it is not pending.
@@ -369,12 +425,6 @@ impl Presenter {
             // The VideoProcessor already delivered RGB matching the HDR mode: the
             // composite reads an RGB slot itself (this frame's, or the retained one on
             // `Redraw`). Cross-API sync is the keyed mutex on submit, not these barriers.
-            #[cfg(windows)]
-            let slot = win_frame
-                .as_ref()
-                .filter(|(_, f)| f.planes.is_none())
-                .map(|(d, f)| (*f, d.width, d.height))
-                .or(self.retained_slot.filter(|_| redraw));
             #[cfg(windows)]
             if let Some((f, _, _)) = slot {
                 external_acquire_barrier(
@@ -542,67 +592,99 @@ impl Presenter {
                 self.record_csc_planar(v.framebuffer, extent, f.color, 8, false);
             }
 
-            barrier(
-                &self.device,
-                self.cmd_buf,
-                swap_image,
-                vk::ImageLayout::UNDEFINED,
-                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-            );
-            self.device.cmd_clear_color_image(
-                self.cmd_buf,
-                swap_image,
-                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                &vk::ClearColorValue {
-                    float32: [0.0, 0.0, 0.0, 1.0],
-                },
-                &[subresource_range()],
-            );
-            // Clear and blit both write the swapchain image; transfer commands carry no
-            // implicit order. RDNA fast-clears DCC metadata beside the blit, and where
-            // the clear lands second the tile shows black (the AMD "equaliser" report).
-            barrier(
-                &self.device,
-                self.cmd_buf,
-                swap_image,
-                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-            );
-            let source = self.video.as_ref().map(|v| (v.image, v.width, v.height));
-            #[cfg(windows)]
-            let source = slot.map(|(f, w, h)| (f.image, w, h)).or(source);
-            let placement = source.map(|(_, width, height)| self.place(width, height));
-            if let (Some((image, _, _)), Some(p)) = (source, placement.filter(|p| !p.is_empty())) {
-                let corner = |x: f64, y: f64, z: i32| vk::Offset3D {
-                    x: x.round() as i32,
-                    y: y.round() as i32,
-                    z,
-                };
-                let blit = vk::ImageBlit::default()
-                    .src_subresource(subresource_layers())
-                    .src_offsets([
-                        corner(p.src_x, p.src_y, 0),
-                        corner(p.src_x + p.src_w, p.src_y + p.src_h, 1),
-                    ])
-                    .dst_subresource(subresource_layers())
-                    .dst_offsets([
-                        corner(f64::from(p.dst_x), f64::from(p.dst_y), 0),
-                        corner(
-                            f64::from(p.dst_x + p.dst_w),
-                            f64::from(p.dst_y + p.dst_h),
-                            1,
-                        ),
-                    ]);
-                self.device.cmd_blit_image(
+            let swap_layout = if let (Some(p), Some(v)) = (filtered, &self.video) {
+                // The CSC pass leaves the video image in TRANSFER_SRC; the blit path and the
+                // next `Redraw` expect it back there.
+                barrier(
+                    &self.device,
                     self.cmd_buf,
-                    image,
+                    v.image,
                     vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                    vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                );
+                self.scale.record(
+                    &self.device,
+                    self.cmd_buf,
+                    (v.width, v.height),
+                    &p,
+                    self.overlay_pipe.framebuffers[index as usize],
+                    self.extent,
+                );
+                barrier(
+                    &self.device,
+                    self.cmd_buf,
+                    v.image,
+                    vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                    vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                );
+                vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL
+            } else {
+                barrier(
+                    &self.device,
+                    self.cmd_buf,
+                    swap_image,
+                    vk::ImageLayout::UNDEFINED,
+                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                );
+                self.device.cmd_clear_color_image(
+                    self.cmd_buf,
                     swap_image,
                     vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                    &[blit],
-                    vk::Filter::LINEAR,
+                    &vk::ClearColorValue {
+                        float32: [0.0, 0.0, 0.0, 1.0],
+                    },
+                    &[subresource_range()],
                 );
-            }
+                // Clear and blit both write the swapchain image; transfer commands carry no
+                // implicit order. RDNA fast-clears DCC metadata beside the blit, and where
+                // the clear lands second the tile shows black (the AMD "equaliser" report).
+                barrier(
+                    &self.device,
+                    self.cmd_buf,
+                    swap_image,
+                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                );
+                if let (Some((image, _, _)), Some(p)) = (source, placement) {
+                    let corner = |x: f64, y: f64, z: i32| vk::Offset3D {
+                        x: x.round() as i32,
+                        y: y.round() as i32,
+                        z,
+                    };
+                    let blit = vk::ImageBlit::default()
+                        .src_subresource(subresource_layers())
+                        .src_offsets([
+                            corner(p.src_x, p.src_y, 0),
+                            corner(p.src_x + p.src_w, p.src_y + p.src_h, 1),
+                        ])
+                        .dst_subresource(subresource_layers())
+                        .dst_offsets([
+                            corner(f64::from(p.dst_x), f64::from(p.dst_y), 0),
+                            corner(
+                                f64::from(p.dst_x + p.dst_w),
+                                f64::from(p.dst_y + p.dst_h),
+                                1,
+                            ),
+                        ]);
+                    // NEAREST is exact at 1:1 and whole-number scales; LINEAR is the fallback
+                    // for a fractional scale the shader cannot take.
+                    let filter = if crate::scale::needs_filter(&p) {
+                        vk::Filter::LINEAR
+                    } else {
+                        vk::Filter::NEAREST
+                    };
+                    self.device.cmd_blit_image(
+                        self.cmd_buf,
+                        image,
+                        vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                        swap_image,
+                        vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                        &[blit],
+                        filter,
+                    );
+                }
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL
+            };
             // An HDR switch swaps in a fresh overlay pipe and leaves the swapchain to
             // `recreate_swapchain`, which keeps the old one while the window has no
             // extent (a display-topology flip). Until that recreate lands the pipe has
@@ -623,7 +705,7 @@ impl Presenter {
                     &self.device,
                     self.cmd_buf,
                     swap_image,
-                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                    swap_layout,
                     vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
                 );
                 self.device.cmd_begin_render_pass(
@@ -677,7 +759,7 @@ impl Presenter {
                     &self.device,
                     self.cmd_buf,
                     swap_image,
-                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                    swap_layout,
                     vk::ImageLayout::PRESENT_SRC_KHR,
                 );
             }

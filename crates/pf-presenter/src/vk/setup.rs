@@ -564,6 +564,7 @@ impl Presenter {
             "swapchain config"
         );
         let overlay_pipe = OverlayPipe::new(&device, format.format)?;
+        let scale = crate::scale::ScalePass::new(&device, format.format)?;
 
         // SAFETY: CREATE — CreateInfo is a local; the pool is owned by the Presenter being built.
         let cmd_pool = unsafe {
@@ -614,6 +615,7 @@ impl Presenter {
             cpu_planes: None,
             video_export,
             overlay_pipe,
+            scale,
             retired_hw: None,
             #[cfg(windows)]
             retained_slot: None,

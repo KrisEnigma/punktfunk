@@ -17,3 +17,5 @@ pub const NV12_CSC_FRAG: &[u8] = include_bytes!("../shaders/nv12_csc.frag.spv");
 pub const PLANAR_CSC_FRAG: &[u8] = include_bytes!("../shaders/planar_csc.frag.spv");
 /// The console overlay's premultiplied-alpha blit.
 pub const OVERLAY_FRAG: &[u8] = include_bytes!("../shaders/overlay.frag.spv");
+/// One axis of the video scale: nearest, Catmull-Rom or widened Lanczos-3.
+pub const SCALE_FRAG: &[u8] = include_bytes!("../shaders/scale.frag.spv");
