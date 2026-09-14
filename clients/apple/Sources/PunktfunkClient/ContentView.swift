@@ -1084,7 +1084,7 @@ struct ContentView: View {
     private var touchTabs: some View {
         TabView(selection: $touchTab) {
             touchHome
-                .tabItem { Label("Hosts", systemImage: "desktopcomputer") }
+                .tabItem { TouchTab.hostsLabel }
                 .tag(TouchTab.hosts)
             libraryTab
                 .tabItem { Label("Library", systemImage: "square.grid.2x2") }

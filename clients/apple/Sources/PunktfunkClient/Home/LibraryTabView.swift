@@ -17,6 +17,20 @@ enum TouchTab: Hashable {
     case settings
     #endif
 }
+
+#if os(tvOS)
+extension TouchTab {
+    /// The Hosts tab's label. Its symbol draws in one layer: in its preferred two, the focused
+    /// tab's white pill left it white.
+    static var hostsLabel: some View {
+        Label {
+            Text("Hosts")
+        } icon: {
+            Image(systemName: "desktopcomputer").symbolRenderingMode(.monochrome)
+        }
+    }
+}
+#endif
 #endif
 
 struct LibraryTabView: View {
