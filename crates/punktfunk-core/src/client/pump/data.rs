@@ -356,7 +356,7 @@ impl DataPump {
                     // (the host send window closes while the bottleneck
                     // queue is still draining; that duration overstates).
                     if p.host_duration_ms > 0 && p.delivered_bytes > 0 {
-                        let window_ms = p.throughput_window_ms();
+                        let window_ms = p.throughput_window_ms(p.delivered_packets);
                         let delivered_kbps =
                             (p.delivered_bytes.saturating_mul(8) / window_ms.max(1) as u64) as u32;
                         let ceiling = delivered_kbps.saturating_mul(7) / 10;
