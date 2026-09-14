@@ -146,10 +146,9 @@ struct HomeView: View {
                     #endif
                 }
             }
+            // A TV's tab bar names the place, so its root carries no title.
+            #if !os(tvOS)
             .navigationTitle("Punktfunk")
-            #if os(tvOS)
-            // The tab bar names the place, so the TV's root carries no bar.
-            .toolbar(.hidden, for: .navigationBar)
             #endif
             // Browse the LAN for advertised hosts only while the grid is up — not during a
             // session. The home appears/disappears as the stream swaps in and out.

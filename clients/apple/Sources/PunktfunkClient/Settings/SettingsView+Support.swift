@@ -373,17 +373,11 @@ extension View {
                 in: RoundedRectangle(cornerRadius: 28, style: .continuous))
     }
 
-    /// Lets a focused row lift and cast its shadow past a pane's sides, where its list would clip
-    /// it. The top and bottom still clip, so rows scroll under the edges.
+    /// Room past a pane's sides for a focused row's lift and shadow: the pane's frame, where its
+    /// list clips, grows 40 pt a side, and the safe area puts the rows back. Layout, not an
+    /// environment value, so a list pushed from the pane keeps its own clip.
     func tvPaneRoom() -> some View {
-        scrollClipDisabled().clipShape(TVPaneClip())
-    }
-}
-
-/// A pane's bounds, widened by the room a focused row's lift and shadow take.
-private struct TVPaneClip: Shape {
-    func path(in rect: CGRect) -> Path {
-        Path(rect.insetBy(dx: -40, dy: 0))
+        safeAreaPadding(.horizontal, 40).padding(.horizontal, -40)
     }
 }
 #endif

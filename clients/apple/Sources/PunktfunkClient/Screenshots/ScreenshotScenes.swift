@@ -229,6 +229,10 @@ enum ShotScenes {
         scenes.append(ShotScene(name: "23-tv-quick-actions", orientation: .natural, colorScheme: .dark) {
             AnyView(ShotTVTabs(tab: .settings, category: .quickActions))
         })
+        // Back from a slot's list: the tab bar comes back with the pane.
+        scenes.append(ShotScene(name: "23b-tv-quick-actions-back", orientation: .natural, colorScheme: .dark) {
+            AnyView(ShotTVTabs(tab: .settings, category: .quickActions, pushPop: true))
+        })
         // The host page as the TV pushes it, and its speed test waiting for Start.
         scenes.append(ShotScene(name: "24-tv-host-page", orientation: .natural, colorScheme: .dark) {
             AnyView(NavigationStack {
@@ -464,6 +468,7 @@ private struct ShotTVTabs: View {
     var category: SettingsCategory = .general
     var scope: SettingsScope = .defaults
     var editing = false
+    var pushPop = false
 
     var body: some View {
         TabView(selection: .constant(tab)) {
@@ -473,13 +478,17 @@ private struct ShotTVTabs: View {
             ShotLibraryFilter()
                 .tabItem { Label("Library", systemImage: "square.grid.2x2") }
                 .tag(TouchTab.library)
-            NavigationStack {
-                SettingsView(initialCategory: category, initialScope: scope, startsOnEditing: editing)
-            }
-            .tabItem { Label("Settings", systemImage: "gearshape") }
-            .tag(TouchTab.settings)
+            NavigationStack { settings }
+                .tabItem { Label("Settings", systemImage: "gearshape") }
+                .tag(TouchTab.settings)
         }
         .onAppear { ShotMock.installPresets() }
+    }
+
+    private var settings: SettingsView {
+        var view = SettingsView(initialCategory: category, initialScope: scope, startsOnEditing: editing)
+        view.shotPushPop = pushPop
+        return view
     }
 }
 

@@ -125,6 +125,7 @@ struct ShortcutsView: View {
         // operated — a plain scrolling column at TV sizes says the same thing with less chrome.
         ScrollView {
             VStack(alignment: .leading, spacing: 30) {
+                TVScreenTitle("Shortcuts")
                 ForEach(ShortcutsCatalog.groups(micAvailable: micAvailable)) { group in
                     VStack(alignment: .leading, spacing: 12) {
                         Text(group.title)
@@ -151,7 +152,6 @@ struct ShortcutsView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(60)
         }
-        .navigationTitle("Shortcuts")
         #else
         form
         #endif

@@ -164,6 +164,8 @@ struct SettingsView: View {
     #if DEBUG
     /// Shot harness: the sidebar sits out focus, so focus starts on the pane's first row.
     var shotFocusesPane = false
+    /// Shot harness: the dial's editor opens a slot's list and goes back.
+    var shotPushPop = false
     #endif
 
     /// The app opens on General in Default settings; the screenshot harness opens a specific
@@ -436,8 +438,6 @@ struct SettingsView: View {
                 .focusSection()
             }
             .padding(.horizontal, 60))
-            // The tab bar names the place, so the root carries no bar.
-            .toolbar(.hidden, for: .navigationBar)
             // Focus enters on the chosen pane, so coming back finds the category left open.
             .defaultFocus($tvFocusedPane, tvPane)
             .onChange(of: tvFocusedPane) { _, pane in
@@ -520,19 +520,27 @@ struct SettingsView: View {
         case .category(.controllers):
             Form { controllersSection }
         case .category(.quickActions):
-            TVQuickActionsEditor(
-                blob: scoped(SettingsFields.overlayActions),
-                overridden: isOverridden("overlay_actions")
-            ) {
-                if inPresetScope {
-                    resetOverride("overlay_actions")
-                } else {
-                    scoped(SettingsFields.overlayActions).wrappedValue = ""
-                }
-            }
+            tvQuickActions
         case .category(.about):
             AboutView()
         }
+    }
+
+    private var tvQuickActions: TVQuickActionsEditor {
+        var editor = TVQuickActionsEditor(
+            blob: scoped(SettingsFields.overlayActions),
+            overridden: isOverridden("overlay_actions")
+        ) {
+            if inPresetScope {
+                resetOverride("overlay_actions")
+            } else {
+                scoped(SettingsFields.overlayActions).wrappedValue = ""
+            }
+        }
+        #if DEBUG
+        editor.shotPushPop = shotPushPop
+        #endif
+        return editor
     }
 
     /// The Editing pane: which layer the categories edit, and the edited preset's own acts as

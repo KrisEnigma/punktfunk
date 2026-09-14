@@ -222,7 +222,6 @@ struct AboutView: View {
             .frame(maxWidth: .infinity)
             .padding(60)
         }
-        .navigationTitle("About")
     }
 
     private func tvAddress(_ title: String, _ url: URL) -> some View {
@@ -264,19 +263,15 @@ struct AppIconView: View {
     var body: some View {
         Group {
             if let icon = Self.bundleIcon {
-                // The mask is applied ONLY where it is wanted. A `cornerRadius: 0` RoundedRectangle
-                // is not a no-op — it still clips to the layout frame, which crops any art whose
-                // aspect ratio isn't the frame's (the TV's 400x240 icon lost its ends to it).
-                // iOS ships the icon UNMASKED — the springboard applies the rounded shape at draw
-                // time, so used raw it is a hard-cornered square. macOS bakes its own shape (and
-                // margins) into the image, and clipping that would cut into it.
+                // Masked where the OS masks at draw time, the iOS and TV home screens. macOS bakes
+                // its shape and margins into the image, and a clip would cut into them.
                 if icon.needsMask {
                     icon.image
                         .resizable()
                         .interpolation(.high)
                         .aspectRatio(contentMode: .fit)
                         .clipShape(RoundedRectangle(
-                            cornerRadius: side * Self.iOSCornerRatio, style: .continuous))
+                            cornerRadius: side * Self.cornerRatio, style: .continuous))
                 } else {
                     icon.image
                         .resizable()
@@ -300,8 +295,13 @@ struct AppIconView: View {
         .accessibilityHidden(true) // the app's name is the next line
     }
 
-    /// The iOS icon's corner radius as a fraction of its side — the squircle's ~22.37%.
-    private static let iOSCornerRatio: CGFloat = 0.2237
+    /// The mask's corner radius as a fraction of the icon's height: the iOS squircle's ~22.37%,
+    /// and the 24 pt a TV home screen gives its 150 pt tall icons.
+    #if os(tvOS)
+    private static let cornerRatio: CGFloat = 0.16
+    #else
+    private static let cornerRatio: CGFloat = 0.2237
+    #endif
 
     private var monogram: some View {
         let shape = RoundedRectangle(cornerRadius: side * 0.22, style: .continuous)
@@ -331,9 +331,10 @@ struct AppIconView: View {
         return (Image(uiImage: image), true)
         #else
         // A tvOS icon is a layered stack with no single image to load. `AboutAppIcon` is that
-        // stack flattened by scripts/render-tvos-icon.swift, which writes both; it needs no mask.
+        // stack flattened by scripts/render-tvos-icon.swift, which writes both, square as the
+        // stack is: the home screen rounds it at draw time.
         guard let image = UIImage(named: "AboutAppIcon") else { return nil }
-        return (Image(uiImage: image), false)
+        return (Image(uiImage: image), true)
         #endif
     }
 }

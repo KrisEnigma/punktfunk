@@ -21,6 +21,10 @@ struct TVQuickActionsEditor: View {
     @State private var moving: Int?
     @State private var shortcut: ShortcutDraft?
     @FocusState private var focused: Int?
+    #if DEBUG
+    /// Shot harness: opens slot 1's list, then goes back, as Back would.
+    var shotPushPop = false
+    #endif
 
     private var cfg: OverlayConfig { OverlayConfig.parse(blob, platform: .tv) }
 
@@ -31,13 +35,15 @@ struct TVQuickActionsEditor: View {
                 .focusSection()
             Form {
                 Section {
-                    // Not a row focus lands on: what the focused disc holds and what it needs.
+                    // Not a row focus lands on, so no platter: what the focused disc holds and
+                    // what it needs.
                     VStack(alignment: .leading, spacing: 8) {
                         Text(detailTitle)
                             .font(.geist(30, .semibold, relativeTo: .title3))
                         Text(detailNote)
                             .foregroundStyle(.secondary)
                     }
+                    .listRowBackground(Color.clear)
                 }
                 shortcutsSection
                 Section {
@@ -59,6 +65,15 @@ struct TVQuickActionsEditor: View {
         .navigationDestination(item: $shortcut) { draft in
             TVShortcutEditor(draft: draft, save: save) { remove(draft.id) }
         }
+        #if DEBUG
+        .task {
+            guard shotPushPop else { return }
+            try? await Task.sleep(for: .seconds(1))
+            picking = 0
+            try? await Task.sleep(for: .seconds(1.5))
+            picking = nil
+        }
+        #endif
     }
 
     private var dial: some View {
@@ -218,6 +233,8 @@ private struct TVSlotPicker: View {
 
     var body: some View {
         List {
+            TVScreenTitle("Slot Action")
+                .listRowBackground(Color.clear)
             ForEach(groups) { group in
                 Section(group.id) {
                     ForEach(group.options) { option in
@@ -241,7 +258,6 @@ private struct TVSlotPicker: View {
                 }
             }
         }
-        .navigationTitle("Slot Action")
     }
 }
 
@@ -260,6 +276,7 @@ private struct TVShortcutEditor: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 28) {
+                TVScreenTitle(draft.isNew ? "New Shortcut" : "Shortcut")
                 TVFieldRow(
                     label: "Name", value: draft.label,
                     placeholder: key == nil ? "Optional" : chordChip(draft.keys)
@@ -302,7 +319,6 @@ private struct TVShortcutEditor: View {
             }
             .padding(60)
         }
-        .navigationTitle(draft.isNew ? "New Shortcut" : "Shortcut")
         .fullScreenCover(isPresented: $editingName) {
             TVTextEntry(title: "Name", text: draft.label) { typed in
                 draft.label = typed

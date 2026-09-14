@@ -28,6 +28,9 @@ struct AcknowledgementsView: View {
             // notice chunks visually continuous; the header block carries its own spacing + bottom pad.
             LazyVStack(alignment: .leading, spacing: 0) {
                 VStack(alignment: .leading, spacing: 18) {
+                    #if os(tvOS)
+                    TVScreenTitle("Acknowledgements")
+                    #endif
                     Text("Punktfunk")
                         .font(.geist(Self.titleFont, .bold, relativeTo: .title2))
                     if let version {
@@ -91,7 +94,9 @@ struct AcknowledgementsView: View {
                 .padding(40)
             #endif
         }
+        #if !os(tvOS)
         .navigationTitle("Acknowledgements")
+        #endif
     }
 }
 
