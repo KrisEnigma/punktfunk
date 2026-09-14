@@ -459,14 +459,16 @@ final class SessionModel: ObservableObject {
             // host recognizes this Mac (nil = anonymous, fine for hosts without
             // --require-pairing; Keychain/generation failure must not block connecting).
             let identity = (try? ClientIdentityStore.shared.load())?.identity
-            // 4:4:4 is advertised only when allowed AND this device can HARDWARE-decode it —
-            // software 4:4:4 is too slow for real-time. The host content-gates depth, so a
-            // session that advertised 10-bit can still receive an 8-bit 4:4:4 stream: require
-            // BOTH depths there. `chromaFormat` reflects what was actually resolved.
+            // 4:4:4 only when allowed AND decodable in real time. PyroWave's Metal decoder takes
+            // it on any device past its probe. HEVC needs HARDWARE 4:4:4, at BOTH depths when
+            // 10-bit is advertised (the host may still send 8-bit). `chromaFormat` is the answer.
+            let pyroWave =
+                preferredCodec == PunktfunkConnection.codecPyroWave && MetalWaveletDecoder.supported
             let canDecode444 =
-                tenBit
-                ? (Stage444Probe.hwDecode444_8bit && Stage444Probe.hwDecode444_10bit)
-                : Stage444Probe.hwDecode444_8bit
+                pyroWave
+                || (tenBit
+                    ? (Stage444Probe.hwDecode444_8bit && Stage444Probe.hwDecode444_10bit)
+                    : Stage444Probe.hwDecode444_8bit)
             let videoCaps = PunktfunkConnection.videoCaps(
                 tenBit: tenBit, hdr: hdrCapable, chroma444: want444 && canDecode444)
             // This client's VideoToolbox path decodes H.264 and HEVC everywhere, and AV1 when
@@ -482,9 +484,7 @@ final class SessionModel: ObservableObject {
             // every M-series Mac and the ATV 4K gen 3 pass). The decoder self-configures from
             // the per-frame sequence header (4:2:0/4:4:4, SDR/PQ — design/pyrowave-444-hdr.md),
             // so the session keeps the user's HDR/10-bit/4:4:4 caps exactly like HEVC/AV1.
-            if preferredCodec == PunktfunkConnection.codecPyroWave, MetalWaveletDecoder.supported {
-                videoCodecs |= PunktfunkConnection.codecPyroWave
-            }
+            if pyroWave { videoCodecs |= PunktfunkConnection.codecPyroWave }
             // Cursor channel (remote-desktop-sweep M2, macOS): sessions STARTING in the desktop
             // mouse model advertise local cursor rendering — the host then stops compositing
             // the pointer and forwards shape/state, which StreamView draws as the real
