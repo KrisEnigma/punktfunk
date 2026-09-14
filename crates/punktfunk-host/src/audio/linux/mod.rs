@@ -94,6 +94,8 @@ struct CaptureNodes {
     sink: Option<String>,
     /// Capture stream `node.name`. Same as [`sink`](Self::sink) only in StreamSink.
     capture: String,
+    /// Monitor mode: the sink whose monitor to tap. `None` taps the default sink.
+    target: Option<String>,
 }
 
 /// Linux capture-rate answer for the hi-res gate (`design/hi-res-audio.md`).
@@ -157,24 +159,33 @@ pub struct PwAudioCapturer {
 
 impl PwAudioCapturer {
     pub fn open(channels: u32, rate_hz: u32) -> Result<PwAudioCapturer> {
-        Self::open_named(channels, rate_hz, None)
+        Self::open_named(channels, rate_hz, None, false)
     }
 
     /// [`open`](Self::open) with a caller-chosen sink `node.name` so isolation
     /// can pin nested apps (`PULSE_SINK`) to the same node it captures.
     /// Must keep the `punktfunk-speaker` prefix (claim-staleness and the
     /// graph-driver diagnostic match on it). Ignored in monitor mode.
+    ///
+    /// `tap` taps that sink's monitor without minting or claiming it: the sink
+    /// belongs to the session this one joined.
     pub fn open_named(
         channels: u32,
         rate_hz: u32,
         sink_override: Option<&str>,
+        tap: bool,
     ) -> Result<PwAudioCapturer> {
         anyhow::ensure!(
             matches!(channels, 1 | 2 | 6 | 8),
             "unsupported audio channel count {channels} (want 2, 6 or 8)"
         );
         anyhow::ensure!(rate_hz > 0, "audio capture rate must be positive");
-        let mode = capture_mode();
+        let target = sink_override.filter(|_| tap).map(str::to_string);
+        let mode = if target.is_some() {
+            CaptureMode::Monitor
+        } else {
+            capture_mode()
+        };
         // Unique per capturer: overlapping instances must not alias, and a
         // fresh name gets unity WirePlumber volume, not the previous run's.
         // One sequence for both names so tap and sink log as one capturer.
@@ -196,6 +207,7 @@ impl PwAudioCapturer {
                 _ => format!("punktfunk-audio-{pid}-{seq}"),
             },
             sink: mode.owns_sink().then_some(sink_node),
+            target,
         };
         let (tx, rx) = sync_channel::<Vec<f32>>(64);
         let (quit_tx, quit_rx) = pipewire::channel::channel::<Terminate>();
@@ -840,6 +852,7 @@ fn pw_thread(
         mode,
         sink: sink_name,
         capture: capture_name,
+        target,
     } = nodes;
     // Boosts THIS mainloop thread, not the capture callback. `RT_PROCESS`
     // runs `process()` on libpipewire's data loop (`SCHED_RR`). Kept: this
@@ -1079,7 +1092,8 @@ fn pw_thread(
                 p.insert(*pw::keys::NODE_LATENCY, node_latency.as_str());
                 p
             }
-            // Default-sink monitor (system output), not a microphone.
+            // Default-sink monitor (system output), not a microphone, unless a
+            // `target` names another session's sink.
             CaptureMode::Monitor => {
                 let mut p = properties! {
                     *pw::keys::MEDIA_TYPE          => "Audio",
@@ -1089,6 +1103,9 @@ fn pw_thread(
                 };
                 p.insert(*pw::keys::NODE_NAME, capture_name.as_str());
                 p.insert(*pw::keys::NODE_LATENCY, node_latency.as_str());
+                if let Some(t) = target.as_deref() {
+                    p.insert("target.object", t);
+                }
                 p
             }
         };
@@ -1444,13 +1461,14 @@ pub(super) fn open_audio_capture(channels: u32, rate_hz: u32) -> Result<Box<dyn 
 
 /// [`open_audio_capture`] pinned to a sink `node.name` (`design/gamescope-multiuser.md`):
 /// gamescope apps get `PULSE_SINK` and we capture that sink's monitor. `None` =
-/// [`open_audio_capture`].
+/// [`open_audio_capture`]. `tap`: the sink is another session's.
 pub(super) fn open_audio_capture_named(
     channels: u32,
     rate_hz: u32,
     sink: Option<&str>,
+    tap: bool,
 ) -> Result<Box<dyn AudioCapturer>> {
-    PwAudioCapturer::open_named(channels, rate_hz, sink)
+    PwAudioCapturer::open_named(channels, rate_hz, sink, tap)
         .map(|c| Box::new(c) as Box<dyn AudioCapturer>)
 }
 

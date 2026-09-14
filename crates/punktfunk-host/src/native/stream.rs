@@ -379,6 +379,8 @@ pub(super) struct SessionContext {
     pub(super) launch_target: Option<crate::library::LaunchTarget>,
     /// Threaded into the EDID CTA HDR block before `create` so host apps tone-map to the client's panel.
     pub(super) client_hdr: Option<pf_frame::HdrMeta>,
+    /// Admitted by `mode_conflict: join`: share the live display instead of creating one.
+    pub(super) join_live: bool,
     pub(super) bringup: Arc<crate::bringup::Trace>,
     pub(super) resize_ms: Arc<AtomicU32>,
     /// A clone of the data socket for the sender's kernel-queue probe; `None` on the web plane.

@@ -249,6 +249,11 @@ fn run(
             (cfg.width, cfg.height, cfg.fps),
             life.quit.clone(),
             "gamestream".to_string(),
+            crate::vdisplay::admission::LiveDisplay {
+                compositor: Some(compositor),
+                route: gamescope_route.clone(),
+                isolation: None,
+            },
         );
         tracing::info!(
             ?compositor,

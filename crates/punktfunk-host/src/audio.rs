@@ -144,13 +144,15 @@ pub fn open_audio_capture(channels: u32, rate_hz: u32) -> Result<Box<dyn AudioCa
 
 /// [`open_audio_capture`] pinned to a sink `node.name` (`design/gamescope-multiuser.md`):
 /// gamescope apps get `PULSE_SINK` and we capture that sink's monitor. `None` =
-/// [`open_audio_capture`]. Non-Linux ignores the name.
+/// [`open_audio_capture`]. `tap` captures a sink another session owns, without minting or
+/// claiming it. Non-Linux ignores the name.
 pub fn open_audio_capture_named(
     channels: u32,
     rate_hz: u32,
     sink: Option<&str>,
+    tap: bool,
 ) -> Result<Box<dyn AudioCapturer>> {
-    plat::open_audio_capture_named(channels, rate_hz, sink)
+    plat::open_audio_capture_named(channels, rate_hz, sink, tap)
 }
 
 /// Whether this host can mint a per-session sink. Linux stream/null-sink only;
@@ -280,6 +282,7 @@ mod plat {
         channels: u32,
         rate_hz: u32,
         _sink: Option<&str>,
+        _tap: bool,
     ) -> Result<Box<dyn AudioCapturer>> {
         open_audio_capture(channels, rate_hz)
     }

@@ -80,6 +80,11 @@ pub struct MutterDisplay {
     /// [`last_identity_slot`](VirtualDisplay::last_identity_slot) for
     /// group arrangement and `/display/state`.
     last_slot: Option<u32>,
+    /// `mode_conflict: join` admitted this session.
+    join_live: bool,
+    /// The last `create`'s connector (`Meta-N`), set by its session thread once
+    /// identified. A joiner records that connector.
+    join_name: Option<crate::backend::JoinName>,
 }
 
 impl MutterDisplay {
@@ -89,6 +94,8 @@ impl MutterDisplay {
             hw_cursor: false,
             client_fp: None,
             last_slot: None,
+            join_live: false,
+            join_name: None,
         })
     }
 }
@@ -138,6 +145,29 @@ impl VirtualDisplay for MutterDisplay {
         self.last_slot
     }
 
+    fn set_join_live(&mut self, on: bool) {
+        self.join_live = on;
+    }
+
+    fn join_live(&self) -> bool {
+        self.join_live
+    }
+
+    fn last_join_name(&self) -> Option<crate::backend::JoinName> {
+        self.join_name.clone()
+    }
+
+    /// `RecordMonitor` of the owner's virtual connector, in a session of its own.
+    fn join_cast(
+        &mut self,
+        name: &str,
+        _node_id: u32,
+    ) -> Result<Option<crate::backend::SessionCastParts>> {
+        Ok(Some(
+            stream_existing_output(name, self.hw_cursor)?.into_cast(),
+        ))
+    }
+
     fn create(&mut self, mode: Mode) -> Result<VirtualOutput> {
         // RecordVirtual owns EDID identity, so the slot never lands on
         // the monitor. Host-persist scale under `scale_key` instead.
@@ -177,6 +207,8 @@ impl VirtualDisplay for MutterDisplay {
         let first_in_group = self.first_in_group;
         let hw_cursor = self.hw_cursor;
         let client_fp = self.client_fp;
+        let join_name = crate::backend::JoinName::default();
+        self.join_name = Some(join_name.clone());
         thread::Builder::new()
             .name("punktfunk-mutter-vout".into())
             .spawn(move || {
@@ -191,6 +223,7 @@ impl VirtualDisplay for MutterDisplay {
                     scale_key,
                     remembered_scale,
                     client_fp,
+                    join_name,
                 )
             })
             .context("spawn Mutter virtual-output thread")?;
@@ -274,6 +307,8 @@ fn session_thread(
     remembered_scale: Option<f64>,
     // Whose display this is, for the per-device topology (§6.1). `None` is the host policy.
     client_fp: Option<[u8; 32]>,
+    // Filled with the connector once identified, so a `join` session can record it.
+    join_name: crate::backend::JoinName,
 ) {
     let rt = match tokio::runtime::Builder::new_multi_thread()
         .worker_threads(1)
@@ -390,6 +425,7 @@ fn session_thread(
                             ),
                         }
                     }
+                    let _ = join_name.set(vconn.clone());
                     tracked = Some((dc, pre, vconn));
                 }
                 Err(e) => tracing::warn!(

@@ -118,6 +118,11 @@ pub struct VirtualOutput {
 #[cfg(target_os = "linux")]
 pub type SessionCastParts = (u32, Option<OwnedFd>, Box<dyn Send>);
 
+/// Compositor name a `mode_conflict: join` session casts
+/// ([`VirtualDisplay::join_cast`]). Set once, possibly after `create` returns: Mutter
+/// names its monitor on the session thread.
+pub type JoinName = std::sync::Arc<std::sync::OnceLock<String>>;
+
 impl VirtualOutput {
     /// Registry-owned output. Caller fills the platform fields (`remote_fd`, `win_capture`, …).
     pub fn owned(
@@ -164,11 +169,25 @@ pub trait VirtualDisplay: Send {
     #[cfg(target_os = "linux")]
     fn set_session_cast_handoff(&mut self, _enabled: bool) {}
     /// Session-scoped ScreenCast for a named output the registry is lingering.
-    /// Hyprland recasts by name; default `None` (the pooled node is already live).
+    /// Hyprland and sway recast by name; default `None` (the pooled node is already live).
     #[cfg(target_os = "linux")]
     fn session_cast_for(&mut self, _name: &str) -> Result<Option<SessionCastParts>> {
         let _ = _name;
         Ok(None)
+    }
+    /// A second capture of the live output `name` (PipeWire `node_id`), for a session that
+    /// shares it (`mode_conflict: join`). It runs beside the owner's, so neither ends the other.
+    /// Default `None`: this backend cannot share, and the registry creates instead.
+    #[cfg(target_os = "linux")]
+    fn join_cast(&mut self, _name: &str, _node_id: u32) -> Result<Option<SessionCastParts>> {
+        let _ = (_name, _node_id);
+        Ok(None)
+    }
+    /// What [`join_cast`](Self::join_cast) needs to find the last `create`'s output, when that
+    /// is not [`VirtualOutput::output_name`]. Default `None`.
+    #[cfg(target_os = "linux")]
+    fn last_join_name(&self) -> Option<JoinName> {
+        None
     }
     /// Nested launch command. Instance-local, not env: concurrent sessions must not stomp.
     /// Default no-op; only gamescope spawn uses it.
@@ -190,6 +209,14 @@ pub trait VirtualDisplay: Send {
     /// Windows: EDID serial. KWin: per-slot output name. Mutter: host-side persistence (virtual
     /// monitors cannot carry identity). `None` = anonymous / GameStream → auto slot. Default no-op.
     fn set_client_identity(&mut self, _fingerprint: Option<[u8; 32]>) {}
+    /// `mode_conflict: join` admitted this session: share a live display of the same mode
+    /// instead of creating one. Honored by a backend with a [`join_cast`](Self::join_cast).
+    /// Default no-op.
+    fn set_join_live(&mut self, _on: bool) {}
+    /// The [`set_join_live`](Self::set_join_live) request. Default `false`.
+    fn join_live(&self) -> bool {
+        false
+    }
     /// Deliberate-quit flag (QUIT application code, not a network drop). Last lease drop tears
     /// down immediately (`Linger::Immediate` on Linux). Default no-op: only Windows pf-vdisplay
     /// needs it — its leases live in `VirtualDisplayManager`, which `registry::acquire` does not
@@ -228,8 +255,8 @@ pub trait VirtualDisplay: Send {
     ///
     /// `None` (default, every non-portal backend, and before first `create`) means nothing was
     /// negotiated through xdg ScreenCast: KWin/Mutter/gamescope/Windows use their own protocols.
-    /// wlr and [`mirror`](crate::open_mirror) report this; they are never pooled (`remote_fd` is
-    /// `Some`), so a reuse cannot return a stale answer.
+    /// wlr, Hyprland and [`mirror`](crate::open_mirror) report this. A pooled reuse or a join
+    /// casts again on this instance, which sets it again, so the answer is never stale.
     fn last_portal_cursor_mode(&self) -> Option<crate::PortalCursorMode> {
         None
     }

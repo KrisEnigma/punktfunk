@@ -66,10 +66,26 @@ pub struct WlrootsDisplay {
     /// [`stash_topology_restore`](crate::backend::stash_topology_restore) — first-wins:
     /// one instance serves the host retry loop and only attempt 1 finds heads to disable.
     ///
-    /// The registry never takes it: a sway display carries a portal fd, so
-    /// `registry::acquire` returns pass-through before `take_topology_restore()`.
-    /// [`Drop`] is the only runner.
+    /// The registry takes it after a pooled `create` and runs it when the group empties.
+    /// [`Drop`] is the backstop for a create that never reached the pool.
     pending_restore: Option<Box<dyn FnOnce() + Send>>,
+    /// ScreenCast from the `create` that just ran, until
+    /// [`session_cast_for`](VirtualDisplay::session_cast_for) hands it to the session. The
+    /// pooled output never holds the portal fd.
+    pending_cast: Option<PendingCast>,
+    /// The registry splits output and cast lifetimes around `create`. Direct callers keep
+    /// both on the returned output.
+    handoff_cast: bool,
+    /// `mode_conflict: join` admitted this session.
+    join_live: bool,
+}
+
+/// A parked ScreenCast of `name`: node, portal fd, and the guard that closes it.
+struct PendingCast {
+    node_id: u32,
+    fd: OwnedFd,
+    name: String,
+    stop: StopGuard,
 }
 
 impl Drop for WlrootsDisplay {
@@ -87,11 +103,21 @@ impl WlrootsDisplay {
             hw_cursor: false,
             last_cursor_mode: None,
             pending_restore: None,
+            pending_cast: None,
+            handoff_cast: false,
+            join_live: false,
         })
     }
 
-    /// Apply [`crate::policy::Topology`] for `ours` and stash the restore this instance
-    /// runs on drop (the registry does not take a pass-through display's restore).
+    /// Another portal cast of `name`, beside any cast already on it.
+    fn cast_existing(&mut self, name: &str) -> Result<crate::backend::SessionCastParts> {
+        let stream = stream_existing_output(name, self.hw_cursor)?;
+        self.last_cursor_mode = stream.cursor_mode;
+        Ok(stream.into_cast())
+    }
+
+    /// Apply [`crate::policy::Topology`] for `ours` and stash the restore the registry runs
+    /// when the group empties ([`Drop`] is the backstop).
     ///
     /// Last step of [`create`](VirtualDisplay::create): nothing fails after it, so no
     /// path disables heads and then unwinds past the restore hand-off. Physical heads
@@ -106,8 +132,7 @@ impl WlrootsDisplay {
                 let prepared = (!disabled.is_empty()).then(|| {
                     Box::new(move || restore_heads(&disabled)) as Box<dyn FnOnce() + Send>
                 });
-                // First restore wins: retry loops must not replace attempt 1's list, and
-                // the registry never drains this slot (portal fd → pass-through).
+                // First restore wins: retry loops must not replace attempt 1's list.
                 crate::backend::stash_topology_restore(&mut self.pending_restore, prepared);
             }
         }
@@ -151,7 +176,44 @@ impl VirtualDisplay for WlrootsDisplay {
         self.pending_restore.take()
     }
 
+    fn set_session_cast_handoff(&mut self, enabled: bool) {
+        self.handoff_cast = enabled;
+    }
+
+    /// The cast `create` parked, else a recast of a kept output, refocused as at create.
+    fn session_cast_for(&mut self, name: &str) -> Result<Option<crate::backend::SessionCastParts>> {
+        if let Some(pending) = self.pending_cast.take() {
+            if pending.name == name {
+                return Ok(Some((
+                    pending.node_id,
+                    Some(pending.fd),
+                    Box::new(pending.stop),
+                )));
+            }
+        }
+        focus_output(name);
+        self.cast_existing(name).map(Some)
+    }
+
+    fn set_join_live(&mut self, on: bool) {
+        self.join_live = on;
+    }
+
+    fn join_live(&self) -> bool {
+        self.join_live
+    }
+
+    fn join_cast(
+        &mut self,
+        name: &str,
+        _node_id: u32,
+    ) -> Result<Option<crate::backend::SessionCastParts>> {
+        self.cast_existing(name).map(Some)
+    }
+
     fn create(&mut self, mode: Mode) -> Result<VirtualOutput> {
+        // A retry's parked cast from the last attempt closes before a new head exists.
+        self.pending_cast = None;
         // Snapshot → create → identify under CREATE_LOCK. Sway names the output
         // (`HEADLESS-N`); two concurrent creates would each adopt the other's head
         // (silent mis-capture). The lock also serializes unplug on the failure path:
@@ -208,16 +270,30 @@ impl VirtualDisplay for WlrootsDisplay {
         );
         // Last: no failure path unwinds past the restore hand-off.
         self.apply_topology(&name);
+        // The registry pools the output and hands the cast to the session; a direct
+        // caller keeps both.
+        let (remote_fd, keepalive): (Option<OwnedFd>, Box<dyn Send>) = if self.handoff_cast {
+            self.pending_cast = Some(PendingCast {
+                node_id,
+                fd,
+                name: name.clone(),
+                stop,
+            });
+            (None, Box::new(output))
+        } else {
+            (
+                Some(fd),
+                Box::new(Keepalive {
+                    _stop: stop,
+                    _output: output,
+                }),
+            )
+        };
         Ok(VirtualOutput {
             node_id,
-            remote_fd: Some(fd),
+            remote_fd,
             preferred_mode: Some((mode.width, mode.height, mode.refresh_hz)),
-            keepalive: Box::new(Keepalive {
-                _stop: stop,
-                _output: output,
-            }),
-            // Owned, not poolable: the portal fd cannot reopen per attach, so the
-            // registry pass-throughs on `remote_fd.is_some()`.
+            keepalive,
             ownership: DisplayOwnership::Owned,
             reused_gen: None,
             pool_gen: None,

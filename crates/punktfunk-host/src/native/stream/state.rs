@@ -159,6 +159,8 @@ pub(super) struct StreamState {
     pub(super) perf: bool,
     pub(super) launch: Option<String>,
     pub(super) client_hdr: Option<pf_frame::HdrMeta>,
+    /// Admitted by `mode_conflict: join`. A rebuild's new display asks to share again.
+    pub(super) join_live: bool,
     pub(super) bringup: Arc<crate::bringup::Trace>,
     pub(super) resize_ms: Arc<AtomicU32>,
     pub(super) stats: Arc<StatsRecorder>,
@@ -332,6 +334,7 @@ impl StreamState {
             launch,
             launch_target,
             client_hdr,
+            join_live,
             bringup,
             resize_ms,
             wire_sock,
@@ -435,6 +438,7 @@ impl StreamState {
                 // Open first: Windows `open` inits the manager; `vdm()` before that panics.
                 let mut vd = crate::vdisplay::open(compositor)?;
                 vd.set_client_identity(conn.peer_fingerprint());
+                vd.set_join_live(join_live);
                 vd.set_client_hdr(client_hdr);
                 // HDR verdict, not the depth — a 10-bit SDR session leaves the output SDR.
                 vd.set_hdr(hdr);
@@ -777,6 +781,7 @@ impl StreamState {
             perf,
             launch,
             client_hdr,
+            join_live,
             bringup,
             resize_ms,
             stats,
