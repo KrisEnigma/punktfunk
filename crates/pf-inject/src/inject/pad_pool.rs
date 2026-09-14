@@ -16,7 +16,7 @@
 //! box every host would otherwise start at 0 and all but one would be refused
 //! [`crate::pad_slots::PadCreateFault::IndexOwnedElsewhere`] — and the wire→slot
 //! map memoizes, so that retry never advances. [`PadSlotPool::claim`] therefore
-//! skips an index whose mailbox already opens.
+//! skips an index whose mailbox another process serves.
 //!
 //! Tests in this file pin the contract.
 
@@ -78,17 +78,18 @@ impl PadSlotPool {
 ///
 /// The bootstrap mailboxes are `Global\\` names, so they are the machine-wide
 /// record of who owns an index — cheaper and more honest than asking the driver.
-/// A losing create is unrecoverable within a session (the wire→slot map keeps
-/// the slot it was given), so this is checked BEFORE claiming rather than after
-/// failing. Two hosts claiming in the same instant can still both pick one; that
-/// one create fails as before and heals on the next claim, when the winner's
-/// mailbox is visible here.
+/// A mailbox this process created is not another owner: it is our own pad, maybe
+/// inside its unplug grace, and a re-plug must land back on it or the host shows
+/// two controllers. A losing create is unrecoverable within a session (the
+/// wire→slot map keeps the slot it was given), so this is checked BEFORE
+/// claiming. Two hosts claiming in the same instant can still both pick one; that
+/// create fails and heals on the next claim, when the winner's mailbox shows.
 #[cfg(windows)]
 fn owned_elsewhere(i: u8) -> bool {
     use pf_driver_proto::gamepad::{pad_boot_name, xusb_boot_name};
     [xusb_boot_name(i), pad_boot_name(i)]
         .iter()
-        .any(|name| mailbox_exists(name))
+        .any(|name| !crate::gamepad_raii::created_here(name) && mailbox_exists(name))
 }
 
 /// `true` if a section by this name exists. Opening is the only way to ask; the
@@ -316,5 +317,30 @@ mod tests {
             "B's pad must not resolve to a wire pad of A's - that is rumble on the wrong client"
         );
         assert_eq!(b.wire_of(1), Some(0));
+    }
+
+    /// Only a mailbox another process holds skips a slot. Our own pad's must not, or a
+    /// re-plug inside the unplug grace lands on a second slot beside the live pad.
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "run as SYSTEM: the mailbox DACL admits only SYSTEM and LocalService"]
+    fn our_own_mailbox_never_reads_as_owned_elsewhere() {
+        use pf_driver_proto::gamepad::pad_boot_name;
+        let i = (MAX_PADS - 1) as u8;
+        let ours = crate::gamepad_raii::PadChannel::create(pad_boot_name(i), 4096)
+            .expect("create a Global\\ mailbox (needs SeCreateGlobalPrivilege)");
+        assert!(mailbox_exists(&pad_boot_name(i)));
+        assert!(!owned_elsewhere(i), "our own pad skipped its slot");
+        drop(ours);
+        // Same name, created outside `PadChannel`: stands in for another host's pad.
+        let _foreign = crate::gamepad_raii::Shm::create_named(
+            &windows::core::HSTRING::from(pad_boot_name(i)),
+            64,
+        )
+        .expect("recreate the mailbox");
+        assert!(
+            owned_elsewhere(i),
+            "another holder's mailbox must still skip the slot"
+        );
     }
 }

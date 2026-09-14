@@ -244,10 +244,9 @@ impl Pads {
         self.owner[idx] = new_owner;
         self.route_handle(kind, &self.re_index(ev, slot));
         if !present {
-            // Release now so a session that unplugs and never re-plugs cannot leak the OS name.
-            // The node lingers `pad_slots::SWEEP_GRACE` (300 ms); a claim inside that window
-            // may lose the create race (`IndexOwnedElsewhere`) and heal on backoff.
-            // Holding the slot until sweep would leak any pad that never re-plugs.
+            // Release now so a pad that never re-plugs cannot leak the OS name. The node
+            // lingers `pad_slots::SWEEP_GRACE` (300 ms); a re-plug inside it claims this slot
+            // again and the sweep hands back the live pad.
             self.slots.release(idx);
         }
     }
