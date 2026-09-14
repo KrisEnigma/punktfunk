@@ -890,6 +890,8 @@ async fn negotiate_video_format(
     } else {
         chroma
     };
+    #[cfg(target_os = "linux")]
+    let chroma = linux_chroma_under_hdr(chroma, session_hdr);
     tracing::info!(
         chroma = ?chroma,
         host_wants_444,
@@ -898,8 +900,8 @@ async fn negotiate_video_format(
         "encode chroma"
     );
 
-    // Linux 4:4:4 is CPU swscale → 8-bit `YUV444P`; a 10-bit session would silently encode
-    // 8-bit. Clamp depth before Welcome. Windows NVENC keeps 10 (Main 4:4:4 10 from RGB).
+    // Linux 4:4:4 is CPU swscale → 8-bit `YUV444P`; a 10-bit SDR session would silently encode
+    // 8-bit (HDR already took 4:2:0 above). Clamp depth before Welcome. Windows NVENC keeps 10.
     #[cfg(target_os = "linux")]
     let bit_depth: u8 = if chroma.is_444() && bit_depth == 10 {
         tracing::info!("4:4:4 on the Linux path encodes 8-bit YUV444P — resolving bit depth 8");
@@ -911,6 +913,23 @@ async fn negotiate_video_format(
     let session_hdr = session_hdr && bit_depth == 10;
 
     Ok((bit_depth, session_hdr, chroma))
+}
+
+/// Linux 4:4:4 is 8-bit, so it cannot carry HDR. A client that asked for both keeps HDR at
+/// 4:2:0: a game only offers HDR on an HDR display, while 4:4:4 only sharpens text.
+#[cfg(target_os = "linux")]
+fn linux_chroma_under_hdr(
+    chroma: crate::encode::ChromaFormat,
+    session_hdr: bool,
+) -> crate::encode::ChromaFormat {
+    if !(chroma.is_444() && session_hdr) {
+        return chroma;
+    }
+    tracing::info!(
+        "4:4:4 and HDR both requested — the Linux 4:4:4 path is 8-bit, so this session keeps \
+         HDR and negotiates 4:2:0"
+    );
+    crate::encode::ChromaFormat::Yuv420
 }
 
 /// Whether Hello carried a format at all. Decode maps an absent one to 48 kHz/16-bit, so
@@ -971,6 +990,16 @@ async fn negotiate_audio_plane(
 mod tests {
     use super::*;
     use punktfunk_core::audio::pcm;
+
+    /// HDR takes 4:2:0 over Linux's 8-bit 4:4:4; without HDR the chroma stands.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn hdr_outranks_444_on_linux() {
+        use crate::encode::ChromaFormat::{Yuv420, Yuv444};
+        assert_eq!(linux_chroma_under_hdr(Yuv444, true), Yuv420);
+        assert_eq!(linux_chroma_under_hdr(Yuv444, false), Yuv444);
+        assert_eq!(linux_chroma_under_hdr(Yuv420, true), Yuv420);
+    }
 
     /// 1472-byte discovery ceiling minus QUIC header + AEAD. Same number `pcm`'s ladder test uses.
     const DGRAM: usize = 1400;
