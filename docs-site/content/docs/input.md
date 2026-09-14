@@ -256,6 +256,33 @@ mode**, **Virtual controller** and **Keyboard** on a Mac, which has no touch scr
 keyboard. **Guide button** and **Quick access menu** are dimmed wherever controller input is not
 forwarded — they ride the same wire pad.
 
+### Controller mouse
+
+A launcher, a dialog or a crashed game on the host desktop ignores controllers. Add **Controller
+mouse** to the dial and fire it: the controller that opened the dial now moves the host's pointer.
+The host's virtual controller stays connected and idle, so the game sees nothing held. Fire it again
+to hand the controller back to the game. A dial opened by touch or keyboard switches every
+connected controller. Every session starts with controllers in the game.
+
+| Controller | Controller mouse |
+|---|---|
+| Left stick | Pointer — the further you push, the faster it moves |
+| Right stick | Scroll, both directions |
+| A, right trigger | Left click; hold to drag |
+| X, left trigger | Right click |
+| Y | Middle click |
+| B | Escape |
+| D-pad | Arrow keys |
+| Start | Enter |
+| LB, RB | Ctrl, Alt — held while you hold them |
+| Left stick click, right stick click | Shift (held), Space |
+| Guide | Super / Windows key |
+
+Select stays with the dial, so **Select+A** still opens it. Pointer speed follows the stream's
+resolution, so it feels the same at 1080p and 4K. For a combination the table lacks, such as
+Alt+F4, add a shortcut to the dial. The button is dimmed when no controller is connected, or when
+the host lets this device send controller input only.
+
 ### Virtual controller
 
 Android and iPhone/iPad can draw a controller over the stream, for a game that needs one when no
