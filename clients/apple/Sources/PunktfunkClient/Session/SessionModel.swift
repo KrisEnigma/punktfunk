@@ -99,6 +99,9 @@ enum LaunchedEntry {
 /// resolve; the host logs it and streams on).
 private let launchHoldMax: TimeInterval = 120
 private let launchNoLease: TimeInterval = 15
+/// The demo host's pretend start: the cover's 0.75 s flight, its details, then a beat of
+/// "Starting the game…".
+private let demoLaunchHold: TimeInterval = 3
 
 @MainActor
 final class SessionModel: ObservableObject {
@@ -1044,9 +1047,14 @@ final class SessionModel: ObservableObject {
     /// answered — or when it never will. Same lane and identity as the shelf's Resume badge.
     private func watchLaunch() {
         guard let hold = launchHold?.entry, let host = activeHost else { return }
-        // The demo host has no `/status`; its title is up the moment the stream is.
+        // The demo host has no `/status` and its title is up at once; hold as a real start would,
+        // so the cover's flight and the title card play before the stream shows.
         if DemoMode.isDemo(host) {
-            revealStream()
+            launchWatch?.cancel()
+            launchWatch = Task { [weak self] in
+                try? await Task.sleep(nanoseconds: UInt64(demoLaunchHold * Double(NSEC_PER_SEC)))
+                if !Task.isCancelled { self?.revealStream() }
+            }
             return
         }
         let port = connection.map(\.hostMgmtPort).flatMap { $0 > 0 ? $0 : nil } ?? host.effectiveMgmtPort
