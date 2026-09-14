@@ -35,6 +35,8 @@
   + schtasks /Create /TN PunktfunkScripting /XML <generated> /F
 ==> Restoring what the stop disabled
   ok would re-enable only the tasks that were enabled before the stop
+==> Checking the virtual display driver
+  + "C:\Program Files\punktfunk\punktfunk-host.exe" driver check
 
   Done. Next:
   1. Open the web console:  https://<this-PC>:47992  (the certificate is the host's own — continue past the warning)

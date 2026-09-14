@@ -39,6 +39,8 @@
   ok would re-enable only the tasks that were enabled before the stop
 ==> Tray
   ok would start the tray (C:\Program Files\punktfunk\punktfunk-tray.exe) — skipped in silent installs
+==> Checking the virtual display driver
+  + "C:\Program Files\punktfunk\punktfunk-host.exe" driver check
 
   Done. Next:
   1. Open the web console:  https://<this-PC>:47992  (the certificate is the host's own — continue past the warning)

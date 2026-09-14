@@ -400,6 +400,15 @@ fn host_install(facts: &WinFacts, choices: &WinChoices) -> WinPlan {
             }],
         );
     }
+
+    // Strict and last: the driver leg only warns, and a host that meets the old driver refuses
+    // every session. Failing here leaves every other leg done.
+    if choices.install_driver {
+        plan.push(
+            "Checking the virtual display driver",
+            vec![run(&[&host_exe, "driver", "check"])],
+        );
+    }
     plan
 }
 

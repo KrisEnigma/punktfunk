@@ -6,12 +6,15 @@
 //! surface: `certutil`/`pnputil`/`nefconc`/`schtasks`/`netsh`/`icacls` are string literals.
 //! Same pattern as `service install` in `service.rs`.
 //!
-//! Best-effort: a hiccup warns but returns `Ok`. A non-zero exit aborts the installer; a
-//! missing driver only degrades the host to a physical display.
+//! Best-effort: a hiccup warns but returns `Ok`, since a non-zero exit aborts the installer
+//! mid-plan. `driver check`, the plan's last step, is what fails an install whose pf-vdisplay
+//! did not load.
 
+use crate::vdisplay::DriverHealth;
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 fn flag_val(args: &[String], name: &str) -> Option<String> {
     args.iter()
@@ -46,13 +49,17 @@ pub(crate) fn resolve_tool(cmd: &str) -> String {
     sys32(&format!("{cmd}.exe"))
 }
 fn run_quiet(cmd: &str, args: &[&str]) -> bool {
+    run_code(cmd, args) == Some(0)
+}
+/// Exit code, output discarded. `None` when the tool did not launch.
+fn run_code(cmd: &str, args: &[&str]) -> Option<i32> {
     Command::new(resolve_tool(cmd))
         .args(args)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+        .ok()
+        .and_then(|s| s.code())
 }
 fn run_capture(cmd: &str, args: &[&str]) -> String {
     Command::new(resolve_tool(cmd))
@@ -66,9 +73,11 @@ pub fn driver_main(args: &[String]) -> Result<()> {
     match args.first().map(String::as_str) {
         Some("install") => driver_install(&args[1..]),
         Some("uninstall") => driver_uninstall(&args[1..]),
+        Some("check") => driver_check(),
         _ => bail!(
             "usage: punktfunk-host driver install --dir <stage> [--gamepad]\n\
-             \x20      punktfunk-host driver uninstall [--gamepad|--audio]"
+             \x20      punktfunk-host driver uninstall [--gamepad|--audio]\n\
+             \x20      punktfunk-host driver check"
         ),
     }
 }
@@ -150,12 +159,34 @@ fn install_pf_vdisplay(dir: &Path) -> Result<()> {
     // second purge would delete the cert the vdisplay leg just added when the two bundles differ.
     purge_driver_certs();
     trust_cert(dir);
-    // Create the ROOT node only if absent: a re-create is a phantom duplicate, and the host binds
-    // index 0. nefconc (ROOT\DISPLAY), never devgen (SWD\DEVGEN nodes survive reboot + registry delete).
+    ensure_pf_vdisplay_node(dir, &inf);
+    add_pf_vdisplay(&inf);
+    // The wait also lets a departing monitor release the adapter before the restart.
+    if wait_for_driver(DRIVER_SETTLE).is_ok() {
+        return Ok(());
+    }
+    restart_pf_vdisplay();
+    if wait_for_driver(DRIVER_SETTLE).is_ok() {
+        return Ok(());
+    }
+    // What a manual reinstall does: unbind every console package, then bind ours. The needle
+    // spares the seats package, which ships `pf_vdisplay_seats.cat`.
+    delete_store_drivers(&["catalogfile=pf_vdisplay.cat"]);
+    ensure_pf_vdisplay_node(dir, &inf);
+    add_pf_vdisplay(&inf);
+    match wait_for_driver(DRIVER_SETTLE) {
+        Ok(_) => Ok(()),
+        Err(h) => bail!("pf-vdisplay still not loaded after a clean reinstall ({h:?})"),
+    }
+}
+
+/// Create the ROOT node only if absent: a re-create is a phantom duplicate, and the host binds
+/// index 0. nefconc (ROOT\DISPLAY), never devgen (SWD\DEVGEN nodes survive reboot + registry delete).
+fn ensure_pf_vdisplay_node(dir: &Path, inf: &Path) {
     if pf_vdisplay_present() {
         println!("pf-vdisplay device node already present - leaving it.");
     } else if let Some(nef) = first_named(dir, "nefconc.exe") {
-        let (class, guid) = inf_class(&inf);
+        let (class, guid) = inf_class(inf);
         let ok = run_quiet(
             &nef.to_string_lossy(),
             &[
@@ -179,15 +210,71 @@ fn install_pf_vdisplay(dir: &Path) -> Result<()> {
             dir.display()
         );
     }
-    if run_quiet(
+}
+
+/// Stage pf_vdisplay.inf and bind it to matching devices. Exit 3010 means the device kept its
+/// loaded driver; the caller's [`wait_for_driver`] catches that.
+fn add_pf_vdisplay(inf: &Path) {
+    match run_code(
         "pnputil",
         &["/add-driver", &inf.to_string_lossy(), "/install"],
     ) {
-        println!("pnputil /add-driver pf_vdisplay.inf /install ok");
-    } else {
-        eprintln!("warning: pnputil /add-driver /install failed (driver may not have installed)");
+        Some(0) => println!("pnputil /add-driver pf_vdisplay.inf /install ok"),
+        Some(code) => {
+            eprintln!("warning: pnputil /add-driver pf_vdisplay.inf /install exited {code}")
+        }
+        None => eprintln!("warning: pnputil did not launch"),
     }
-    Ok(())
+}
+
+/// Restart the console node so a staged driver loads. `ROOT\` only: a seat adapter is a live
+/// RDP session's display.
+fn restart_pf_vdisplay() {
+    for id in pf_vdisplay_instance_ids() {
+        if !id.to_ascii_uppercase().starts_with("ROOT\\") {
+            continue;
+        }
+        if run_quiet("pnputil", &["/restart-device", &id]) {
+            println!("restarted {id}");
+        } else {
+            eprintln!("warning: pnputil /restart-device {id} failed");
+        }
+    }
+}
+
+/// One rung's budget: a fresh node registers its interface within a few seconds.
+const DRIVER_SETTLE: Duration = Duration::from_secs(15);
+
+/// Poll until pf-vdisplay answers at this host's protocol (`Ok(protocol)`), or until `budget`
+/// passes (`Err(last reading)`).
+fn wait_for_driver(budget: Duration) -> Result<u32, DriverHealth> {
+    let deadline = Instant::now() + budget;
+    loop {
+        match crate::vdisplay::driver_health() {
+            DriverHealth::Ok { protocol } => return Ok(protocol),
+            h if Instant::now() >= deadline => return Err(h),
+            _ => std::thread::sleep(Duration::from_millis(500)),
+        }
+    }
+}
+
+/// The installer's last step. Exits 1 unless pf-vdisplay answers at this host's protocol; the
+/// last stderr line is the failure setup shows.
+fn driver_check() -> Result<()> {
+    match wait_for_driver(DRIVER_SETTLE) {
+        Ok(protocol) => {
+            println!("pf-vdisplay answers protocol {protocol}");
+            Ok(())
+        }
+        Err(h) => {
+            eprintln!("pf-vdisplay driver check: {h:?}");
+            eprintln!(
+                "The virtual display driver didn't update, so streams can't start. Restart \
+                 Windows, then run the installer again."
+            );
+            std::process::exit(1)
+        }
+    }
 }
 
 fn install_gamepad(dir: &Path) -> Result<()> {
