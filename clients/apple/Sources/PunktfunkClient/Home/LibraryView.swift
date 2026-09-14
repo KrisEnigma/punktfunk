@@ -177,16 +177,31 @@ struct LibraryView: View {
     @Environment(\.gamepadHostedInShell) private var hostedInShell
     #endif
 
+    /// The TV's Library tab: its tab bar names the place and holds the shelf's actions.
+    private var tvTab: Bool {
+        #if os(tvOS)
+        inTab
+        #else
+        false
+        #endif
+    }
+
     var body: some View {
         content
-            // In the tab the host filter names the shelf, so the title names the place.
-            .navigationTitle(inTab ? "Library" : "\(shelfTitle) — Library")
+            // In the tab the host filter names the shelf, so the title names the place; a TV's
+            // tab bar already does.
+            .modifier(LibraryTitle(title: tvTab ? nil : inTab ? "Library" : "\(shelfTitle) — Library"))
             #if os(iOS)
             .modifier(LibraryTitleMode(inTab: inTab))
             #endif
             #if os(tvOS)
-            // The tab bar names the place and the host row holds the actions: no bar in the tab.
-            .toolbar(inTab ? .hidden : .automatic, for: .navigationBar)
+            .overlay(alignment: .topTrailing) {
+                if inTab {
+                    tvActions
+                        .padding(.top, 47)
+                        .ignoresSafeArea(edges: .top)
+                }
+            }
             #endif
             .toolbar {
                 #if os(macOS)
@@ -196,11 +211,13 @@ struct LibraryView: View {
                     reloadButton
                 }
                 #else
-                ToolbarItem(placement: .primaryAction) { reloadButton }
-                // The console presentation carries its own sort/view bar; the plain grid gets a
-                // menu in the bar it already has.
-                if !gamepadUIActive {
-                    ToolbarItem(placement: .primaryAction) { sortMenu }
+                if !tvTab {
+                    ToolbarItem(placement: .primaryAction) { reloadButton }
+                    // The console presentation carries its own sort/view bar; the plain grid
+                    // gets a menu in the bar it already has.
+                    if !gamepadUIActive {
+                        ToolbarItem(placement: .primaryAction) { sortMenu }
+                    }
                 }
                 #if os(iOS)
                 if inTab {
@@ -482,15 +499,7 @@ struct LibraryView: View {
             keyNavigation(sections: groups, proxy: proxy) {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 26) {
-                        #if os(tvOS)
-                        HStack(spacing: 24) {
-                            tabHeader
-                            Spacer(minLength: 0)
-                            tvActions
-                        }
-                        #else
                         tabHeader
-                        #endif
                         staleNote
                         ForEach(sectionLayout.visible) { section in
                             tabSection(section, groups: groups, proxy: proxy)
@@ -570,6 +579,11 @@ struct LibraryView: View {
                 .padding(.vertical, Self.rowLift)
             }
         }
+        #if os(tvOS)
+        // A full-width target: a move down from anywhere, the actions at the right included,
+        // lands in the row even where its tiles don't reach.
+        .focusSection()
+        #endif
     }
 
     /// Loading, error or empty, in place of the shelf's sections. Desktops still show above it.
@@ -669,8 +683,8 @@ struct LibraryView: View {
     }
 
     #if os(tvOS)
-    /// Sort, Customize and Reload as round buttons at the end of the host row: the TV's tab has
-    /// no bar to hold them.
+    /// Sort, Customize and Reload as round buttons in the tab bar's row, at its right: the TV's
+    /// tab has no navigation bar to hold them.
     private var tvActions: some View {
         HStack(spacing: 24) {
             if !gamepadUIActive { sortMenu }
@@ -1227,26 +1241,30 @@ struct GameCard: View {
     #endif
 
     var body: some View {
+        #if os(tvOS)
+        // One card, the title on it under the poster, so the whole card lifts under focus.
+        VStack(alignment: .leading, spacing: 0) {
+            poster
+            VStack(alignment: .leading, spacing: 4) {
+                Text(game.title)
+                    .font(.geist(Self.titleSize, .semibold, relativeTo: .caption))
+                    .lineLimit(2, reservesSpace: true)
+                if let caption {
+                    Text(caption)
+                        .font(.geist(Self.captionSize, relativeTo: .caption2))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1, reservesSpace: true)
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 14)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .background(Color.primary.opacity(0.1))
+        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        #else
         VStack(alignment: .leading, spacing: 6) {
-            PosterImage(
-                candidates: game.art.posterCandidates, title: game.title, loader: artLoader,
-                icon: game.iconToken, frameID: game.id)
-                .aspectRatio(2.0 / 3.0, contentMode: .fit)
-                .frame(maxWidth: .infinity)
-                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                .overlay {
-                    if selected {
-                        RoundedRectangle(cornerRadius: 10, style: .continuous)
-                            .strokeBorder(.tint, lineWidth: 3)
-                    }
-                }
-                .overlay(alignment: .topLeading) {
-                    StoreBadge(label: game.storeLabel, isLauncher: game.isLauncher)
-                }
-                // Opposite corner from the store badge so the two never collide on a narrow tile.
-                .overlay(alignment: .topTrailing) {
-                    if isRunning { RunningBadge(compact: true) }
-                }
+            poster
             Text(game.title)
                 .font(.geist(Self.titleSize, relativeTo: .caption))
                 // Two lines held for every title, so every tile in a row stands the same height.
@@ -1258,6 +1276,45 @@ struct GameCard: View {
                     .foregroundStyle(.tertiary)
                     .lineLimit(1, reservesSpace: true)
             }
+        }
+        #endif
+    }
+
+    private var poster: some View {
+        PosterImage(
+            candidates: game.art.posterCandidates, title: game.title, loader: artLoader,
+            icon: game.iconToken, frameID: game.id)
+            .aspectRatio(2.0 / 3.0, contentMode: .fit)
+            .frame(maxWidth: .infinity)
+            // On a TV the card rounds the poster's top, and its foot meets the title.
+            #if !os(tvOS)
+            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            #endif
+            .overlay {
+                if selected {
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .strokeBorder(.tint, lineWidth: 3)
+                }
+            }
+            .overlay(alignment: .topLeading) {
+                StoreBadge(label: game.storeLabel, isLauncher: game.isLauncher)
+            }
+            // Opposite corner from the store badge so the two never collide on a narrow tile.
+            .overlay(alignment: .topTrailing) {
+                if isRunning { RunningBadge(compact: true) }
+            }
+    }
+}
+
+/// The navigation title, or none.
+private struct LibraryTitle: ViewModifier {
+    let title: String?
+
+    func body(content: Content) -> some View {
+        if let title {
+            content.navigationTitle(title)
+        } else {
+            content
         }
     }
 }

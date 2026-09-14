@@ -129,6 +129,10 @@ private struct ShelfFilter: View {
             // The row is rebuilt with each shelf, so bring the current chip back into view.
             .onAppear { proxy.scrollTo(current) }
         }
+        #if os(tvOS)
+        // A full-width target, so a move down from the tab bar's row lands on a chip.
+        .focusSection()
+        #endif
     }
 
     #if os(tvOS)

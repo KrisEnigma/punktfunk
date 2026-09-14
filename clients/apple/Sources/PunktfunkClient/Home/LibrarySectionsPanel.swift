@@ -52,6 +52,10 @@ struct LibrarySectionsPanel: View {
         #else
         NavigationStack {
             List {
+                #if os(tvOS)
+                TVScreenTitle("Customize Library")
+                    .listRowBackground(Color.clear)
+                #endif
                 Section {
                     rows
                 } footer: {
@@ -62,14 +66,17 @@ struct LibrarySectionsPanel: View {
             #if os(iOS)
             .environment(\.editMode, .constant(.active))
             .navigationBarTitleDisplayMode(.inline)
-            #endif
             .navigationTitle("Customize Library")
-            #if os(iOS)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Done") { dismiss() }
                 }
             }
+            #else
+            // A TV's title scrolls with the rows, which keep to a readable width.
+            .tvPaneRoom()
+            .frame(maxWidth: 1100)
+            .frame(maxWidth: .infinity)
             #endif
         }
         #endif
