@@ -148,14 +148,13 @@ pub fn admit(req_identity: Option<[u8; 32]>) -> Admission {
     // itself and refuse recovery.
     #[cfg(target_os = "linux")]
     if matches!(decision, Admission::Separate) && any_live {
-        // Linux reuse key includes the client-supplied mode, so a reconnect
-        // at a different resolution misses reuse and would mint unbounded
-        // compositor outputs.
+        // Lingering displays are not counted: `acquire` reuses the requester's or evicts one,
+        // so the pool stays within the cap either way.
         let max = policy::prefs().get().effective().max_displays;
-        let live = super::registry::live_display_count();
-        if live >= max {
+        let held = super::registry::budget_display_count();
+        if held >= max {
             return Admission::Reject(format!(
-                "host display budget exhausted: {live} display(s) live/kept, max_displays = {max}"
+                "host display budget exhausted: {held} display(s) live/pinned, max_displays = {max}"
             ));
         }
     }

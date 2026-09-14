@@ -226,12 +226,12 @@ pub(crate) fn live_identity_slots() -> std::collections::BTreeSet<u32> {
     linux::live_identity_slots()
 }
 
-/// Linux pool size (live and kept) for [`admission`](crate::admission)
-/// `max_displays`. A kept display still owns a compositor output, so it
-/// consumes the budget — same rule as `manager::snapshot().len()` on Windows.
+/// Linux displays [`admission`](crate::admission) counts against `max_displays`: live and
+/// pinned. A lingering display is left out: [`acquire`] reuses it or evicts it, so it never
+/// holds a new session out.
 #[cfg(target_os = "linux")]
-pub(crate) fn live_display_count() -> u32 {
-    linux::live_display_count()
+pub(crate) fn budget_display_count() -> u32 {
+    linux::budget_display_count()
 }
 
 /// Pure pool rules (entry, group, reuse, expiry, snapshot). No OS API — `mod
@@ -334,6 +334,38 @@ mod pool {
             })
             .map(|e| e.generation)
             .collect()
+    }
+
+    /// Displays that count against `max_displays` at admission: everything but Lingering.
+    pub(super) fn budget_count(entries: &[Entry]) -> u32 {
+        entries
+            .iter()
+            .filter(|e| !matches!(e.life, lifecycle::State::Lingering { .. }))
+            .count() as u32
+    }
+
+    /// Lingering display a create evicts so the pool stays within `max`: the one nearest
+    /// expiry. `None` below the cap. `supersedes` does not count; its successor replaces it.
+    pub(super) fn lingering_to_evict(
+        entries: &[Entry],
+        max: u32,
+        supersedes: Option<u64>,
+    ) -> Option<u64> {
+        let counted = entries
+            .iter()
+            .filter(|e| Some(e.generation) != supersedes)
+            .count() as u32;
+        if counted < max {
+            return None;
+        }
+        entries
+            .iter()
+            .filter_map(|e| match e.life {
+                lifecycle::State::Lingering { until } => Some((until, e.generation)),
+                _ => None,
+            })
+            .min()
+            .map(|(_, generation)| generation)
     }
 
     /// Live display a `mode_conflict: join` session shares: Active, same backend, mode,
@@ -784,6 +816,36 @@ mod pool {
             assert!(kept_to_retire(&pool, "gamescope", &None).is_empty());
         }
 
+        /// A lingering display never holds a session out: admission skips it, and a create at
+        /// the cap evicts the one nearest expiry. Live and pinned displays are never evicted.
+        #[test]
+        fn a_create_at_the_cap_evicts_the_lingering_display_nearest_expiry() {
+            use std::time::Duration;
+            let now = Instant::now();
+            let mut live = test_entry("hyprland", 1, None);
+            live.life.acquire();
+            let mut late = test_entry("hyprland", 2, None);
+            late.life = lifecycle::State::Lingering {
+                until: now + Duration::from_secs(60),
+            };
+            let mut soon = test_entry("hyprland", 3, None);
+            soon.life = lifecycle::State::Lingering {
+                until: now + Duration::from_secs(5),
+            };
+            let pool = vec![live, late, soon];
+            assert_eq!(budget_count(&pool), 1);
+            assert_eq!(lingering_to_evict(&pool, 4, None), None);
+            assert_eq!(lingering_to_evict(&pool, 3, None), Some(3));
+            // A mode switch replacing gen 1 does not push the pool to the cap.
+            assert_eq!(lingering_to_evict(&pool, 3, Some(1)), None);
+
+            let mut pinned = test_entry("hyprland", 4, None);
+            pinned.life = lifecycle::State::Pinned;
+            let full = vec![pool.into_iter().next().unwrap(), pinned];
+            assert_eq!(budget_count(&full), 2);
+            assert_eq!(lingering_to_evict(&full, 2, None), None);
+        }
+
         /// Isolated multi-user spawns are deliberately concurrent: the singleton is per
         /// isolation identity, not per host.
         #[test]
@@ -1001,9 +1063,9 @@ mod linux {
     use anyhow::Result;
 
     use super::pool::{
-        assemble_displays, assign_group_ids, effective_linger, epoch_matches, group_key,
-        hand_off_restore, in_group, join_target, kept_to_retire, position_for_new, take_expired,
-        Entry, Restore, Row,
+        assemble_displays, assign_group_ids, budget_count, effective_linger, epoch_matches,
+        group_key, hand_off_restore, in_group, join_target, kept_to_retire, lingering_to_evict,
+        position_for_new, take_expired, Entry, Restore, Row,
     };
     use super::DisplayInfo;
     use crate::lifecycle::{self, Release};
@@ -1042,11 +1104,10 @@ mod linux {
         es.iter().filter_map(|e| e.identity_slot).collect()
     }
 
-    /// Pool size (live + kept) for admission. `0` before the first acquire
-    /// (registry not initialised).
-    pub(super) fn live_display_count() -> u32 {
+    /// [`budget_count`] of the pool. `0` before the first acquire (registry not initialised).
+    pub(super) fn budget_display_count() -> u32 {
         REG.get()
-            .map(|r| r.entries.lock().unwrap().len() as u32)
+            .map(|r| budget_count(&r.entries.lock().unwrap()))
             .unwrap_or(0)
     }
 
@@ -1301,15 +1362,21 @@ mod linux {
             retire_incompatible(backend, &isolation);
         }
 
+        // Never refuse on `max_displays` here: `acquire` reruns on rebuild while the old lease
+        // still counts. Admission skips lingering displays, so at the cap this create evicts one.
+        let max = policy::prefs().get().effective().max_displays;
+        let evict = lingering_to_evict(&r.entries.lock().unwrap(), max, supersedes);
+        if let Some(g) = evict {
+            release_kept(Some(g), "evicted (max_displays reached)");
+        }
+
         // Stamp generation before group questions: a gamescope spawn's group
         // IS its generation. A burned stamp on failed create is fine (opaque,
         // monotonic, never an index).
         let generation = r.generation.fetch_add(1, Ordering::Relaxed);
 
-        // Do not enforce `max_displays` here: `admit` runs once per session;
-        // `acquire` reruns on rebuild and the old lease still counts (max=1
-        // never recovers capture-loss). First-in-group excludes `supersedes`
-        // (still Active); kept leftovers have no session to clobber.
+        // First-in-group excludes `supersedes` (still Active); kept leftovers have no session
+        // to clobber.
         let first_in_group = {
             let es = r.entries.lock().unwrap();
             !es.iter().any(|e| {
