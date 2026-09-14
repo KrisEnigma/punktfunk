@@ -78,9 +78,9 @@ struct LibrarySectionsPanel: View {
                 }
             }
             #else
-            // A TV presents this as a card: the rows keep off its edges, with room inside the list
-            // for a focused row to grow.
-            .safeAreaPadding(.horizontal, 40)
+            // A TV presents this as a card: its content keeps off every edge, with room inside the
+            // list for a focused row to grow.
+            .safeAreaPadding(40)
             #if DEBUG
             .task {
                 guard shotMovesFocus else { return }

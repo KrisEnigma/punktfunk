@@ -49,7 +49,6 @@ struct SpeedTestView: View {
     @State private var applied: String?
 
     #if os(tvOS)
-    private let pagePadding: CGFloat = 60
     private let chartHeight: CGFloat = 360
     #else
     private let pagePadding: CGFloat = 20
@@ -71,9 +70,14 @@ struct SpeedTestView: View {
                     .font(.geist(12, relativeTo: .caption))
                     .foregroundStyle(.secondary)
             }
+            #if os(tvOS)
+            // The host page's pane, or a pushed page, already keeps it off the screen's edges.
+            .frame(maxWidth: .infinity, alignment: .leading)
+            #else
             .padding(pagePadding)
             .frame(maxWidth: 760, alignment: .leading)
             .frame(maxWidth: .infinity)
+            #endif
         }
         .onAppear {
             #if DEBUG
