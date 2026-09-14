@@ -129,7 +129,7 @@ struct HostSectionsView: View {
                 SpeedTestView(host: host, startsOnAppear: false)
                     #if os(macOS)
                     .navigationTitle(host.displayName)
-                    #else
+                    #elseif os(iOS)
                     .navigationTitle(HostSection.speedTest.title)
                     #endif
             } else {
@@ -192,37 +192,43 @@ struct HostSectionsView: View {
 
 #if os(tvOS)
 extension HostSectionsView {
-    /// On a TV the sections are a sidebar that focus picks, beside the chosen one, as in Settings.
+    /// On a TV the sections are a sidebar that focus picks, beside the chosen one, as in Settings;
+    /// the host's name heads the page over both, left-aligned.
     var tvContent: some View {
-        HStack(alignment: .top, spacing: 48) {
-            VStack(alignment: .leading, spacing: 0) {
-                VStack(alignment: .leading, spacing: 8) {
-                    ForEach(HostSection.allCases) { item in
-                        Button {
-                            section = item
-                        } label: {
-                            HStack {
-                                Label(item.title, systemImage: item.symbol)
-                                Spacer(minLength: 16)
-                                if item == section {
-                                    Image(systemName: "chevron.forward")
-                                        .foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 28) {
+            Text(store.hosts.first { $0.id == hostID }?.displayName ?? "")
+                .font(.geist(48, .bold, relativeTo: .title))
+                .lineLimit(1)
+            HStack(alignment: .top, spacing: 48) {
+                VStack(alignment: .leading, spacing: 0) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        ForEach(HostSection.allCases) { item in
+                            Button {
+                                section = item
+                            } label: {
+                                HStack {
+                                    Label(item.title, systemImage: item.symbol)
+                                    Spacer(minLength: 16)
+                                    if item == section {
+                                        Image(systemName: "chevron.forward")
+                                            .foregroundStyle(.secondary)
+                                    }
                                 }
                             }
+                            .buttonStyle(TVSidebarRowStyle(chosen: item == section))
+                            .focused($focusedSection, equals: item)
                         }
-                        .buttonStyle(TVSidebarRowStyle(chosen: item == section))
-                        .focused($focusedSection, equals: item)
                     }
+                    .tvSidebarCard()
+                    Spacer(minLength: 0)
                 }
-                .tvSidebarCard()
-                Spacer(minLength: 0)
-            }
-            .frame(width: 460)
-            .focusSection()
-            sectionPane
-                .tvPaneRoom()
-                .frame(maxWidth: .infinity)
+                .frame(width: 460)
                 .focusSection()
+                sectionPane
+                    .tvPaneRoom()
+                    .frame(maxWidth: .infinity)
+                    .focusSection()
+            }
         }
         .padding(.horizontal, 60)
         // Focus enters on the chosen section, so a page opened on one stays on it.
