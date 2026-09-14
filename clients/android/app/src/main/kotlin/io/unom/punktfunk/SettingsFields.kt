@@ -28,6 +28,8 @@ internal object SettingsFields {
             overlay({ it.bitrateKbps }, { o, v -> o.copy(bitrateKbps = v) })),
         field("renderScale", "render_scale", DoubleKind, { it.renderScale }, { s, v -> s.copy(renderScale = v) },
             overlay({ it.renderScale }, { o, v -> o.copy(renderScale = v) })),
+        field("videoFit", "video_fit", StrKind, { it.videoFit }, { s, v -> s.copy(videoFit = v) },
+            overlay({ it.videoFit }, { o, v -> o.copy(videoFit = v) })),
         field("hdrEnabled", "hdr_enabled", BoolKind, { it.hdrEnabled }, { s, v -> s.copy(hdrEnabled = v) },
             overlay({ it.hdrEnabled }, { o, v -> o.copy(hdrEnabled = v) })),
         field("tenBitSdr", "ten_bit_sdr", BoolKind, { it.tenBitSdr }, { s, v -> s.copy(tenBitSdr = v) },

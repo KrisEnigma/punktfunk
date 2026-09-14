@@ -31,11 +31,11 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -54,9 +54,12 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.layout.layout
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.Constraints
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -74,6 +77,7 @@ import io.unom.punktfunk.kit.security.KnownHostStore
 import io.unom.punktfunk.kit.SessionAccess
 import io.unom.punktfunk.kit.SessionEndReason
 import io.unom.punktfunk.kit.VideoDecoders
+import io.unom.punktfunk.kit.VideoFit
 import io.unom.punktfunk.models.ActiveSession
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.roundToInt
@@ -187,6 +191,16 @@ fun StreamScreen(session: ActiveSession, onSessionEnded: (SessionEndReason) -> U
     // router that opens and drives it.
     val ring = remember(handle) { RingState() }
     var containerSize by remember { mutableStateOf(IntSize.Zero) }
+    // The live session mode: `nativeVideoSize` follows an accepted mode switch, but its ack lands
+    // off the composition, so a request writes the asked-for mode here at once and re-reads the
+    // truth shortly after (a rejection shows through then).
+    var requestedMode by remember(handle) {
+        mutableStateOf(NativeBridge.nativeVideoSize(handle)?.takeIf { it.size >= 2 } ?: intArrayOf(0, 0, 60))
+    }
+    // How the picture fills the container, and the frame it places: the SurfaceView, the touch and
+    // pen lanes and the mouse all map through this one placement (kit `VideoFit`).
+    val videoFit = remember(handle) { VideoFit.fromName(initialSettings.videoFit) }
+    fun videoFrame() = VideoFrame(videoFit, requestedMode.getOrElse(0) { 0 }, requestedMode.getOrElse(1) { 0 })
     val haptics = rememberConsoleHaptics()
     val overlayCfg = remember(initialSettings.overlayActions) { OverlayConfig.parse(initialSettings.overlayActions) }
     // TV form factor (leanback): the decoder actively switches the HDMI output mode to the stream
@@ -210,6 +224,7 @@ fun StreamScreen(session: ActiveSession, onSessionEnded: (SessionEndReason) -> U
             keyCapture = { keyCapture },
             videoView = { videoView },
             containerSize = { containerSize },
+            video = { videoFrame() },
             onSessionEnded = onSessionEnded,
         )
     }
@@ -415,12 +430,6 @@ fun StreamScreen(session: ActiveSession, onSessionEnded: (SessionEndReason) -> U
             delay(300_000)
         }
     }
-    // The live session mode: `nativeVideoSize` follows an accepted mode switch, but its ack lands
-    // off the composition, so a request writes the asked-for mode here at once and re-reads the
-    // truth shortly after (a rejection shows through then).
-    var requestedMode by remember(handle) {
-        mutableStateOf(NativeBridge.nativeVideoSize(handle)?.takeIf { it.size >= 2 } ?: intArrayOf(0, 0, 60))
-    }
     val scope = rememberCoroutineScope()
 
     // The background keep-alive (Settings › General). Off — the default, and what every build
@@ -518,17 +527,6 @@ fun StreamScreen(session: ActiveSession, onSessionEnded: (SessionEndReason) -> U
         activity?.mouseForwarder?.engageFromStart()
     }
 
-    // Fit the picture to the stream's own aspect, letterboxing the rest in black. MediaCodec scales
-    // whatever it decodes to fill the Surface it renders into, so a 16:9 stream on a 20:9 panel came
-    // out stretched — the surface has to carry the aspect, because nothing downstream of it can.
-    // The mode is the negotiated one (known from the handshake, before the first frame); 0/absent —
-    // an older native lib — falls back to filling, i.e. exactly the previous behaviour.
-    val videoAspect = remember(handle) {
-        val size = NativeBridge.nativeVideoSize(handle)
-        val w = size?.getOrNull(0) ?: 0
-        val h = size?.getOrNull(1) ?: 0
-        if (w > 0 && h > 0) w.toFloat() / h.toFloat() else 0f
-    }
     // Tabletop foldable (design §4.4): with the pad up on a half-opened device the picture keeps
     // the upright half and the controls take the flat one, instead of thumbs sitting on the game.
     // The stream half is a container like any other — the video fit, the gesture layer, the ring
@@ -551,17 +549,34 @@ fun StreamScreen(session: ActiveSession, onSessionEnded: (SessionEndReason) -> U
                 )
                 .onSizeChanged { containerSize = it },
         ) {
-            // The picture is aspect-fitted; the gesture layer below spans the WHOLE container and maps
-            // every absolute contact — direct-pointer touch, passthrough, the pen lane — into this same
-            // fit through `videoFitRect`, so a swipe that starts on a letterbox bar still registers and
-            // a contact on a bar lands on the nearest picture edge.
-            val videoFit = if (videoAspect > 0f) {
-                Modifier.align(Alignment.Center).aspectRatio(videoAspect)
-            } else {
+            // MediaCodec scales whatever it decodes to fill the Surface, so the SurfaceView carries the
+            // picture's shape: it is laid out at the placement's whole-pixel rect, and native crops the
+            // source to the part that stays visible (Crop to fill). The gesture layer below spans the
+            // WHOLE container and maps every absolute contact through the same placement, so a swipe
+            // that starts on a bar still registers and lands on the nearest picture edge.
+            val frameMap = videoFrame().at(containerSize)
+            val place = frameMap.placement
+            LaunchedEffect(handle, place, frameMap.width, frameMap.height) {
+                NativeBridge.nativeVideoSourceCrop(
+                    handle,
+                    (place.srcX / frameMap.width).toFloat(),
+                    (place.srcY / frameMap.height).toFloat(),
+                    ((place.srcX + place.srcW) / frameMap.width).toFloat(),
+                    ((place.srcY + place.srcH) / frameMap.height).toFloat(),
+                )
+            }
+            val videoRect = if (frameMap.isEmpty) {
                 Modifier.fillMaxSize()
+            } else {
+                Modifier
+                    .offset { IntOffset(place.dstX, place.dstY) }
+                    .layout { measurable, _ ->
+                        val p = measurable.measure(Constraints.fixed(place.dstW, place.dstH))
+                        layout(place.dstW, place.dstH) { p.place(0, 0) }
+                    }
             }
             AndroidView(
-                modifier = videoFit,
+                modifier = videoRect,
                 factory = { ctx ->
                     SurfaceView(ctx).apply {
                         videoView = this
@@ -798,11 +813,11 @@ fun StreamScreen(session: ActiveSession, onSessionEnded: (SessionEndReason) -> U
                     when {
                         !pointerOk -> {} // no capture — the Access chip is what says why
                         touchMode == TouchMode.TOUCH ->
-                            streamTouchPassthrough(NativeTouchSink(handle), stylus, videoAspect)
+                            streamTouchPassthrough(NativeTouchSink(handle), stylus, ::videoFrame)
                         else -> streamTouchInput(
                             NativeTouchSink(handle),
                             stylus,
-                            videoAspect,
+                            ::videoFrame,
                             trackpad = touchMode == TouchMode.TRACKPAD,
                             invertScroll = initialSettings.invertScroll,
                             onCycleStats = { ui.statsVerbosity = ui.statsVerbosity.next() },

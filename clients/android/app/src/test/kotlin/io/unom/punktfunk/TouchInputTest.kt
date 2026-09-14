@@ -54,7 +54,9 @@ class TouchInputTest {
             Box(
                 Modifier.fillMaxSize().testTag("surface").pointerInput(Unit) {
                     streamTouchInput(
-                        sink = sink, stylus = null, videoAspect = 0f, trackpad = trackpad, invertScroll = false,
+                        sink = sink, stylus = null,
+                        video = { VideoFrame(io.unom.punktfunk.kit.VideoFit.FIT, 0, 0) },
+                        trackpad = trackpad, invertScroll = false,
                         onCycleStats = { stats++ }, onKeyboard = { keyboard += it }, onDial = { dial += it },
                     )
                 },

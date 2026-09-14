@@ -325,7 +325,7 @@ impl Present {
     pub(super) fn show(
         &mut self,
         views: [u64; 3],
-        video: vk::Extent2D,
+        crop: [f32; 4],
         color: ColorDesc,
         depth: u8,
         msb_packed: bool,
@@ -396,7 +396,7 @@ impl Present {
                 &vk::CommandBufferBeginInfo::default()
                     .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
             )?;
-            self.record(cmd, fb, video, color, depth, msb_packed);
+            self.record(cmd, fb, crop, color, depth, msb_packed);
             self.device.end_command_buffer(cmd)?;
         }
 
@@ -452,7 +452,7 @@ impl Present {
         &self,
         cmd: vk::CommandBuffer,
         fb: vk::Framebuffer,
-        video: vk::Extent2D,
+        crop: [f32; 4],
         color: ColorDesc,
         depth: u8,
         msb_packed: bool,
@@ -489,7 +489,7 @@ impl Present {
             self.device
                 .cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.pipeline);
             self.device
-                .cmd_set_viewport(cmd, 0, &[fit_viewport(video, extent)]);
+                .cmd_set_viewport(cmd, 0, &[crop_viewport(crop, extent)]);
             self.device.cmd_set_scissor(
                 cmd,
                 0,
@@ -590,16 +590,15 @@ impl Present {
     }
 }
 
-/// The largest rectangle with the video's aspect that fits the surface, centred. Bars are
-/// whatever the render pass cleared.
-fn fit_viewport(video: vk::Extent2D, surface: vk::Extent2D) -> vk::Viewport {
-    let (vw, vh) = (video.width.max(1) as f32, video.height.max(1) as f32);
+/// The viewport that shows `crop` (frame fractions) across the whole surface. The SurfaceView is
+/// already laid out at the picture's rect, so the cropped-away edges fall outside the surface and
+/// the scissor drops them.
+fn crop_viewport([left, top, right, bottom]: [f32; 4], surface: vk::Extent2D) -> vk::Viewport {
     let (sw, sh) = (surface.width as f32, surface.height as f32);
-    let scale = (sw / vw).min(sh / vh);
-    let (w, h) = (vw * scale, vh * scale);
+    let (w, h) = (sw / (right - left).max(1e-3), sh / (bottom - top).max(1e-3));
     vk::Viewport {
-        x: (sw - w) / 2.0,
-        y: (sh - h) / 2.0,
+        x: -left * w,
+        y: -top * h,
         width: w,
         height: h,
         min_depth: 0.0,

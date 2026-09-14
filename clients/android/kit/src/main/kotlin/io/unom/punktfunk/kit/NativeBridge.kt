@@ -275,6 +275,14 @@ object NativeBridge {
      */
     external fun nativeVideoSurfaceSize(handle: Long, width: Int, height: Int)
 
+    /**
+     * The visible part of the frame, as fractions ([VideoPlacement.srcX] over the frame width
+     * and so on). The SurfaceView is laid out at the picture's rect; this carries what that size
+     * cannot, the edges Crop to fill cuts off. Out-of-range values reset to the full frame.
+     * No-op on a `0` handle; one atomic store, UI-safe.
+     */
+    external fun nativeVideoSourceCrop(handle: Long, left: Float, top: Float, right: Float, bottom: Float)
+
     /** Stop + join the decode thread without closing the session. No-op on `0`. */
     external fun nativeStopVideo(handle: Long)
 

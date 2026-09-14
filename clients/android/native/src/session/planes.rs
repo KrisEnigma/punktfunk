@@ -86,6 +86,7 @@ pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativeStartVideo(
             smooth_buffer,
             panel_hz: panel_fps,
             surface_size: h.surface_size.clone(),
+            src_crop: h.src_crop.clone(),
         };
         let join = match std::thread::Builder::new()
             .name("pf-decode".into())
@@ -135,6 +136,31 @@ pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativeVideoSurfac
         };
         h.surface_size
             .store(packed, std::sync::atomic::Ordering::Relaxed);
+    })
+}
+
+/// `NativeBridge.nativeVideoSourceCrop(handle, left, top, right, bottom)` — the visible part of
+/// the frame as fractions, from Kotlin's placement. The SurfaceView is laid out at the picture's
+/// rect; this is the one thing its size cannot say, the edges Crop to fill cuts off. Read live by
+/// both presenters. Out-of-range values reset to the full frame; no-op on a `0` handle.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativeVideoSourceCrop(
+    _env: EnvUnowned,
+    _this: JObject,
+    handle: jlong,
+    left: jni::sys::jfloat,
+    top: jni::sys::jfloat,
+    right: jni::sys::jfloat,
+    bottom: jni::sys::jfloat,
+) {
+    jni_guard((), || {
+        let Some(h) = get_session(handle) else {
+            return;
+        };
+        h.src_crop.store(
+            super::pack_src_crop(left, top, right, bottom),
+            std::sync::atomic::Ordering::Relaxed,
+        );
     })
 }
 

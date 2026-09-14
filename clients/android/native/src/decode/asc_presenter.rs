@@ -194,6 +194,7 @@ impl AscBackend {
     /// Create the reader + compositor layer, or `None` on API < 29 / init failure (the caller then
     /// runs the SurfaceView presenter). `window` is the SurfaceView's `ANativeWindow`; `src_w/h` the
     /// negotiated decode size; `surface_size` the LIVE view size the layer composites into;
+    /// `src_crop` the part of the buffer it shows;
     /// `panel_hz` the mode-table panel rate (seeds the clock);
     /// `dataspace` the `ADataSpace` from the negotiated colour; `source_hz` the negotiated stream rate.
     ///
@@ -216,13 +217,14 @@ impl AscBackend {
         src_w: i32,
         src_h: i32,
         surface_size: std::sync::Arc<std::sync::atomic::AtomicU64>,
+        src_crop: std::sync::Arc<std::sync::atomic::AtomicU64>,
         panel_hz: i32,
         dataspace: i32,
         source_hz: u32,
         priority: PresentPriority,
         overlay: bool,
     ) -> Option<AscBackend> {
-        let layer = Layer::create(window, surface_size)?;
+        let layer = Layer::create(window, surface_size, src_crop)?;
         let mut usage = ndk::hardware_buffer::HardwareBufferUsage::GPU_SAMPLED_IMAGE;
         if overlay {
             usage |= ndk::hardware_buffer::HardwareBufferUsage::COMPOSER_OVERLAY;

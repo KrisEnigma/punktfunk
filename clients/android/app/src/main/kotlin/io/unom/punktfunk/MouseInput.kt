@@ -4,7 +4,6 @@ import android.os.Build
 import android.view.InputDevice
 import android.view.MotionEvent
 import io.unom.punktfunk.kit.NativeBridge
-import kotlin.math.roundToInt
 
 /** True when any connected input device is a pointer (USB/BT mouse, or a touchpad driving one). */
 fun hasPhysicalMouse(): Boolean = InputDevice.getDeviceIds().any { id ->
@@ -79,7 +78,8 @@ class MouseForwarder(
      * dispatch overrides in window coordinates, so a stream narrower than the panel needs the origin
      * subtracted as well as the size divided; `null` while the surface isn't laid out yet.
      */
-    private val videoRect: () -> android.graphics.Rect?,
+    /** Window point → `[x, y, frameWidth, frameHeight]` on the picture; `null` before layout. */
+    private val frameAt: (Float, Float) -> IntArray?,
 ) {
     /** Capture plumbing, owned by StreamScreen (the focusable capture view). */
     var onRequestCapture: (() -> Unit)? = null
@@ -216,19 +216,10 @@ class MouseForwarder(
     }
 
     private fun sendAbs(ev: MotionEvent) {
-        val r = videoRect() ?: return
-        val w = r.width()
-        val h = r.height()
-        if (w <= 0 || h <= 0) return
-        // Clamped into the picture: a pointer out on a letterbox bar has no host position of its
-        // own, and the edge is the honest answer for it.
-        NativeBridge.nativeSendPointerAbs(
-            handle,
-            (ev.x - r.left).roundToInt().coerceIn(0, w - 1),
-            (ev.y - r.top).roundToInt().coerceIn(0, h - 1),
-            w,
-            h,
-        )
+        // Clamped onto the picture: a pointer out on a bar has no host position of its own, and the
+        // edge is the honest answer for it.
+        val (x, y, w, h) = frameAt(ev.x, ev.y) ?: return
+        NativeBridge.nativeSendPointerAbs(handle, x, y, w, h)
     }
 
     private fun wheel(ev: MotionEvent) {
