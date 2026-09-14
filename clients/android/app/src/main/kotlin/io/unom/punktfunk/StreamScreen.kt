@@ -876,6 +876,17 @@ fun StreamScreen(session: ActiveSession, onSessionEnded: (SessionEndReason) -> U
                         padShown = { padShown },
                         togglePad = { padShown = !padShown },
                         tapPadButton = { bit -> activity?.gamepadRouter?.tapButton(bit) },
+                        pointerGranted = { ui.accessGrants and SessionAccess.POINTER != 0 },
+                        padMouseTarget = { padMouseTarget(ring, activity?.gamepadRouter) },
+                        padMouseOn = {
+                            val t = padMouseTarget(ring, activity?.gamepadRouter)
+                            t != 0 && (NativeBridge.nativePadMouse(handle) and t) == t
+                        },
+                        togglePadMouse = {
+                            val t = padMouseTarget(ring, activity?.gamepadRouter)
+                            val on = NativeBridge.nativePadMouse(handle)
+                            NativeBridge.nativeSetPadMouse(handle, if ((on and t) == t) on and t.inv() else on or t)
+                        },
                         currentMode = { requestedMode },
                         requestMode = { w, h, hz ->
                             if (NativeBridge.nativeRequestMode(handle, w, h, hz)) {
@@ -1333,3 +1344,7 @@ private class HostTextConnection(
         const val MAX_TAPS = 256
     }
 }
+
+/** The wire pads the controller-mouse toggle acts on: the ring's opener, else every open pad. */
+private fun padMouseTarget(ring: RingState, router: GamepadRouter?): Int =
+    ring.opener?.let { 1 shl it } ?: (router?.padMask() ?: 0)

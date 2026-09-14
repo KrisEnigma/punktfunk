@@ -131,6 +131,8 @@ class RingState {
     var navSeq by mutableIntStateOf(0)
     /** Open/close edges, for the shell: the pad router masks itself while the ring is up. */
     var onOpenChange: ((Boolean) -> Unit)? = null
+    /** The wire pad whose `Select+A` opened the ring; null for a touch or key open. */
+    var opener: Int? = null
 
     fun nav(n: RingNav) {
         pendingNav = n
@@ -175,6 +177,7 @@ class RingState {
         hint = null
         highlight = null
         twistArmed = false
+        opener = null
         if (was) onOpenChange?.invoke(false)
     }
 
@@ -207,6 +210,12 @@ class RingActions(
     val togglePad: () -> Unit,
     /** One synthetic system-button tap on the host's pad (a `Gamepad.BTN_*` bit). */
     val tapPadButton: (Int) -> Unit,
+    /** Controller mouse: the pointer grant it needs, the wire pads it acts on (a bit per pad,
+     *  `0` = none), whether they are all on, and the toggle. */
+    val pointerGranted: () -> Boolean,
+    val padMouseTarget: () -> Int,
+    val padMouseOn: () -> Boolean,
+    val togglePadMouse: () -> Unit,
     /** `[w, h, hz]` as last requested (Android has no live read-back of the negotiated mode). */
     val currentMode: () -> IntArray,
     val requestMode: (Int, Int, Int) -> Unit,
@@ -278,6 +287,12 @@ private fun spec(slot: SlotId, cfg: OverlayConfig, a: RingActions): SlotSpec = w
     SlotId.Qam -> SlotSpec(
         "qam", "Quick access menu", Icons.Filled.SpaceDashboard,
         enabled = a.padAvailable(), reason = "Controller input is not forwarded this session",
+    )
+    SlotId.PadMouse -> SlotSpec(
+        "pad_mouse", "Controller mouse", Icons.Filled.Mouse,
+        enabled = a.pointerGranted() && a.padMouseTarget() != 0,
+        reason = if (a.pointerGranted()) "No controller is connected" else "This host only allows controller input",
+        toggle = true, state = if (a.padMouseOn()) "On" else "Off",
     )
     is SlotId.Host -> {
         val act = a.hostActions().firstOrNull { it.id == slot.actionId }
@@ -530,6 +545,7 @@ private fun fireSlot(
         // The host's own overlay is taking the screen: close first, like End stream.
         SlotId.Guide -> { state.close(); actions.tapPadButton(Gamepad.BTN_GUIDE) }
         SlotId.Qam -> { state.close(); actions.tapPadButton(Gamepad.BTN_MISC1) }
+        SlotId.PadMouse -> actions.togglePadMouse()
         is SlotId.Host -> {
             actions.hostActions().firstOrNull { it.id == slot.actionId }?.let { state.close(); actions.invokeHost(it) }
         }
@@ -815,6 +831,8 @@ private fun sheetRows(
             if (sys.enabled) { state.close(); actions.tapPadButton(bit) }
         }
     }
+    val pm = spec(SlotId.PadMouse, cfg, actions)
+    rows += SheetRowSpec(null, pm.label, if (pm.enabled) pm.state else pm.reason, pm.enabled) { if (pm.enabled) actions.togglePadMouse() }
     rows += SheetRowSpec("View", "Statistics", actions.stats().label) { actions.cycleStats() }
     val mic = spec(SlotId.Mic, cfg, actions)
     rows += SheetRowSpec("Audio", mic.label, if (mic.enabled) mic.state else mic.reason, mic.enabled) { if (mic.enabled) actions.toggleMic() }

@@ -99,9 +99,10 @@ internal class StreamPeripherals(
         router.onStatsChord = { ui.statsVerbosity = ui.statsVerbosity.next() }
         // `Select+A` opens the ring at the screen centre; while it is up the pad belongs to it.
         val openRing = { ring.openAt(Offset(containerSize().width / 2f, containerSize().height / 2f)) }
-        router.onRingChord = {
+        router.onRingChord = { pad ->
             haptics.confirm()
             openRing()
+            ring.opener = pad
         }
         // Ctrl+Alt+Shift+O, the cross-client chord, opens the same ring from a keyboard.
         activity?.openRing = openRing

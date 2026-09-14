@@ -31,6 +31,9 @@ sealed class SlotId {
 
     /** The host's quick-access button — `BTN_MISC1`, the Deck's `…`. */
     object Qam : SlotId()
+
+    /** Controller mouse: the pad drives the host pointer instead of its virtual pad. */
+    object PadMouse : SlotId()
     data class Host(val actionId: String) : SlotId()
     data class Shortcut(val shortcutId: String) : SlotId()
 
@@ -47,6 +50,7 @@ sealed class SlotId {
             SendText -> "send_text"
             Guide -> "guide"
             Qam -> "qam"
+            PadMouse -> "pad_mouse"
             is Host -> "host:$actionId"
             is Shortcut -> "shortcut:$shortcutId"
         }
@@ -64,6 +68,7 @@ sealed class SlotId {
             "send_text" -> SendText
             "guide" -> Guide
             "qam" -> Qam
+            "pad_mouse" -> PadMouse
             else -> when {
                 s.startsWith("host:") && s.length > 5 -> Host(s.substring(5))
                 s.startsWith("shortcut:") && s.length > 9 -> Shortcut(s.substring(9))
