@@ -251,6 +251,23 @@ pub(super) fn apply_hdr_dataspace(
     }
 }
 
+/// The decoder's picture size: the crop rect when the output format carries one (1080 rows decode
+/// into a 1088-row buffer), else its width × height. `None` before a format is known.
+pub(super) fn picture_size(codec: &MediaCodec) -> Option<(i32, i32)> {
+    let fmt = codec.output_format();
+    let (w, h) = (fmt.i32("width")?, fmt.i32("height")?);
+    let crop = (
+        fmt.i32("crop-left"),
+        fmt.i32("crop-top"),
+        fmt.i32("crop-right"),
+        fmt.i32("crop-bottom"),
+    );
+    Some(match crop {
+        (Some(l), Some(t), Some(r), Some(b)) if r >= l && b >= t => (r - l + 1, b - t + 1),
+        _ => (w, h),
+    })
+}
+
 /// Map the decoder's reported output colour to a BT.2020 HDR dataspace, or `None` for SDR. The
 /// integer values are the Android MediaFormat colour constants the NDK shares: COLOR_TRANSFER
 /// ST2084 = 6 (PQ/HDR10), HLG = 7; COLOR_RANGE FULL = 1, LIMITED = 2 (the host encodes limited).

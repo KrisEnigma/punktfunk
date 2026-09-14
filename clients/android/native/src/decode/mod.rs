@@ -242,6 +242,8 @@ pub(crate) struct DecodeOptions {
     pub surface_size: std::sync::Arc<std::sync::atomic::AtomicU64>,
     /// The visible part of the frame, packed by [`crate::session::pack_src_crop`]; `0` = all of it.
     pub src_crop: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// Where the decoder publishes its picture size, packed by [`crate::session::pack_surface_size`].
+    pub decoded_size: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 
 /// The decode entry point on the `pf-decode` thread: dispatches to the codec's loop. All of

@@ -200,7 +200,19 @@ fun StreamScreen(session: ActiveSession, onSessionEnded: (SessionEndReason) -> U
     // How the picture fills the container, and the frame it places: the SurfaceView, the touch and
     // pen lanes and the mouse all map through this one placement (kit `VideoFit`).
     val videoFit = remember(handle) { VideoFit.fromName(initialSettings.videoFit) }
-    fun videoFrame() = VideoFrame(videoFit, requestedMode.getOrElse(0) { 0 }, requestedMode.getOrElse(1) { 0 })
+    // The decoder's picture size once known: a host framing the picture for this device (a join,
+    // a mirrored head) sends a size other than the mode, and the placement follows the frames.
+    var decodedSize by remember(handle) { mutableStateOf<IntArray?>(null) }
+    LaunchedEffect(handle) {
+        while (true) {
+            NativeBridge.nativeVideoDecodedSize(handle)
+                ?.takeIf { it.size >= 2 && it[0] > 0 && it[1] > 0 && !it.contentEquals(decodedSize) }
+                ?.let { decodedSize = it }
+            delay(500)
+        }
+    }
+    fun videoFrame() = decodedSize?.let { VideoFrame(videoFit, it[0], it[1]) }
+        ?: VideoFrame(videoFit, requestedMode.getOrElse(0) { 0 }, requestedMode.getOrElse(1) { 0 })
     val haptics = rememberConsoleHaptics()
     val overlayCfg = remember(initialSettings.overlayActions) { OverlayConfig.parse(initialSettings.overlayActions) }
     // TV form factor (leanback): the decoder actively switches the HDMI output mode to the stream

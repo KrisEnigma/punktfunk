@@ -69,6 +69,9 @@ pub struct SessionParams {
     /// Ask the host to keep its default playback device (not a silent endpoint).
     /// Request-only — an older host ignores it.
     pub keep_host_audio: bool,
+    /// How the presenter fills the window; rides the Hello so a host framing the picture for
+    /// another device reframes it for this one.
+    pub video_fit: punktfunk_core::video_fit::VideoFit,
     /// Advertise `CLIENT_CAP_CURSOR`: this embedder draws the host cursor locally, so
     /// the host may stop compositing it. Only set when it actually draws — advertising
     /// without rendering streams with no visible cursor.
@@ -767,6 +770,7 @@ fn pump(
         audio_bits,
         // Legacy coupling: this client decodes either, and only NDL-class sinks need the other.
         punktfunk_core::audio::AudioLayout::Legacy,
+        params.video_fit,
         advertised_codecs,
         preferred,
         // Env hatch wins so an A/B run can pin an exact peak (`PUNKTFUNK_CLIENT_PEAK_NITS`).

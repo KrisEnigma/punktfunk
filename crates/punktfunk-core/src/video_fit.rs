@@ -40,6 +40,24 @@ impl VideoFit {
             VideoFit::Stretch => "stretch",
         }
     }
+
+    /// The `Hello::video_fit` byte. `0` is Fit, so absence and older clients read as today.
+    pub fn wire(self) -> u8 {
+        match self {
+            VideoFit::Fit => 0,
+            VideoFit::Crop => 1,
+            VideoFit::Stretch => 2,
+        }
+    }
+
+    /// Unknown bytes read as [`VideoFit::Fit`].
+    pub fn from_wire(b: u8) -> VideoFit {
+        match b {
+            1 => VideoFit::Crop,
+            2 => VideoFit::Stretch,
+            _ => VideoFit::Fit,
+        }
+    }
 }
 
 /// Resampling filter for one axis, picked from its scale by [`kernel`].
@@ -301,6 +319,10 @@ mod tests {
             assert_eq!(VideoFit::from_name(f.name()), f);
         }
         assert_eq!(VideoFit::from_name("zoom"), VideoFit::Fit);
+        for f in [VideoFit::Fit, VideoFit::Crop, VideoFit::Stretch] {
+            assert_eq!(VideoFit::from_wire(f.wire()), f);
+        }
+        assert_eq!(VideoFit::from_wire(9), VideoFit::Fit);
     }
 
     /// The cross-language contract; Swift, Kotlin and TypeScript run the same file.

@@ -1924,6 +1924,7 @@ pub unsafe extern "C" fn punktfunk_connect_ex7(
             // 0/0 = unspecified (Opus). Any non-zero rate/bits is a lossless ask.
             0,
             0,
+            0,
             timeout_ms,
             std::ptr::null_mut(),
         )
@@ -1982,6 +1983,7 @@ pub unsafe extern "C" fn punktfunk_connect_ex8(
             client_key_pem,
             std::ptr::null(), // no device name: OS default
             // 0/0 = unspecified (Opus). Any non-zero rate/bits is a lossless ask.
+            0,
             0,
             0,
             timeout_ms,
@@ -2045,6 +2047,7 @@ pub unsafe extern "C" fn punktfunk_connect_ex9(
             // 0/0 = unspecified (Opus). Any non-zero rate/bits is a lossless ask.
             0,
             0,
+            0,
             timeout_ms,
             status_out,
         )
@@ -2106,6 +2109,7 @@ pub unsafe extern "C" fn punktfunk_connect_ex10(
             client_key_pem,
             device_name,
             // 0/0 = unspecified (Opus). Any non-zero rate/bits is a lossless ask.
+            0,
             0,
             0,
             timeout_ms,
@@ -2178,11 +2182,85 @@ pub unsafe extern "C" fn punktfunk_connect_ex11(
             device_name,
             audio_rate_hz,
             audio_bits,
+            0,
             timeout_ms,
             status_out,
         )
     }
 }
+
+/// [`punktfunk_connect_ex11`] plus `video_fit`: how this client fills its view when the frame's
+/// shape differs (`PUNKTFUNK_VIDEO_FIT_*`; unknown = fit). A host that frames the picture for
+/// another device reframes to it. Every other argument is [`punktfunk_connect_ex11`]'s.
+///
+/// # Safety
+/// Same as [`punktfunk_connect_ex10`].
+#[cfg(feature = "quic")]
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn punktfunk_connect_ex12(
+    host: *const std::os::raw::c_char,
+    port: u16,
+    width: u32,
+    height: u32,
+    refresh_hz: u32,
+    compositor: u32,
+    gamepad: u32,
+    bitrate_kbps: u32,
+    video_caps: u8,
+    audio_channels: u8,
+    audio_rate_hz: u32,
+    audio_bits: u8,
+    video_codecs: u8,
+    preferred_codec: u8,
+    client_caps: u8,
+    video_fit: u8,
+    launch_id: *const std::os::raw::c_char,
+    pin_sha256: *const u8,
+    observed_sha256_out: *mut u8,
+    client_cert_pem: *const std::os::raw::c_char,
+    client_key_pem: *const std::os::raw::c_char,
+    device_name: *const std::os::raw::c_char,
+    timeout_ms: u32,
+    status_out: *mut i32,
+) -> *mut PunktfunkConnection {
+    // SAFETY: pointers forwarded unchanged; this shim dereferences nothing.
+    unsafe {
+        connect_ex_impl(
+            host,
+            port,
+            client_caps,
+            width,
+            height,
+            refresh_hz,
+            compositor,
+            gamepad,
+            bitrate_kbps,
+            video_caps,
+            audio_channels,
+            video_codecs,
+            preferred_codec,
+            launch_id,
+            pin_sha256,
+            observed_sha256_out,
+            client_cert_pem,
+            client_key_pem,
+            device_name,
+            audio_rate_hz,
+            audio_bits,
+            video_fit,
+            timeout_ms,
+            status_out,
+        )
+    }
+}
+
+/// [`punktfunk_connect_ex12`] `video_fit`: whole picture, bars.
+pub const PUNKTFUNK_VIDEO_FIT_FIT: u8 = 0;
+/// [`punktfunk_connect_ex12`] `video_fit`: fill the view, cut the overflow.
+pub const PUNKTFUNK_VIDEO_FIT_CROP: u8 = 1;
+/// [`punktfunk_connect_ex12`] `video_fit`: fill the view, scale each axis alone.
+pub const PUNKTFUNK_VIDEO_FIT_STRETCH: u8 = 2;
 
 /// [`punktfunk_connect_ex9`] `client_caps` bit: render the host cursor locally
 /// (`design/remote-desktop-sweep.md`).
@@ -2368,6 +2446,7 @@ pub unsafe extern "C" fn punktfunk_connect_opts(
             o.device_name,
             o.audio_rate_hz,
             o.audio_bits,
+            0,
             o.timeout_ms,
             status_out,
         )
@@ -2400,6 +2479,7 @@ unsafe fn connect_ex_impl(
     device_name: *const std::os::raw::c_char,
     audio_rate_hz: u32,
     audio_bits: u8,
+    video_fit: u8,
     timeout_ms: u32,
     status_out: *mut i32,
 ) -> *mut PunktfunkConnection {
@@ -2481,6 +2561,7 @@ unsafe fn connect_ex_impl(
             audio_bits,
             // No C-side ask yet; every embedder decodes whatever coupling the host answers.
             crate::audio::AudioLayout::Legacy,
+            crate::video_fit::VideoFit::from_wire(video_fit),
             video_codecs,
             preferred_codec,
             // No display-HDR-volume in the C ABI; host EDID defaults stand.
@@ -5941,8 +6022,8 @@ mod abi_version_tests {
     #[test]
     fn abi_version_is_pinned() {
         // Current ABI. A bump must update this pin.
-        assert_eq!(crate::ABI_VERSION, 31);
-        assert_eq!(super::punktfunk_abi_version(), 31);
+        assert_eq!(crate::ABI_VERSION, 32);
+        assert_eq!(super::punktfunk_abi_version(), 32);
     }
 
     #[test]

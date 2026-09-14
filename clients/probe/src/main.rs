@@ -541,6 +541,8 @@ async fn session(args: Args) -> Result<()> {
             audio_channels: args.audio_channels,
             // Legacy coupling; the probe decodes whatever the host answers (`Welcome::audio_layout`).
             audio_layout: 0,
+            // The probe dumps the frame as sent; no view to fill.
+            video_fit: 0,
             // The probe just dumps the bitstream (no decode), so it advertises every codec — HEVC
             // (the host default) AND H.264 (so it can drive a GPU-less software host,
             // `PUNKTFUNK_ENCODER=software`) AND AV1. The host picks one and reports it in

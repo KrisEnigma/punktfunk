@@ -96,6 +96,10 @@ pub(crate) struct SessionHandle {
     /// whenever Kotlin re-places the picture. Not the full frame only under Crop to fill (or a
     /// few-pixel snap); `0` = the full frame.
     pub src_crop: Arc<AtomicU64>,
+    /// The decoder's picture size ([`pack_surface_size`]), written on each output-format change.
+    /// A host that frames the picture for this device (a join, a mirrored head) can send a size
+    /// other than the negotiated mode, and the UI places against what is decoded. `0` = none yet.
+    pub decoded_size: Arc<AtomicU64>,
 }
 
 static NEXT_SESSION_HANDLE: AtomicU64 = AtomicU64::new(0x1000_0000_0000_0001);
