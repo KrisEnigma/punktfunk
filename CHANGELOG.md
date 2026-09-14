@@ -16,7 +16,7 @@ short; the version-bump commit retitles it. Older sections stay as they are.
 
 ## v0.37.0
 
-153 commits since v0.36.0. Wire stays 2. **C ABI 30**, additive. **Driver protocol floor 9.**
+158 commits since v0.36.0. Wire stays 2. **C ABI 30**, additive. **Driver protocol floor 9.**
 Deep dive: `git log v0.36.0..v0.37.0`
 
 ### Versions
@@ -75,6 +75,9 @@ Deep dive: `git log v0.36.0..v0.37.0`
   hand-off; NVIDIA stays on the RGB ring by default.
 - `punktfunk-host service install --mgmt-bind=IP:PORT` (Windows) writes `PUNKTFUNK_MGMT_BIND` to
   `host.env` and opens the firewall for that port. Setup passes it next to Sunshine.
+- `punktfunk-gamescope` ships `gamescopereaper` at `/usr/lib/punktfunk/gamescope/`; the host puts
+  that directory first on `PATH` for every gamescope it starts. The PKGBUILD's `pkgrel` (2) is also
+  the Debian revision and leads the RPM release.
 
 ---
 
