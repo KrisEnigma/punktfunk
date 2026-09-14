@@ -82,11 +82,8 @@ extension SettingsView {
     private static let minSliderKbps = 2_000.0
     private static let maxSliderKbps = 3_000_000.0
 
-    /// tvOS's cluster caption (the touch/desktop forms describe bitrate per-row instead).
-    ///
-    /// Deliberately says nothing about the speed test: it is reached from a host card's context
-    /// menu, and tvOS has no context menus — the old wording sent Apple TV users after a control
-    /// that does not exist there.
+    /// tvOS's cluster caption (the touch/desktop forms describe bitrate per-row instead). It says
+    /// nothing about the speed test, which a TV reaches from the host's page, not from here.
     static let bitrateFooter = "Automatic bitrate uses the host's default, 20 Mbps."
 
     static let gigabitWarning =
