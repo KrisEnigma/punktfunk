@@ -207,6 +207,14 @@ enum ShotScenes {
         scenes.append(ShotScene(name: "21b-tv-settings-display", orientation: .natural, colorScheme: .dark) {
             AnyView(ShotTVTabs(tab: .settings, category: .display))
         })
+        // Presets on the TV: the Editing pane, and Display edited in the "4K HDR" preset.
+        scenes.append(ShotScene(name: "22-tv-presets", orientation: .natural, colorScheme: .dark) {
+            AnyView(ShotTVTabs(tab: .settings, scope: .preset(ShotMock.hdrPresetID), editing: true))
+        })
+        scenes.append(ShotScene(name: "22b-tv-preset-scope", orientation: .natural, colorScheme: .dark) {
+            AnyView(ShotTVTabs(
+                tab: .settings, category: .display, scope: .preset(ShotMock.hdrPresetID)))
+        })
         #endif
         scenes.append(ShotScene(name: "10-edithost", orientation: .natural, colorScheme: .dark) {
             AnyView(ShotEditHost())
@@ -230,7 +238,14 @@ enum ShotMock {
 
     static let hdrPresetID = "a71c4e0d9f22"
     static let couchPresetID = "3e88b107c4da"
-    static let hdrPreset = StreamPreset(name: "4K HDR", id: hdrPresetID, accent: "#8B7BF7")
+    /// Overrides a few Display rows, so a scene editing it shows the marks.
+    static let hdrPreset: StreamPreset = {
+        var preset = StreamPreset(name: "4K HDR", id: hdrPresetID, accent: "#8B7BF7")
+        preset.overrides.width = 3840
+        preset.overrides.height = 2160
+        preset.overrides.hdrEnabled = true
+        return preset
+    }()
     static let couchPreset = StreamPreset(
         name: "Couch 1080p", id: couchPresetID, accent: "#4FD1A5")
 
@@ -412,6 +427,8 @@ private struct ShotHome: View {
 private struct ShotTVTabs: View {
     let tab: TouchTab
     var category: SettingsCategory = .general
+    var scope: SettingsScope = .defaults
+    var editing = false
 
     var body: some View {
         TabView(selection: .constant(tab)) {
@@ -421,10 +438,13 @@ private struct ShotTVTabs: View {
             ShotLibraryFilter()
                 .tabItem { Label("Library", systemImage: "square.grid.2x2") }
                 .tag(TouchTab.library)
-            NavigationStack { SettingsView(initialCategory: category) }
-                .tabItem { Label("Settings", systemImage: "gearshape") }
-                .tag(TouchTab.settings)
+            NavigationStack {
+                SettingsView(initialCategory: category, initialScope: scope, startsOnEditing: editing)
+            }
+            .tabItem { Label("Settings", systemImage: "gearshape") }
+            .tag(TouchTab.settings)
         }
+        .onAppear { ShotMock.installPresets() }
     }
 }
 #endif

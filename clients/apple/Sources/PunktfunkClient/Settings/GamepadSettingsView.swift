@@ -1173,27 +1173,17 @@ struct GamepadSettingsView: View {
         }
     }
 
-    /// The preset rows' explainer. tvOS gets its own: the catalog is per-device (the App Group
-    /// suite — nothing syncs it) and tvOS has no preset editor at all (§5.4), so pointing a TV
-    /// user at a "standard interface" would promise presets that can never arrive there.
+    /// The preset rows' explainer. Presets are made in the standard interface's Settings, a TV's
+    /// included; this surface only pins them.
     private var presetDetail: String {
-        #if os(tvOS)
-        return "Pin a preset to a host and it gets its own card — one press connects."
-        #else
-        return "Pin a preset to a host and it gets its own card — one press connects. Create "
+        "Pin a preset to a host and it gets its own card — one press connects. Create "
             + "presets in the standard interface."
-        #endif
     }
 
-    /// What the empty catalog's placeholder explains — again honest on tvOS, where presets
-    /// cannot be created (on the device or anywhere that would reach its per-device catalog).
+    /// What the empty catalog's placeholder explains.
     private var emptyCatalogDetail: String {
-        #if os(tvOS)
-        return "Presets bundle stream settings. Creating them isn't available on Apple TV yet."
-        #else
-        return "Presets bundle stream settings. Create them in the standard interface, then "
+        "Presets bundle stream settings. Create them in the standard interface, then "
             + "pin them here."
-        #endif
     }
 
     /// Resolution choices as "WxH" tags — the current size is inserted when it's a custom mode

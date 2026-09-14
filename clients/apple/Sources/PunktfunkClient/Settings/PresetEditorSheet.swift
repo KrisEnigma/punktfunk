@@ -53,6 +53,10 @@ struct PresetEditorSheet: View {
 
     @State private var name: String
     @State private var accent: String?
+    #if os(tvOS)
+    /// The system keyboard for the name, full screen as tvOS text entry is.
+    @State private var editingName = false
+    #endif
 
     init(draft: PresetDraft, onScope: @escaping (SettingsScope) -> Void) {
         self.draft = draft
@@ -78,6 +82,8 @@ struct PresetEditorSheet: View {
         }
         .frame(width: 420)
         .fixedSize(horizontal: false, vertical: true)
+        #elseif os(tvOS)
+        tvForm
         #else
         NavigationStack {
             form
@@ -144,10 +150,16 @@ struct PresetEditorSheet: View {
         let shown = name.trimmingCharacters(in: .whitespaces)
         return PresetChip(
             preset: StreamPreset(name: shown.isEmpty ? "Preset" : shown, accent: accent),
-            size: 13, prominent: true)
+            size: Self.chipSize, prominent: true)
             .opacity(shown.isEmpty ? 0.5 : 1)
             .animation(.easeOut(duration: 0.15), value: accent)
     }
+
+    #if os(tvOS)
+    private static let chipSize: CGFloat = 28
+    #else
+    private static let chipSize: CGFloat = 13
+    #endif
 
     /// The palette, as colours. `nil` is the brand default and leads, so "no colour" is a choice
     /// on the same shelf as the rest rather than the absence of one.
@@ -194,6 +206,68 @@ struct PresetEditorSheet: View {
         .accessibilityAddTraits(selected ? [.isButton, .isSelected] : .isButton)
         .help(label)
     }
+
+    #if os(tvOS)
+    /// The TV's form: the name through the system keyboard, the colours as focusable swatches,
+    /// and the two buttons at the bottom, since a TV sheet has no toolbar to hold them.
+    private var tvForm: some View {
+        VStack(spacing: 36) {
+            Text(draft.title)
+                .font(.geist(40, .bold, relativeTo: .title))
+            preview
+            TVFieldRow(label: "Name", value: name, placeholder: "e.g. Game, Work, Travel") {
+                editingName = true
+            }
+            Text(nameFootnote)
+                .font(.geist(22, relativeTo: .caption))
+                .foregroundStyle(duplicateName ? Color.red : Color.secondary)
+            HStack(spacing: 24) {
+                tvSwatch(nil, label: "Default")
+                ForEach(PresetAccent.palette) { option in
+                    tvSwatch(option.hex, label: option.name)
+                }
+            }
+            .focusSection()
+            HStack(spacing: 32) {
+                Button("Cancel", role: .cancel) { dismiss() }
+                Button(draft.accept) { commit() }
+                    .disabled(!isNameAcceptable)
+            }
+        }
+        .frame(maxWidth: 1100)
+        .padding(60)
+        .fullScreenCover(isPresented: $editingName) {
+            TVTextEntry(title: "Name", text: name) { typed in
+                name = typed
+                editingName = false
+            }
+        }
+    }
+
+    /// One colour, focusable: the platter draws the focus, the tick says which is chosen.
+    private func tvSwatch(_ hex: String?, label: String) -> some View {
+        let selected = accent?.caseInsensitiveCompare(hex ?? "") == .orderedSame
+            || (accent == nil && hex == nil)
+        return Button {
+            accent = hex
+        } label: {
+            ZStack {
+                Circle()
+                    .fill(hex.flatMap { Color(hex: $0) } ?? .brand)
+                    .frame(width: 52, height: 52)
+                if selected {
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 24, weight: .bold))
+                        .foregroundStyle(.white)
+                }
+            }
+        }
+        .buttonStyle(.bordered)
+        .buttonBorderShape(.circle)
+        .accessibilityLabel(label)
+        .accessibilityAddTraits(selected ? [.isButton, .isSelected] : .isButton)
+    }
+    #endif
 
     // MARK: - Validation + commit
 
