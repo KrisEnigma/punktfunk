@@ -61,6 +61,12 @@ pub fn pick_anchor(refs: &[(usize, i64)], loss_first: i64) -> Option<(usize, i64
     best
 }
 
+/// Slot for the next LTR mark: the first one holding no trusted picture, else `next`, the
+/// round robin. Marking over a slot a loss emptied keeps the last clean LTR for the next loss.
+pub fn mark_slot(trusted: &[bool], next: usize) -> usize {
+    trusted.iter().position(|&t| !t).unwrap_or(next)
+}
+
 /// What a wave frame's AU tells the client. Both ends carry the recovery point; the close
 /// also carries the close bit, so a client that knows it lifts on a close after a start.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -179,7 +185,29 @@ pub fn pinned_cycle() -> Option<u32> {
 
 #[cfg(test)]
 mod tests {
-    use super::{pick_anchor, plan_slot_recovery, wave_cycle, Wave};
+    use super::{mark_slot, pick_anchor, plan_slot_recovery, wave_cycle, Wave};
+
+    /// Two LTR slots marked at 840 and 870. A loss at 869 anchors on 840 and empties 870's
+    /// slot, so the mark at 900 lands there and a loss at 900 still anchors on 840.
+    #[test]
+    fn a_mark_refills_the_slot_a_loss_emptied() {
+        let mut wires = [840i64, 870];
+        let plan = plan_slot_recovery(&view(&wires), 869);
+        assert_eq!(plan.anchor, Some((0, 840)));
+        apply(&mut wires, plan.tainted);
+        let slot = mark_slot(&wires.map(|w| w >= 0), 0);
+        assert_eq!(slot, 1, "the round robin would overwrite 840");
+        wires[slot] = 900;
+        assert_eq!(
+            plan_slot_recovery(&view(&wires), 900).anchor,
+            Some((0, 840))
+        );
+        assert_eq!(
+            mark_slot(&[true, true], 1),
+            1,
+            "every slot trusted: the round robin"
+        );
+    }
 
     /// Rows cap the cycle (1080p = 17 CTB rows), a quarter second caps it at 60 fps, the
     /// driver ceiling and the pin override, never below 2.
