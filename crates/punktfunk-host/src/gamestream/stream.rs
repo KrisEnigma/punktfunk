@@ -216,6 +216,7 @@ fn run(
             crate::launchreg::claim(
                 life.fingerprint.as_deref(),
                 t.game.id.as_deref(),
+                t.launcher,
                 fresh_stamp,
             )
         });

@@ -356,6 +356,7 @@ impl StreamState {
             crate::launchreg::claim(
                 conn.peer_fingerprint().map(hex::encode).as_deref(),
                 t.game.id.as_deref(),
+                t.launcher,
                 fresh_stamp,
             )
         });
