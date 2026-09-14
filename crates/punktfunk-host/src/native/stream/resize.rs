@@ -153,7 +153,13 @@ impl StreamState {
         };
         trace.mark("first_new_frame");
         let new_enc = match pre_opened {
-            Some(e) => e,
+            Some(e) => {
+                self.adopt_reframe(punktfunk_core::video_fit::Reframe::full((
+                    new_frame.width,
+                    new_frame.height,
+                )));
+                e
+            }
             None => match open_session_encoder(
                 &self.plan,
                 &*self.capturer,
@@ -164,7 +170,10 @@ impl StreamState {
                 self.bit_depth,
                 self.au_seq,
             ) {
-                Ok((e, _)) => e,
+                Ok((e, reframe)) => {
+                    self.adopt_reframe(reframe);
+                    e
+                }
                 Err(e) => {
                     tracing::warn!(error = %format!("{e:#}"),
                         "resize: encoder open failed after the in-place mode set - full rebuild");

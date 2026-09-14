@@ -765,6 +765,7 @@ fn gs_open_encoder(
     let (enc, _) = crate::session_plan::open_encoder_fitted(
         frame,
         (cfg.width, cfg.height),
+        None,
         |width, height| {
             encode::open_video(
                 cfg.codec,

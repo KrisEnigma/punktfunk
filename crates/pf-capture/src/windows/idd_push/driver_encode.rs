@@ -93,6 +93,7 @@ fn caps_from_wire(w: &encode::EncoderCapsWire) -> EncoderCaps {
         blends_cursor: w.blends_cursor != 0,
         // The driver encodes what DWM composes at the monitor's own size.
         downscales_input: false,
+        crops_input: false,
     }
 }
 

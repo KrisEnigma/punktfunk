@@ -94,7 +94,8 @@ impl StreamState {
             self.bit_depth,
             self.au_seq,
         ) {
-            Ok((new_enc, _)) => {
+            Ok((new_enc, reframe)) => {
+                self.adopt_reframe(reframe);
                 let applied_kbps = new_enc
                     .applied_bitrate_bps()
                     .map(|b| (b / 1000) as u32)

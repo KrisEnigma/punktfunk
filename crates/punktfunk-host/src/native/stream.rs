@@ -381,6 +381,10 @@ pub(super) struct SessionContext {
     pub(super) client_hdr: Option<pf_frame::HdrMeta>,
     /// Admitted by `mode_conflict: join`: share the live display instead of creating one.
     pub(super) join_live: bool,
+    /// A joiner's view and fit ([`SessionPlan::reframe_to`](crate::session_plan::SessionPlan::reframe_to)).
+    pub(super) reframe_to: Option<(punktfunk_core::video_fit::VideoFit, (u32, u32))>,
+    /// The encoder's framing, published for the input thread.
+    pub(super) frame_map: super::input::FrameMap,
     pub(super) bringup: Arc<crate::bringup::Trace>,
     pub(super) resize_ms: Arc<AtomicU32>,
     /// A clone of the data socket for the sender's kernel-queue probe; `None` on the web plane.

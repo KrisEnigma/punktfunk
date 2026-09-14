@@ -828,6 +828,10 @@ impl Encoder for RemotePyroWave {
         // capturer's ring depth constrains nothing here.
     }
 
+    fn set_input_crop(&mut self, _rect: [u32; 4]) {
+        // `crops_input` is false: the host never asks a worker to crop.
+    }
+
     fn flush(&mut self) -> Result<()> {
         // Nothing is in flight across the socket: `submit` returns only once the AU is in
         // `pending`. Unlike the in-process encoder, whose `submit`/`poll` split leaves a fence.

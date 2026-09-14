@@ -98,6 +98,9 @@ pub struct SessionPlan {
     /// (single-slice frames for TV-SoC decoders). Applied to every encoder this
     /// plan opens so slicing cannot change shape across a rebuild.
     pub max_slices: u32,
+    /// A joiner's own view and fit: the encoder frames the owner's picture for it. `None`
+    /// streams the source as captured, or a mirrored head fitted to the negotiated size.
+    pub reframe_to: Option<(punktfunk_core::video_fit::VideoFit, (u32, u32))>,
 }
 
 impl SessionPlan {
@@ -126,6 +129,7 @@ impl SessionPlan {
             // Callers that know the compositor overwrite this; default off for everyone else.
             gamescope_cursor: false,
             max_slices: if multi_slice { 32 } else { 1 },
+            reframe_to: None,
         }
     }
 
@@ -296,45 +300,56 @@ pub(crate) fn mirrored() -> bool {
     }
 }
 
-/// Open the encoder for `frame` through `open(width, height)` and return the size it opened
-/// at. A mirrored head larger than the client's `negotiated` picture opens at the fit inside
-/// it and scales on ingest; a backend that cannot scale is reopened at the head's own size.
+/// Open the encoder for `frame` through `open(width, height)` and return it with the framing
+/// it encodes. A joiner's `reframe_to` frames the owner's picture for its view; a mirrored head
+/// larger than the client's `negotiated` picture fits inside it. Either crops and scales on
+/// ingest; a backend that cannot is reopened at the source's own size.
 pub(crate) fn open_encoder_fitted(
     frame: &crate::capture::CapturedFrame,
     negotiated: (u32, u32),
+    reframe_to: Option<(punktfunk_core::video_fit::VideoFit, (u32, u32))>,
     mut open: impl FnMut(u32, u32) -> anyhow::Result<Box<dyn crate::encode::Encoder>>,
-) -> anyhow::Result<(Box<dyn crate::encode::Encoder>, (u32, u32))> {
+) -> anyhow::Result<(
+    Box<dyn crate::encode::Encoder>,
+    punktfunk_core::video_fit::Reframe,
+)> {
+    use punktfunk_core::video_fit::{Reframe, VideoFit};
     let captured = (frame.width, frame.height);
-    let fitted = if mirrored() {
-        punktfunk_core::render_scale::fit_inside(
-            frame.width,
-            frame.height,
-            negotiated.0,
-            negotiated.1,
-        )
-    } else {
-        captured
+    let full = Reframe::full(captured);
+    let Some((fit, view)) =
+        reframe_to.or_else(|| mirrored().then_some((VideoFit::Fit, negotiated)))
+    else {
+        return Ok((open(captured.0, captured.1)?, full));
     };
-    if fitted == captured {
-        return Ok((open(captured.0, captured.1)?, captured));
+    let framed = Reframe::plan(fit, captured, view);
+    if framed.is_full() {
+        return Ok((open(captured.0, captured.1)?, full));
     }
-    let enc = open(fitted.0, fitted.1)?;
-    if enc.caps().downscales_input {
+    let mut enc = open(framed.out.0, framed.out.1)?;
+    let caps = enc.caps();
+    let scaled = framed.out != (framed.crop[2], framed.crop[3]);
+    if (!scaled || caps.downscales_input) && (!framed.is_cropped() || caps.crops_input) {
+        if framed.is_cropped() {
+            enc.set_input_crop(framed.crop);
+        }
         tracing::info!(
             ?captured,
-            encoder = ?fitted,
-            ?negotiated,
-            "mirror: the encoder opens at the client's size and scales on ingest"
+            crop = ?framed.crop,
+            encoder = ?framed.out,
+            ?view,
+            fit = fit.name(),
+            "the encoder frames the picture for this client on ingest"
         );
-        return Ok((enc, fitted));
+        return Ok((enc, framed));
     }
     tracing::warn!(
         ?captured,
-        wanted = ?fitted,
-        "mirror downscale is unavailable on this encode backend — encoding the head at its own size"
+        crop = ?framed.crop,
+        wanted = ?framed.out,
+        "crop or downscale is unavailable on this encode backend — encoding the source at its own size"
     );
     drop(enc);
-    Ok((open(captured.0, captured.1)?, captured))
+    Ok((open(captured.0, captured.1)?, full))
 }
 
 #[cfg(test)]

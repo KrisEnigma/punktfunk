@@ -50,6 +50,8 @@ pub struct NativeVaapiEncoder {
     pending: Option<EncodedFrame>,
     /// 24-bit CPU frames are repacked to 32 here.
     repack: Vec<u8>,
+    /// The part of each picture this session encodes ([`Encoder::set_input_crop`]).
+    crop: Option<[u32; 4]>,
     /// `PUNKTFUNK_VAAPI_DUMP=<file>`: every access unit, appended, for a decoder to look at.
     dump: Option<std::fs::File>,
 }
@@ -115,6 +117,7 @@ impl NativeVaapiEncoder {
             frames: 0,
             pending: None,
             repack: Vec::new(),
+            crop: None,
             dump: std::env::var("PUNKTFUNK_VAAPI_DUMP")
                 .ok()
                 .and_then(|p| std::fs::File::create(&p).ok()),
@@ -141,6 +144,7 @@ impl NativeVaapiEncoder {
         let mut session =
             Session::new(display, self.params, self.codec).map_err(|e| anyhow!("{e:#}"))?;
         session.set_hdr(self.hdr);
+        session.set_source_crop(self.crop);
         self.session = Some(session);
         self.force_kf = true;
         Ok(())
@@ -177,15 +181,23 @@ pub fn probe_can_encode(codec: Codec, ten_bit: bool) -> bool {
 }
 
 impl Encoder for NativeVaapiEncoder {
-    /// A mirrored head arrives larger and is scaled on ingest; the shape must match
-    /// within the even-floor's two pixels. Smaller, or another shape, is a host
-    /// size fault: fail here, not with a garbage picture.
+    /// A mirrored head or a crop arrives larger and is scaled on ingest; the shape must
+    /// match within the even-floor's two pixels. Smaller, another shape, or a crop past
+    /// the picture is a host size fault: fail here, not with a garbage picture.
     fn submit(&mut self, frame: &CapturedFrame) -> Result<()> {
-        let (fw, fh) = (u64::from(frame.width), u64::from(frame.height));
+        let [cx, cy, cw, ch] = self
+            .crop
+            .unwrap_or([0, 0, frame.width, frame.height])
+            .map(u64::from);
+        let (fw, fh) = (cw, ch);
         let (ew, eh) = (u64::from(self.params.width), u64::from(self.params.height));
         ensure!(
-            fw >= ew && fh >= eh && (fw * eh).abs_diff(fh * ew) < 2 * fw.max(fh),
-            "captured frame {}x{} does not fit encoder {}x{}",
+            cx + cw <= u64::from(frame.width)
+                && cy + ch <= u64::from(frame.height)
+                && fw >= ew
+                && fh >= eh
+                && (fw * eh).abs_diff(fh * ew) < 2 * fw.max(fh),
+            "captured frame {}x{} (encoding {cw}x{ch} at {cx},{cy}) does not fit encoder {}x{}",
             frame.width,
             frame.height,
             self.params.width,
@@ -297,6 +309,7 @@ impl Encoder for NativeVaapiEncoder {
         EncoderCaps {
             supports_rfi: true,
             downscales_input: true,
+            crops_input: true,
             ..Default::default()
         }
     }
@@ -409,6 +422,13 @@ impl Encoder for NativeVaapiEncoder {
 
     fn applied_bitrate_bps(&self) -> Option<u64> {
         Some(u64::from(self.params.bitrate_bps))
+    }
+
+    fn set_input_crop(&mut self, rect: [u32; 4]) {
+        self.crop = Some(rect);
+        if let Some(session) = self.session.as_mut() {
+            session.set_source_crop(self.crop);
+        }
     }
 
     fn flush(&mut self) -> Result<()> {

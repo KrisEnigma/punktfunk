@@ -232,6 +232,90 @@ fn clip(origin: i64, size: i64, view: u32) -> (u32, u32) {
     (start as u32, (end - start).max(0) as u32)
 }
 
+/// How a host encodes a picture sized for another screen (a join, a mirrored head) for one
+/// client: the `crop` of the `source` it takes, scaled to `out`. Every size is even, so a
+/// 4:2:0 chroma grid stays aligned. `Default` (all zero) maps nothing.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Reframe {
+    pub source: (u32, u32),
+    /// `x, y, width, height` in source pixels.
+    pub crop: [u32; 4],
+    pub out: (u32, u32),
+}
+
+impl Reframe {
+    /// The whole `source`, unscaled.
+    pub fn full(source: (u32, u32)) -> Reframe {
+        Reframe {
+            source,
+            crop: [0, 0, source.0, source.1],
+            out: source,
+        }
+    }
+
+    /// Frame `source` for a client whose `view` fills by `fit`. Crop takes the centred part of
+    /// the view's shape; every fit then shrinks to fit inside the view and never grows. Stretch
+    /// frames like Fit, since the client stretches whatever arrives.
+    pub fn plan(fit: VideoFit, source: (u32, u32), view: (u32, u32)) -> Reframe {
+        let (sw, sh) = (u64::from(source.0), u64::from(source.1));
+        let (vw, vh) = (u64::from(view.0), u64::from(view.1));
+        let mut r = Reframe::full(source);
+        if sw == 0 || sh == 0 || vw == 0 || vh == 0 {
+            return r;
+        }
+        if fit == VideoFit::Crop {
+            // Within two pixels of the source's shape is the source: no crop for a rounding.
+            let (cw, ch) = if sw * vh > sh * vw {
+                ((sh * vw / vh) & !1, sh)
+            } else {
+                (sw, (sw * vh / vw) & !1)
+            };
+            if cw >= 2 && ch >= 2 && (sw - cw > 2 || sh - ch > 2) {
+                r.crop = [
+                    (((sw - cw) / 2) & !1) as u32,
+                    (((sh - ch) / 2) & !1) as u32,
+                    cw as u32,
+                    ch as u32,
+                ];
+            }
+        }
+        r.out = crate::render_scale::fit_inside(r.crop[2], r.crop[3], view.0, view.1);
+        r
+    }
+
+    /// Takes the whole source at its own size.
+    pub fn is_full(&self) -> bool {
+        *self == Reframe::full(self.source)
+    }
+
+    /// Cuts part of the source away.
+    pub fn is_cropped(&self) -> bool {
+        self.crop != [0, 0, self.source.0, self.source.1]
+    }
+
+    /// A point `x, y` in an `extent`-sized picture of the encoded frame, as source pixels.
+    pub fn to_source(&self, x: f64, y: f64, extent: (f64, f64)) -> (f64, f64) {
+        if extent.0 <= 0.0 || extent.1 <= 0.0 || self.source.0 == 0 {
+            return (x, y);
+        }
+        let [cx, cy, cw, ch] = self.crop.map(f64::from);
+        (cx + x / extent.0 * cw, cy + y / extent.1 * ch)
+    }
+
+    /// A source pixel as an encoded-frame pixel (the forwarded cursor). May fall outside.
+    pub fn to_frame(&self, x: i32, y: i32) -> (i32, i32) {
+        let [cx, cy, cw, ch] = self.crop.map(i64::from);
+        if cw == 0 || ch == 0 {
+            return (x, y);
+        }
+        let (ow, oh) = (i64::from(self.out.0), i64::from(self.out.1));
+        (
+            ((i64::from(x) - cx) * ow / cw) as i32,
+            ((i64::from(y) - cy) * oh / ch) as i32,
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -377,5 +461,47 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn reframe_crops_a_4k_owner_to_a_20_9_joiner() {
+        let r = Reframe::plan(VideoFit::Crop, (3840, 2160), (2400, 1080));
+        assert_eq!(r.crop, [0, 216, 3840, 1728]);
+        assert_eq!(r.out, (2400, 1080));
+        assert!(r.is_cropped());
+        // The joiner's centre is the owner's centre; its corners are the crop's.
+        assert_eq!(
+            r.to_source(1200.0, 540.0, (2400.0, 1080.0)),
+            (1920.0, 1080.0)
+        );
+        assert_eq!(r.to_source(0.0, 0.0, (2400.0, 1080.0)), (0.0, 216.0));
+        assert_eq!(r.to_frame(1920, 1080), (1200, 540));
+        assert_eq!(r.to_frame(0, 216), (0, 0));
+    }
+
+    #[test]
+    fn reframe_fit_only_shrinks() {
+        let r = Reframe::plan(VideoFit::Fit, (3840, 2160), (2400, 1080));
+        assert_eq!((r.crop, r.out), ([0, 0, 3840, 2160], (1920, 1080)));
+        assert!(!r.is_cropped() && !r.is_full());
+        assert_eq!(
+            Reframe::plan(VideoFit::Stretch, (3840, 2160), (2400, 1080)),
+            r
+        );
+        // A larger view keeps the source as it is.
+        assert!(Reframe::plan(VideoFit::Fit, (1920, 1080), (3840, 2160)).is_full());
+    }
+
+    #[test]
+    fn reframe_crop_keeps_a_matching_shape_and_even_origins() {
+        // 1920x1200 into 16:9: 1080 rows, 60 cut from each edge.
+        let r = Reframe::plan(VideoFit::Crop, (1920, 1200), (1280, 720));
+        assert_eq!((r.crop, r.out), ([0, 60, 1920, 1080], (1280, 720)));
+        // A shape within a rounding of the source is not cropped.
+        assert!(!Reframe::plan(VideoFit::Crop, (1920, 1080), (1366, 768)).is_cropped());
+        // An odd margin floors to an even origin.
+        let r = Reframe::plan(VideoFit::Crop, (1920, 1200), (2560, 1080));
+        assert_eq!(r.crop, [0, 194, 1920, 810]);
+        assert!(Reframe::default().to_frame(5, 7) == (5, 7));
     }
 }

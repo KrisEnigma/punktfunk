@@ -1475,6 +1475,14 @@ pub(crate) async fn run_admitted(
         .map_err(|_| anyhow!("handshake timed out after {HANDSHAKE_TIMEOUT:?}"))??;
     let (ctrl_send, ctrl_recv) = (send, recv);
     let join_live = joined.is_some();
+    let reframe_to = joined.as_ref().map(|(_, view)| {
+        (
+            punktfunk_core::video_fit::VideoFit::from_wire(hello.video_fit),
+            *view,
+        )
+    });
+    // Filled by the stream thread's encoder open; the input thread reads it.
+    let frame_map = input::FrameMap::default();
     let gamescope_hold =
         (compositor == Some(crate::vdisplay::Compositor::Gamescope)).then(GamescopeHold::new);
     // Live reconfigure is off for gamescope (resize must not relaunch the title),
@@ -1674,7 +1682,8 @@ pub(crate) async fn run_admitted(
     // so keep-alive hands a kept spawn back to the same client. Minted after handshake, before
     // the input/audio threads (`compositor::session_is_isolated`).
     #[cfg(target_os = "linux")]
-    let isolation: Option<crate::vdisplay::SessionIsolation> = match joined.as_ref() {
+    let isolation: Option<crate::vdisplay::SessionIsolation> = match joined.as_ref().map(|(d, _)| d)
+    {
         // A joiner uses the owner's planes: its input relay and sink. A second mic source of the
         // same name would split the owner's, so this session's mic stays on the shared one.
         Some(d) => d
@@ -1740,11 +1749,22 @@ pub(crate) async fn run_admitted(
         // Read HOST_CAP_PAD_AUDIO back off Welcome so the input thread cannot disagree.
         let pad_audio_on = welcome.host_caps & punktfunk_core::quic::HOST_CAP_PAD_AUDIO != 0;
         let grants = session_grants.clone();
+        let frame_map = frame_map.clone();
         std::thread::Builder::new()
             .name("punktfunk1-input".into())
             .spawn({
                 let input_route = input_route.clone();
-                move || input_thread(input_rx, conn, input_route, gamepad, pad_audio_on, grants)
+                move || {
+                    input_thread(
+                        input_rx,
+                        conn,
+                        input_route,
+                        gamepad,
+                        pad_audio_on,
+                        grants,
+                        frame_map,
+                    )
+                }
             })
             .context("spawn input thread")?
     };
@@ -2266,6 +2286,8 @@ pub(crate) async fn run_admitted(
                         launch_target,
                         client_hdr,
                         join_live,
+                        reframe_to,
+                        frame_map,
                         bringup: bringup_dp,
                         resize_ms: resize_ms_dp,
                         wire_sock,

@@ -511,6 +511,11 @@ impl Encoder {
         })
     }
 
+    /// Take only `crop` (`x, y, width, height`) of every later picture; `None` is the whole.
+    pub fn set_source_crop(&mut self, crop: Option<[u32; 4]>) {
+        self.vpp.crop = crop;
+    }
+
     /// Ingest a `width`×`height` packed RGB picture from the CPU — eight-bit or
     /// ten-bit, by `fourcc` — uploaded to a staging surface and converted on the
     /// GPU into the next input surface at the session's depth. A picture larger

@@ -295,8 +295,9 @@ pub(super) async fn negotiate(
     // Gamescope sub-mode as a value, not process env — a concurrent connect would overwrite env.
     Option<crate::vdisplay::GamescopeRoute>,
     Option<super::stream::PrepHandle>,
-    // Admitted by `mode_conflict: join`: the owner's display, which this session shares.
-    Option<crate::vdisplay::admission::LiveDisplay>,
+    // Admitted by `mode_conflict: join`: the owner's display, which this session shares, and
+    // the size this client asked for.
+    Option<(crate::vdisplay::admission::LiveDisplay, (u32, u32))>,
 )> {
     let mut hello = Hello::decode(first).map_err(|e| anyhow!("Hello decode: {e:?}"))?;
     if hello.abi_version != punktfunk_core::WIRE_VERSION {
@@ -385,6 +386,7 @@ pub(super) async fn negotiate(
                     live = %format_args!("{}x{}@{}", m.0, m.1, m.2),
                     "mode-conflict: JOIN — admitting at the live display's mode"
                 );
+                let view = (hello.mode.width, hello.mode.height);
                 hello.mode.width = m.0;
                 hello.mode.height = m.1;
                 hello.mode.refresh_hz = m.2;
@@ -397,7 +399,7 @@ pub(super) async fn negotiate(
                         "mode-conflict: JOIN — this client's launch dropped; it shares the owner's game"
                     );
                 }
-                joined = Some(display);
+                joined = Some((display, view));
             }
             Admission::Steal(victims) => {
                 tracing::info!(
@@ -427,10 +429,7 @@ pub(super) async fn negotiate(
     let (mut compositor, mut gamescope_route) =
         negotiate_compositor(source, &hello, conn.peer_fingerprint()).await?;
     // A joiner streams the owner's display, so it runs on the owner's compositor and route.
-    if let Some(d) = joined
-        .as_ref()
-        .filter(|d: &&crate::vdisplay::admission::LiveDisplay| d.compositor.is_some())
-    {
+    if let Some((d, _)) = joined.as_ref().filter(|(d, _)| d.compositor.is_some()) {
         compositor = d.compositor;
         gamescope_route = d.route.clone();
     }

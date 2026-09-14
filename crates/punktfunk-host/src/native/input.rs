@@ -600,6 +600,43 @@ const RUMBLE_STOP_BURST: u8 = 2;
 /// Do not take or reset `rumble_seq`. The client gates with a wrapping
 /// half-space compare and never resets (`client/pump/datagram_task.rs`);
 /// resetting here is the bug in [`tests::rumble_seq_survives_a_removal_so_the_client_gate_accepts`].
+/// The session encoder's framing of the captured picture. Default maps nothing.
+pub(super) type FrameMap = Arc<std::sync::Mutex<punktfunk_core::video_fit::Reframe>>;
+
+/// Moves absolute pointer and touch input from a cropped picture back to the source. A scale
+/// alone needs nothing: injectors already normalise by the event's own extent.
+fn reframe_input(ev: &mut InputEvent, map: &punktfunk_core::video_fit::Reframe) {
+    let absolute = matches!(
+        ev.kind,
+        InputKind::MouseMoveAbs | InputKind::TouchDown | InputKind::TouchMove
+    );
+    let extent = (f64::from(ev.flags >> 16), f64::from(ev.flags & 0xffff));
+    if !absolute || !map.is_cropped() || extent.0 == 0.0 || extent.1 == 0.0 {
+        return;
+    }
+    let (x, y) = map.to_source(f64::from(ev.x), f64::from(ev.y), extent);
+    ev.x = x.round() as i32;
+    ev.y = y.round() as i32;
+    ev.flags = (map.source.0.min(0xffff) << 16) | map.source.1.min(0xffff);
+}
+
+/// [`reframe_input`] for a stylus batch, whose samples are `0..=1` of the picture.
+fn reframe_pen(
+    batch: &punktfunk_core::quic::PenBatch,
+    map: &punktfunk_core::video_fit::Reframe,
+) -> punktfunk_core::quic::PenBatch {
+    if !map.is_cropped() {
+        return *batch;
+    }
+    let (sw, sh) = (f64::from(map.source.0), f64::from(map.source.1));
+    let mut samples = batch.samples().to_vec();
+    for s in &mut samples {
+        let (x, y) = map.to_source(f64::from(s.x), f64::from(s.y), (1.0, 1.0));
+        (s.x, s.y) = ((x / sw) as f32, (y / sh) as f32);
+    }
+    punktfunk_core::quic::PenBatch::new(batch.seq, &samples)
+}
+
 fn clear_pad_feedback(state: &mut RumbleLevels, seen: &mut bool, stop_burst: &mut u8) {
     *state = (0, 0, 0, 0);
     *seen = false;
@@ -665,6 +702,7 @@ pub(super) fn input_thread(
     // below are deny-at-setup: without `GRANT_GAMEPAD` no arm that could create
     // a virtual pad or pad-audio streamer runs. One relaxed load per item.
     grants: Arc<AtomicU32>,
+    frame_map: FrameMap,
 ) {
     let mut pads = Pads::new(gamepad);
     // 0xD1 streamers; `pad_audio_on` is the negotiated Welcome cap.
@@ -732,7 +770,10 @@ pub(super) fn input_thread(
             Ok(ClientInput::Pen(batch))
                 if grants.load(Ordering::Relaxed) & punktfunk_core::quic::GRANT_POINTER != 0 =>
             {
-                pen.apply(&batch)
+                pen.apply(&reframe_pen(
+                    &batch,
+                    &frame_map.lock().unwrap_or_else(|e| e.into_inner()),
+                ))
             }
             // Same classify as dispatch. Resource-creating arms (virtual pads,
             // pad-audio) stay unreachable if an upstream filter regresses.
@@ -882,6 +923,11 @@ pub(super) fn input_thread(
                             }
                             _ => {}
                         }
+                        let mut ev = ev;
+                        reframe_input(
+                            &mut ev,
+                            &frame_map.lock().unwrap_or_else(|e| e.into_inner()),
+                        );
                         // Host-lifetime injector. Send error = service gone; input is lossy.
                         let _ = inj_tx.send(ev);
                     }
@@ -1029,6 +1075,44 @@ pub(super) fn input_thread(
 mod tests {
     use super::*;
     use punktfunk_core::input::{InputEvent, InputKind};
+
+    #[test]
+    fn a_cropped_joiner_points_into_the_owner_picture() {
+        use punktfunk_core::video_fit::{Reframe, VideoFit};
+        let map = Reframe::plan(VideoFit::Crop, (3840, 2160), (2400, 1080));
+        let mut ev = InputEvent {
+            kind: InputKind::TouchDown,
+            _pad: [0; 3],
+            code: 1,
+            x: 2400,
+            y: 1080,
+            flags: (2400 << 16) | 1080,
+        };
+        reframe_input(&mut ev, &map);
+        assert_eq!((ev.x, ev.y, ev.flags), (3840, 1944, (3840 << 16) | 2160));
+        // Keys and an unframed session pass through.
+        let key = InputEvent {
+            kind: InputKind::KeyDown,
+            ..ev
+        };
+        let mut k = key;
+        reframe_input(&mut k, &map);
+        assert_eq!(k, key);
+        let mut e = ev;
+        reframe_input(&mut e, &Reframe::default());
+        assert_eq!(e, ev);
+
+        let pen = punktfunk_core::quic::PenSample {
+            x: 0.5,
+            y: 0.0,
+            ..Default::default()
+        };
+        let out = reframe_pen(&punktfunk_core::quic::PenBatch::new(7, &[pen]), &map);
+        assert_eq!(
+            (out.seq, out.samples()[0].x, out.samples()[0].y),
+            (7, 0.5, 0.1)
+        );
+    }
 
     /// Mid-stream compositor switch: later events land on the new target.
     #[test]

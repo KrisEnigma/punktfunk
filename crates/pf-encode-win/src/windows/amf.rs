@@ -1972,6 +1972,7 @@ impl Encoder for AmfEncoder {
             intra_refresh_recovery: false,
             intra_refresh_period: 0,
             downscales_input: false,
+            crops_input: false,
         }
     }
 
