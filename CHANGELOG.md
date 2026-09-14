@@ -14,6 +14,64 @@ short; the version-bump commit retitles it. Older sections stay as they are.
 
 ---
 
+## v0.38.0
+
+96 commits since v0.37.0. Wire stays 2. **C ABI 32**, additive. Driver protocol floor stays 9.
+Deep dive: `git log v0.37.0..v0.38.0`
+
+### Versions
+
+| | v0.37.0 | v0.38.0 | Notes |
+|---|---|---|---|
+| Wire protocol | 2 | **2** | unchanged; optional Hello `video_fit` byte, `CompositorPref` 5 (Hyprland) and 6 (Windows) |
+| C ABI | 30 | **32** | Additive: `punktfunk_demo_host_*` (31), `punktfunk_connection_{set_pad_mouse,pad_mouse,live_pads}` (31), `punktfunk_connect_ex12` with `video_fit` (32), `PUNKTFUNK_VIDEO_FIT_*`, `PUNKTFUNK_COMPOSITOR_{HYPRLAND,WINDOWS}` |
+| Rust edition | 2024 | **2024** | unchanged |
+| MSRV (`rust-version`) | 1.85 | **1.85** | unchanged |
+| Workspace crate dirs | 32 | **32** | unchanged |
+| Virtual-display driver protocol | 9 | **9** | unchanged; a 0.37.0 driver serves a 0.38.0 host |
+| Windows virtual-gamepad channel | 3 | **3** | unchanged |
+| Plugin index schema | 1 | **1** | unchanged |
+| Host event schema | 1 | **1** | unchanged |
+| `api/openapi.json` | 0.37.0 | **0.38.0** | `pnp_disable_monitors` description only |
+| gamescope patch level (`+pfhdrN`) | 10 | **11** | Patch 0013 repaints on Steam overlay commits. The host requires nothing new |
+| `@punktfunk/host` (SDK) | 0.2.0 | **0.2.0** | unchanged; generated doc text follows the spec |
+| `@punktfunk/plugin-kit` | 0.4.6 | **0.4.6** | unchanged; `launcher_ui` doc table lists the Windows values |
+
+### Breaking
+
+- **C ABI 32.** Additive: the loopback demo host, controller mouse and `connect_ex12`. An embedder
+  that checks `punktfunk_abi_version()` must rebuild against the new header.
+
+### Knobs
+
+- Picture fit: `video_fit` (`fit` · `crop` · `stretch`, default `fit`) joins client settings and
+  the preset overlay. `clients/shared/video-fit-vectors.json` is the placement contract the Swift,
+  Kotlin and TypeScript ports run. A host that reframes a joined picture sends frames whose size
+  differs from the negotiated mode; place against the decoded size.
+- Wire: Hello carries the client's `video_fit`; Fit sends no byte, so a default Hello is
+  byte-identical. `CompositorPref` gains Hyprland (5) and Windows (6). Older peers decode both as
+  Auto, and the wlroots byte still resolves to Hyprland when that session is live.
+- JNI: `nativeSetPadMouse(handle, mask): Boolean`, `nativePadMouse(handle): Int`,
+  `nativeVideoSourceCrop(handle, l, t, r, b)` and `nativeVideoDecodedSize(handle): IntArray?`.
+  Rebuild the kit.
+- Linux host: a session asking for HDR and 4:4:4 negotiates 10-bit 4:2:0. Windows keeps both.
+- GameStream `apps.json` entries take an optional `icon` mark token (`monitor`, `steam`, …) that
+  picks the `/appasset` tile when there is no cover.
+- Packagers: the sysext helper, in-app updater and Steam Deck scripts try-restart
+  `punktfunk-scripting` with the host.
+- `pf-console-ui`'s `Ring` is public for GL hosts. `PUNKTFUNK_DOWNSCALE=bicubic` puts the Apple
+  presenter back on the shader scaler for A/B; App Store builds can't set it.
+
+- `display-settings.json` schema 2: `pnp_disable_monitors` defaults on. A v1 file turns it on once
+  at load; turning it off writes v2, which stays off. `PUNKTFUNK_STANDBY_SINK_KEEP` now vetoes both
+  PnP passes.
+- `launcher_ui` on a Windows host takes `epic`, `gog` and `xbox` beside `playnite`. A value whose
+  app is missing drops the tile and still syncs the games.
+- The library provider `PUT` accepts 16 MiB. An out-of-range `release_year` or `players` reads as
+  absent instead of failing the whole reconcile.
+- `PunktfunkProbeResult.elapsed_ms` carries the live receive window on a partial read; the final
+  figure once `done` is unchanged.
+
 ## v0.37.0
 
 158 commits since v0.36.0. Wire stays 2. **C ABI 30**, additive. **Driver protocol floor 9.**
