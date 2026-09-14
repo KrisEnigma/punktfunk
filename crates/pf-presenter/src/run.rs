@@ -717,6 +717,7 @@ fn run_inner(mut opts: SessionOpts, mut mode: ModeCtl) -> Result<Option<Outcome>
     let mut text_input_on = false;
     // Ring Keyboard slot: hold text input on, which summons Steam's OSK under gamescope.
     let mut ring_keyboard = false;
+    let mut overlay_damage = OverlayDamage::default();
 
     let outcome = 'main: loop {
         // Block in SDL's wait: input/window events and decoded frames (FrameWake) all
@@ -1815,6 +1816,7 @@ fn run_inner(mut opts: SessionOpts, mut mode: ModeCtl) -> Result<Option<Outcome>
                 }
             }
         }
+        overlay_damage.rendered(overlay_frame.as_ref().map(|f| f.image));
 
         let mut presented_video = false;
         if let Some(st) = &mut stream {
@@ -2151,6 +2153,7 @@ fn run_inner(mut opts: SessionOpts, mut mode: ModeCtl) -> Result<Option<Outcome>
                 };
                 if did_present {
                     presented_video = true;
+                    overlay_damage.video_presented(Instant::now());
                     let (import_us, submit_us) = presenter.last_timings();
                     st.win_import_us.push(import_us);
                     st.win_submit_us.push(submit_us);
@@ -2275,13 +2278,15 @@ fn run_inner(mut opts: SessionOpts, mut mode: ModeCtl) -> Result<Option<Outcome>
             }
         }
 
-        // Composite the overlay every iteration when no video frame drove a present but
-        // something on-screen still animates: browse-idle, or a mid-stream resize scrim
-        // (the host rebuild leaves a gap with no frames — without this the spinner freezes).
+        // Present the overlay alone when no video frame carried it: every pass while it
+        // animates over no video (browse-idle, or a resize scrim across the host's rebuild
+        // gap), and once per change after a mid-stream picture has gone still.
         let resize_scrim = stream.as_ref().is_some_and(|s| s.resize_overlay.active());
         let browse_idle = matches!(mode, ModeCtl::Browse(_))
             && stream.as_ref().is_none_or(|s| s.connector.is_none());
-        if !presented_video && (resize_scrim || browse_idle) {
+        let still_picture = stream.as_ref().is_some_and(|s| s.last_video.is_some())
+            && overlay_damage.take_due(Instant::now());
+        if !presented_video && (resize_scrim || browse_idle || still_picture) {
             // The UI owns the screen: hand the swapchain back to SDR. A finished PQ stream
             // leaves HDR10 live, and UI presents carry no frame. Not applied to
             // `resize_scrim`: that gap is still an HDR session, and flipping would rebuild
@@ -2464,6 +2469,44 @@ fn resize_decision(
         return ResizeAction::Settled(None);
     }
     ResizeAction::Settled(Some(target))
+}
+
+/// Overlay changes no video present has carried to the glass. A still host desktop sends
+/// no frames, so an opened ring or a new OSD line would stay invisible while the ring
+/// holds the pad, and the menu would read as frozen.
+#[derive(Default)]
+struct OverlayDamage {
+    image: Option<ash::vk::Image>,
+    dirty: bool,
+    video_at: Option<Instant>,
+}
+
+impl OverlayDamage {
+    /// Video quiet this long hands the overlay its own presents: longer than a live
+    /// stream's frame gap, short enough that the ring opens without a visible lag.
+    const VIDEO_QUIET: Duration = Duration::from_millis(100);
+
+    /// Once per pass, after `Overlay::frame`. A re-render lands in the other ring slot.
+    fn rendered(&mut self, image: Option<ash::vk::Image>) {
+        self.dirty |= image != self.image;
+        self.image = image;
+    }
+
+    /// A video present composited the current overlay.
+    fn video_presented(&mut self, now: Instant) {
+        self.dirty = false;
+        self.video_at = Some(now);
+    }
+
+    /// The overlay changed over a picture that has gone still: present it once.
+    fn take_due(&mut self, now: Instant) -> bool {
+        let still = self
+            .video_at
+            .is_some_and(|t| now.duration_since(t) >= Self::VIDEO_QUIET);
+        let due = self.dirty && still;
+        self.dirty &= !due;
+        due
+    }
 }
 
 /// Resize-in-progress overlay. A mid-stream Match-window switch takes the host a rebuild
@@ -3225,6 +3268,30 @@ fn desktop_extras(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn overlay_damage_presents_a_changed_overlay_only_over_a_still_picture() {
+        use ash::vk::Handle as _;
+        let (a, b) = (ash::vk::Image::from_raw(1), ash::vk::Image::from_raw(2));
+        let quiet = OverlayDamage::VIDEO_QUIET;
+        let t0 = Instant::now();
+        let mut d = OverlayDamage::default();
+        // No video yet: nothing to present over.
+        d.rendered(Some(a));
+        assert!(!d.take_due(t0 + quiet));
+        // Live video carries the change.
+        d.video_presented(t0);
+        d.rendered(Some(b));
+        assert!(!d.take_due(t0 + quiet / 2));
+        // The picture went still: the change presents once.
+        assert!(d.take_due(t0 + quiet));
+        assert!(!d.take_due(t0 + quiet * 2));
+        // An unchanged overlay does not; closing it does.
+        d.rendered(Some(b));
+        assert!(!d.take_due(t0 + quiet * 2));
+        d.rendered(None);
+        assert!(d.take_due(t0 + quiet * 2));
+    }
 
     /// KDE fractional scaling advertises points; "Native" must recover the panel pixels.
     #[test]
