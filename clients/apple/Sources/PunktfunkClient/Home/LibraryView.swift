@@ -552,10 +552,11 @@ struct LibraryView: View {
             sectionHeader(section.label)
                 .padding(.horizontal)
             ScrollView(.horizontal, showsIndicators: false) {
-                LazyHStack(alignment: .top, spacing: 14) {
+                LazyHStack(alignment: .top, spacing: Self.rowSpacing) {
                     content()
                 }
                 .padding(.horizontal)
+                .padding(.vertical, Self.rowLift)
             }
         }
     }
@@ -584,7 +585,17 @@ struct LibraryView: View {
         return LibrarySectionLayout(stored: sectionsRaw)
     }
 
+    /// A row's poster width: the grid's column minimum, so a row's posters match the grid's. On a
+    /// TV the posters also need room around them for the focused one to grow into.
+    #if os(tvOS)
+    private var rowTileWidth: CGFloat { 220 }
+    private static let rowSpacing: CGFloat = 40
+    private static let rowLift: CGFloat = 20
+    #else
     private var rowTileWidth: CGFloat { 132 }
+    private static let rowSpacing: CGFloat = 14
+    private static let rowLift: CGFloat = 0
+    #endif
 
     /// The shelf the search leaves, launchers included, in the host's order.
     private var shelfGames: [GameEntry] {
@@ -789,8 +800,13 @@ struct LibraryView: View {
     }
 
     private func sectionHeader(_ text: String) -> some View {
-        Text(text)
-            .font(.geist(12, .semibold, relativeTo: .caption))
+        #if os(tvOS)
+        let size: CGFloat = 24
+        #else
+        let size: CGFloat = 12
+        #endif
+        return Text(text)
+            .font(.geist(size, .semibold, relativeTo: .caption))
             .tracking(1.1)
             .foregroundStyle(.secondary)
     }
@@ -1182,6 +1198,14 @@ struct GameCard: View {
     /// A line under the title for what the current sort or section is about.
     var caption: String? = nil
 
+    #if os(tvOS)
+    private static let titleSize: CGFloat = 22
+    private static let captionSize: CGFloat = 19
+    #else
+    private static let titleSize: CGFloat = 12
+    private static let captionSize: CGFloat = 11
+    #endif
+
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             PosterImage(
@@ -1204,13 +1228,13 @@ struct GameCard: View {
                     if isRunning { RunningBadge(compact: true) }
                 }
             Text(game.title)
-                .font(.geist(12, relativeTo: .caption))
+                .font(.geist(Self.titleSize, relativeTo: .caption))
                 // Two lines held for every title, so every tile in a row stands the same height.
                 .lineLimit(2, reservesSpace: true)
                 .foregroundStyle(.secondary)
             if let caption {
                 Text(caption)
-                    .font(.geist(11, relativeTo: .caption2))
+                    .font(.geist(Self.captionSize, relativeTo: .caption2))
                     .foregroundStyle(.tertiary)
                     .lineLimit(1, reservesSpace: true)
             }

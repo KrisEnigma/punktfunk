@@ -1,17 +1,21 @@
-// The Library tab (design/apple-touch-ui-overhaul.md §2.5) and the Mac's Library row: one shelf,
-// picked from the host filter over it and remembered. `LibraryView` owns the fetch, cache, wake
-// and art; this view picks the shelf, and what to say with no paired host. A written
-// `libraryTarget` lands here through ContentView's `showShelfInTab` or `showShelfInSidebar`.
+// The Library tab (design/apple-touch-ui-overhaul.md §2.5) on iPhone, iPad and Apple TV, and the
+// Mac's Library row: one shelf, picked from the host filter over it and remembered. `LibraryView`
+// owns the fetch, cache, wake and art; this view picks the shelf, and what to say with no paired
+// host. A written `libraryTarget` lands here through ContentView's `showShelfInTab` or
+// `showShelfInSidebar`.
 
-#if os(iOS) || os(macOS)
 import PunktfunkKit
 import SwiftUI
 
-#if os(iOS)
-/// The touch UI's two destinations: the remote-desktop face and the gaming face.
+#if os(iOS) || os(tvOS)
+/// The touch UI's destinations: the remote-desktop face and the gaming face. A TV adds Settings,
+/// which a remote reaches best from the tab bar.
 enum TouchTab: Hashable {
     case hosts
     case library
+    #if os(tvOS)
+    case settings
+    #endif
 }
 #endif
 
@@ -100,19 +104,45 @@ private struct ShelfFilter: View {
     var body: some View {
         ScrollViewReader { proxy in
             ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 8) {
+                HStack(spacing: chipSpacing) {
                     ForEach(shelves) { shelf in
                         chip(shelf).id(shelf.id)
                     }
                 }
                 .padding(.horizontal)
-                .padding(.vertical, 2)
+                .padding(.vertical, chipLift)
             }
             // The row is rebuilt with each shelf, so bring the current chip back into view.
             .onAppear { proxy.scrollTo(current) }
         }
     }
 
+    #if os(tvOS)
+    /// The system's capsule buttons, which draw the focus a remote needs: the pick is the
+    /// prominent one, since a tinted bordered button paints its label in the tint.
+    @ViewBuilder private func chip(_ shelf: LibraryTarget) -> some View {
+        let button = Button { pick(shelf.id) } label: {
+            HStack(spacing: 10) {
+                if let mark = osIconImage(for: shelf.host.osChain) {
+                    mark.resizable().scaledToFit().frame(width: 28, height: 28)
+                }
+                Text(shelf.title(in: presets))
+                    .lineLimit(1)
+            }
+        }
+        .buttonBorderShape(.capsule)
+        if shelf.id == current {
+            button.buttonStyle(.borderedProminent).tint(Color.brand)
+                .accessibilityAddTraits(.isSelected)
+        } else {
+            button.buttonStyle(.bordered)
+        }
+    }
+
+    private let chipSpacing: CGFloat = 24
+    /// Room for the focused chip to grow without the scroll view clipping it.
+    private let chipLift: CGFloat = 16
+    #else
     private func chip(_ shelf: LibraryTarget) -> some View {
         let on = shelf.id == current
         return Button { pick(shelf.id) } label: {
@@ -133,5 +163,8 @@ private struct ShelfFilter: View {
         .buttonStyle(.plain)
         .accessibilityAddTraits(on ? .isSelected : [])
     }
+
+    private let chipSpacing: CGFloat = 8
+    private let chipLift: CGFloat = 2
+    #endif
 }
-#endif

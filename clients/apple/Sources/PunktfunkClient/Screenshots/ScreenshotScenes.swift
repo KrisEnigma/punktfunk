@@ -192,6 +192,15 @@ enum ShotScenes {
             AnyView(LibrarySectionsPanel(shotLayout: "desktops,favorites,recent,-launchers,games"))
         })
         #endif
+        #if os(tvOS)
+        // The TV's tab bar: the hosts, and the Library tab on the mock catalog.
+        scenes.append(ShotScene(name: "20-tv-hosts-tab", orientation: .natural, colorScheme: .dark) {
+            AnyView(ShotTVTabs(tab: .hosts))
+        })
+        scenes.append(ShotScene(name: "20b-tv-library-tab", orientation: .natural, colorScheme: .dark) {
+            AnyView(ShotTVTabs(tab: .library))
+        })
+        #endif
         scenes.append(ShotScene(name: "10-edithost", orientation: .natural, colorScheme: .dark) {
             AnyView(ShotEditHost())
         })
@@ -390,6 +399,27 @@ private struct ShotHome: View {
         #endif
     }
 }
+
+#if os(tvOS)
+/// The TV's tab bar as the app draws it, over the mock hosts and catalog.
+private struct ShotTVTabs: View {
+    let tab: TouchTab
+
+    var body: some View {
+        TabView(selection: .constant(tab)) {
+            ShotHome()
+                .tabItem { Label("Hosts", systemImage: "desktopcomputer") }
+                .tag(TouchTab.hosts)
+            ShotLibraryFilter()
+                .tabItem { Label("Library", systemImage: "square.grid.2x2") }
+                .tag(TouchTab.library)
+            NavigationStack { SettingsView() }
+                .tabItem { Label("Settings", systemImage: "gearshape") }
+                .tag(TouchTab.settings)
+        }
+    }
+}
+#endif
 
 // MARK: - Library
 

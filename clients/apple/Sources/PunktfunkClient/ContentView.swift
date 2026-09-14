@@ -98,13 +98,11 @@ struct ContentView: View {
     @State private var awaitingApproval: ApprovalRequest?
     @State private var speedTestTarget: StoredHost?
     @State private var libraryTarget: LibraryTarget?
-    #if os(iOS)
-    /// The touch UI's tab. A written `libraryTarget` lands on the Library tab.
+    #if os(iOS) || os(tvOS)
+    /// The touch and TV UIs' tab. A written `libraryTarget` lands on the Library tab.
     @State private var touchTab: TouchTab = .hosts
     #endif
-    #if os(iOS) || os(macOS)
     @AppStorage(DefaultsKey.libraryShelf) private var libraryShelfID = ""
-    #endif
     #if os(macOS)
     /// The Mac's source-list selection. A written `libraryTarget` opens the Library row on it.
     @State private var macDestination: MacDestination = .hosts
@@ -713,9 +711,10 @@ struct ContentView: View {
     }
     #endif
 
-    #if os(iOS)
-    /// In the touch UI a shelf is a tab, not a presentation: a written `libraryTarget` becomes the
-    /// Library tab's shelf and clears, so the gamepad shell never inherits it as an open layer.
+    #if os(iOS) || os(tvOS)
+    /// In the touch and TV UIs a shelf is a tab, not a presentation: a written `libraryTarget`
+    /// becomes the Library tab's shelf and clears, so the gamepad shell never inherits it as an
+    /// open layer.
     private func showShelfInTab() {
         guard !gamepadUIActive, let shelf = libraryTarget else { return }
         libraryShelfID = shelf.id
@@ -1030,14 +1029,10 @@ struct ContentView: View {
                 }
                 #endif
             } else {
-                #if os(iOS)
                 touchTabs
                     // On appear too: `returnToLibrary` writes the shelf while the stream is still up.
                     .onAppear(perform: showShelfInTab)
                     .onChange(of: libraryTarget) { _, _ in showShelfInTab() }
-                #else
-                touchHome
-                #endif
             }
         }
         #endif
@@ -1057,6 +1052,7 @@ struct ContentView: View {
     }
     #endif
 
+    #if os(iOS) || os(tvOS)
     #if os(iOS)
     /// Hosts and Library. On iPadOS 18 the tab bar turns into a sidebar at a tap, as iPad apps do;
     /// iOS 17 keeps the plain tab bar.
@@ -1080,6 +1076,24 @@ struct ContentView: View {
             }
         }
     }
+    #else
+    /// Hosts, Library and Settings as the TV's top tab bar: one swipe up reaches it from anywhere,
+    /// and Menu inside a tab returns to it.
+    private var touchTabs: some View {
+        TabView(selection: $touchTab) {
+            touchHome
+                .tabItem { Label("Hosts", systemImage: "desktopcomputer") }
+                .tag(TouchTab.hosts)
+            libraryTab
+                .tabItem { Label("Library", systemImage: "square.grid.2x2") }
+                .tag(TouchTab.library)
+            NavigationStack { SettingsView() }
+                .tvPushSlide()
+                .tabItem { Label("Settings", systemImage: "gearshape") }
+                .tag(TouchTab.settings)
+        }
+    }
+    #endif
 
     private var libraryTab: some View {
         LibraryTabView(
