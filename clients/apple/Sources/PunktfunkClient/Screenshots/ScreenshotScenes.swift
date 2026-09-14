@@ -254,6 +254,13 @@ enum ShotScenes {
         scenes.append(ShotScene(name: "25b-tv-library-customize", orientation: .natural, colorScheme: .dark) {
             AnyView(LibrarySectionsPanel(shotLayout: "desktops,favorites,recent,-launchers,games"))
         })
+        // Cover cards, the first focused, and the tab's games grid first, for its gaps.
+        scenes.append(ShotScene(name: "25c-tv-cards-focus", orientation: .natural, colorScheme: .dark) {
+            AnyView(ShotTVCards())
+        })
+        scenes.append(ShotScene(name: "25d-tv-library-grid", orientation: .natural, colorScheme: .dark) {
+            AnyView(ShotTVLibraryGrid())
+        })
         #endif
         scenes.append(ShotScene(name: "10-edithost", orientation: .natural, colorScheme: .dark) {
             AnyView(ShotEditHost())
@@ -504,6 +511,35 @@ private struct ShotTVSettingsRowFocus: View {
         var view = SettingsView()
         view.shotFocusesPane = true
         return view
+    }
+}
+
+/// Cover cards with the first focused, as the Library draws them. No tab bar, which takes focus
+/// first.
+private struct ShotTVCards: View {
+    var body: some View {
+        HStack(alignment: .top, spacing: 40) {
+            ForEach(Array(ShotMock.games.prefix(4))) { game in
+                Button {} label: {
+                    GameCard(game: game, artLoader: ShotPosterArt.source, caption: "2 hr ago")
+                }
+                .buttonStyle(TVCardButtonStyle())
+                .frame(width: 220)
+            }
+        }
+    }
+}
+
+/// The Library tab with its games grid first, for the grid's gaps.
+private struct ShotTVLibraryGrid: View {
+    var body: some View {
+        NavigationStack {
+            LibraryView(
+                store: ShotMock.pageStore, target: LibraryTarget(host: ShotMock.pageStore.hosts[0]),
+                onLaunch: { _ in }, inTab: true,
+                shotPhase: .catalog(ShotMock.games, running: []),
+                shotLayout: "games,desktops,favorites,recent,launchers")
+        }
     }
 }
 #endif

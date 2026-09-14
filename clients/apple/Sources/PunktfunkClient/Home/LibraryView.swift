@@ -616,10 +616,13 @@ struct LibraryView: View {
     private var rowTileWidth: CGFloat { 220 }
     private static let rowSpacing: CGFloat = 40
     private static let rowLift: CGFloat = 20
+    /// The grid's gap both ways: a row's, which leaves a focused card room to grow.
+    private static let gridSpacing: CGFloat = rowSpacing
     #else
     private var rowTileWidth: CGFloat { 132 }
     private static let rowSpacing: CGFloat = 14
     private static let rowLift: CGFloat = 0
+    private static let gridSpacing: CGFloat = 18
     #endif
 
     /// The shelf the search leaves, launchers included, in the host's order.
@@ -720,7 +723,7 @@ struct LibraryView: View {
     #endif
 
     private func tiles(_ entries: [GameEntry]) -> some View {
-        LazyVGrid(columns: columns, spacing: 18) {
+        LazyVGrid(columns: columns, spacing: Self.gridSpacing) {
             ForEach(entries) { game in
                 tile(game, caption: sortCaption(game))
             }
@@ -733,7 +736,13 @@ struct LibraryView: View {
         Group {
             if let launch = launchAndRemember {
                 Button { launch(game.id) } label: { card(game, caption: caption) }
+                    // A TV's plain style draws a platter round the label, a second card round the
+                    // card; this one lifts the card itself.
+                    #if os(tvOS)
+                    .buttonStyle(TVCardButtonStyle())
+                    #else
                     .buttonStyle(.plain)
+                    #endif
             } else {
                 card(game, caption: caption)
             }
@@ -852,7 +861,7 @@ struct LibraryView: View {
         let minW: CGFloat = 130
         #endif
         // Top-aligned like the shelves: a two-line title must not lift its poster above the row.
-        return [GridItem(.adaptive(minimum: minW), spacing: 18, alignment: .top)]
+        return [GridItem(.adaptive(minimum: minW), spacing: Self.gridSpacing, alignment: .top)]
     }
 
     private func errorState(_ text: String) -> some View {
@@ -1233,17 +1242,24 @@ struct GameCard: View {
     var caption: String? = nil
 
     #if os(tvOS)
+    @Environment(\.isFocused) private var focused
     private static let titleSize: CGFloat = 22
     private static let captionSize: CGFloat = 19
+    /// The card's inset round the cover, and the cover's corners: the card's less that inset, so
+    /// the two curves run parallel.
+    private static let cardPadding: CGFloat = 12
+    private static let cardRadius: CGFloat = 22
+    private static let coverRadius: CGFloat = cardRadius - cardPadding
     #else
     private static let titleSize: CGFloat = 12
     private static let captionSize: CGFloat = 11
+    private static let coverRadius: CGFloat = 10
     #endif
 
     var body: some View {
         #if os(tvOS)
-        // One card, the title on it under the poster, so the whole card lifts under focus.
-        VStack(alignment: .leading, spacing: 0) {
+        // One card, the cover inset on it and the title under it, so the whole card lifts.
+        VStack(alignment: .leading, spacing: 12) {
             poster
             VStack(alignment: .leading, spacing: 4) {
                 Text(game.title)
@@ -1256,12 +1272,15 @@ struct GameCard: View {
                         .lineLimit(1, reservesSpace: true)
                 }
             }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 14)
+            .padding(.horizontal, 8)
+            .padding(.bottom, 4)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .background(Color.primary.opacity(0.1))
-        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .padding(Self.cardPadding)
+        .background(
+            Color.primary.opacity(focused ? 0.2 : 0.1),
+            in: RoundedRectangle(cornerRadius: Self.cardRadius, style: .continuous))
+        .contentShape(RoundedRectangle(cornerRadius: Self.cardRadius, style: .continuous))
         #else
         VStack(alignment: .leading, spacing: 6) {
             poster
@@ -1286,13 +1305,10 @@ struct GameCard: View {
             icon: game.iconToken, frameID: game.id)
             .aspectRatio(2.0 / 3.0, contentMode: .fit)
             .frame(maxWidth: .infinity)
-            // On a TV the card rounds the poster's top, and its foot meets the title.
-            #if !os(tvOS)
-            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-            #endif
+            .clipShape(RoundedRectangle(cornerRadius: Self.coverRadius, style: .continuous))
             .overlay {
                 if selected {
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    RoundedRectangle(cornerRadius: Self.coverRadius, style: .continuous)
                         .strokeBorder(.tint, lineWidth: 3)
                 }
             }
@@ -1318,6 +1334,30 @@ private struct LibraryTitle: ViewModifier {
         }
     }
 }
+
+#if os(tvOS)
+/// A TV cover card's button: the card lifts under focus, with no platter round it. The card
+/// brightens its own fill (`GameCard`).
+struct TVCardButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        Lift(label: configuration.label, pressed: configuration.isPressed)
+    }
+
+    private struct Lift: View {
+        let label: ButtonStyleConfiguration.Label
+        let pressed: Bool
+        @Environment(\.isFocused) private var focused
+
+        var body: some View {
+            label
+                .scaleEffect(focused ? 1.08 : 1)
+                .shadow(color: .black.opacity(focused ? 0.45 : 0), radius: 14, y: 8)
+                .opacity(pressed ? 0.85 : 1)
+                .animation(.easeOut(duration: 0.18), value: focused)
+        }
+    }
+}
+#endif
 
 #if os(iOS) || os(macOS)
 /// The Library tab's and the Mac shelf's title search. The other presentations have none.
