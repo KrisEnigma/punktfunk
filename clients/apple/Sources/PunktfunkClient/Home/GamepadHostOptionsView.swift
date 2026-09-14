@@ -229,13 +229,14 @@ struct GamepadHostOptionsView: View {
     }
 
     private var rows: [Row] {
+        // Only where a link can be copied: tvOS has no clipboard.
+        let copyLink = LinkClipboard.isAvailable
+            ? [Row(action: .copyLink, label: copied ? "Copied" : "Copy link", icon: "link")] : []
         // A pinned card is a shortcut, not a host: everything host-level is deliberately absent.
         if pinnedPreset != nil {
-            return [
-                Row(action: .unpin, label: "Unpin card", icon: "pin.slash"),
-                Row(action: .copyLink, label: copied ? "Copied" : "Copy link", icon: "link"),
-                Row(action: .cancel, label: "Cancel", icon: "xmark"),
-            ]
+            return [Row(action: .unpin, label: "Unpin card", icon: "pin.slash")]
+                + copyLink
+                + [Row(action: .cancel, label: "Cancel", icon: "xmark")]
         }
         var list: [Row] = []
         // Waking a host that is already answering would just sit there counting seconds.
@@ -262,7 +263,7 @@ struct GamepadHostOptionsView: View {
                 action: .hostAction, label: label, icon: "power",
                 isDestructive: a.danger, hostAction: a))
         }
-        list.append(Row(action: .copyLink, label: copied ? "Copied" : "Copy link", icon: "link"))
+        list += copyLink
         list.append(Row(action: .edit, label: "Edit\u{2026}", icon: "pencil"))
         if onSendLogs != nil {
             let label: String
