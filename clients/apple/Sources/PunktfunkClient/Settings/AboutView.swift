@@ -330,12 +330,8 @@ struct AppIconView: View {
         else { return nil }
         return (Image(uiImage: image), true)
         #else
-        // tvOS ships the icon as a parallax image STACK (Back/Circle1/Circle2/Front), which has
-        // no single image to load — which is why this used to return nil and every About page on
-        // the TV drew the "P" monogram instead of the app's own mark. `AboutAppIcon` is those
-        // four layers flattened into one asset, generated from the SAME art the stack uses so it
-        // cannot drift into being a second, subtly different icon. Already masked and composited,
-        // so it needs no rounding of ours.
+        // A tvOS icon is a layered stack with no single image to load. `AboutAppIcon` is that
+        // stack flattened by scripts/render-tvos-icon.swift, which writes both; it needs no mask.
         guard let image = UIImage(named: "AboutAppIcon") else { return nil }
         return (Image(uiImage: image), false)
         #endif
