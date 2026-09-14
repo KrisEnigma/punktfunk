@@ -164,7 +164,7 @@ public final class GamepadCapture {
     /// `Select+A`, Select first, while Select is still pending its guide hold: the quick-action
     /// ring's opener (design/touch-client-overlay.md §2.6) — the first chord the host never
     /// sees. A is "jump" or "confirm" in most games, so both presses are swallowed.
-    public var onRingChord: (() -> Void)?
+    public var onRingChord: ((UInt32) -> Void)?
     /// A pad press while the ring owns the pad (`ringOpen`).
     public var onRingNav: ((RingNav) -> Void)?
     /// The ring is up: everything held is released on the host NOW (a held sprint must not
@@ -592,7 +592,7 @@ public final class GamepadCapture {
         let aPressed = raw & GamepadWire.a != 0 && slot.buttons & GamepadWire.a == 0
         if aPressed, !ringOpen, slot.buttons & GamepadWire.back != 0 {
             slot.swallowA = true
-            onRingChord?()
+            onRingChord?(slot.pad)
             raw &= ~GamepadWire.a
         }
         return raw
@@ -636,7 +636,7 @@ public final class GamepadCapture {
                 endPending(slot)
                 slot.swallowSelect = true
                 slot.swallowA = true
-                onRingChord?()
+                onRingChord?(slot.pad)
                 return raw & ~back & ~GamepadWire.a
             }
             if othersDown {

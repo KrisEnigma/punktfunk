@@ -14,6 +14,8 @@ public enum SlotId: Equatable, Sendable {
     case endStream, disconnectLinger, touchMode, keyboard, stats, mic, pad, sendText
     /// The host's guide button (Xbox / PS / Steam) and its quick-access `…`, as synthetic pad taps.
     case guide, qam
+    /// Controller mouse: the pad drives the host pointer instead of its virtual pad.
+    case padMouse
     case host(String)
     case shortcut(String)
 
@@ -30,6 +32,7 @@ public enum SlotId: Equatable, Sendable {
         case .sendText: return "send_text"
         case .guide: return "guide"
         case .qam: return "qam"
+        case .padMouse: return "pad_mouse"
         case .host(let id): return "host:\(id)"
         case .shortcut(let id): return "shortcut:\(id)"
         }
@@ -48,6 +51,7 @@ public enum SlotId: Equatable, Sendable {
         case "send_text": return .sendText
         case "guide": return .guide
         case "qam": return .qam
+        case "pad_mouse": return .padMouse
         default:
             if s.hasPrefix("host:"), s.count > 5 { return .host(String(s.dropFirst(5))) }
             if s.hasPrefix("shortcut:"), s.count > 9 { return .shortcut(String(s.dropFirst(9))) }

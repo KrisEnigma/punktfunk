@@ -717,6 +717,37 @@ public final class PunktfunkConnection: @unchecked Sendable {
     public var canUseClipboard: Bool { accessGrants & Self.grantClipboard != 0 }
     /// The session's grants allow mic injection — hide the mic UI without it.
     public var canUseMic: Bool { accessGrants & Self.grantMic != 0 }
+
+    /// Wire pads in controller mouse, a bit per pad: their buttons and sticks drive the host
+    /// pointer while the host pad sits neutral. A removed pad or a lost pointer grant clears its bit.
+    public var padMouse: UInt16 {
+        abiLock.lock()
+        defer { abiLock.unlock() }
+        guard let h = handle, !closeRequested else { return 0 }
+        var mask: UInt16 = 0
+        _ = punktfunk_connection_pad_mouse(h, &mask)
+        return mask
+    }
+
+    /// Switch the pads in `mask` to controller mouse; `0` returns every pad to passthrough.
+    /// False when the session is gone or the host did not grant pointer input.
+    @discardableResult
+    public func setPadMouse(_ mask: UInt16) -> Bool {
+        abiLock.lock()
+        defer { abiLock.unlock() }
+        guard let h = handle, !closeRequested else { return false }
+        return punktfunk_connection_set_pad_mouse(h, mask) == statusOK
+    }
+
+    /// Wire pads the host holds now, a bit per pad: declared or driven, not yet removed.
+    public var livePads: UInt16 {
+        abiLock.lock()
+        defer { abiLock.unlock() }
+        guard let h = handle, !closeRequested else { return 0 }
+        var mask: UInt16 = 0
+        _ = punktfunk_connection_live_pads(h, &mask)
+        return mask
+    }
     /// Anything about this session's access differs from the everyday full-and-permanent —
     /// the chip's visibility gate: full + permanent must look exactly like today. Compared
     /// through ``normalizedGrants(_:)`` so an old host's pre-power full mask stays chipless.
