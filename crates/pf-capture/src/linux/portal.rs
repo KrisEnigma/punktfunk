@@ -119,13 +119,13 @@ fn hdr_offer_for(heads: &[(&str, bool)], pinned: Option<&str>) -> bool {
 /// and ships `SPA_META_Cursor`; Embedded burns the pointer into every frame
 /// (gamescope: that defeats its HW plane). Prefer Metadata when `want_metadata`;
 /// otherwise Embedded — a metadata cursor with no blend stage is never drawn.
-/// A failed query defaults Embedded so an older portal does not silently hide it.
+/// Hidden only when advertised. A failed or empty query defaults Embedded.
 async fn choose_cursor_mode(
     proxy: &ashpd::desktop::screencast::Screencast,
     want_metadata: bool,
 ) -> ashpd::desktop::screencast::CursorMode {
     use ashpd::desktop::screencast::CursorMode;
-    match proxy.available_cursor_modes().await {
+    match crate::portal_rt::available_cursor_modes(proxy).await {
         Ok(avail) if want_metadata && avail.contains(CursorMode::Metadata) => {
             tracing::info!(
                 ?avail,
@@ -158,12 +158,19 @@ async fn choose_cursor_mode(
             );
             CursorMode::Metadata
         }
-        Ok(avail) => {
+        Ok(avail) if avail.contains(CursorMode::Hidden) => {
             tracing::warn!(
                 ?avail,
                 "ScreenCast: neither Metadata nor Embedded cursor advertised — cursor will be hidden"
             );
             CursorMode::Hidden
+        }
+        Ok(avail) => {
+            tracing::warn!(
+                ?avail,
+                "ScreenCast: portal advertised no cursor modes — requesting Embedded cursor"
+            );
+            CursorMode::Embedded
         }
         Err(e) => {
             tracing::warn!(
