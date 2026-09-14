@@ -48,7 +48,8 @@ final class HostPowerStore: ObservableObject {
         let key = host.id.uuidString
         // Stamp BEFORE the request, so a slow or hanging host cannot make every pass ask again.
         if let at = askedAt[key], Date().timeIntervalSince(at) < Self.ttl { return }
-        guard let pin = host.pinnedSHA256,
+        // The demo host serves no management API.
+        guard !DemoMode.isDemo(host), let pin = host.pinnedSHA256,
               let identity = (try? ClientIdentityStore.shared.load())?.identity
         else { return }
         askedAt[key] = Date()

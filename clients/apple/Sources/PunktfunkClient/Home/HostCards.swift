@@ -171,8 +171,10 @@ extension HostActions {
     ) {
         let selection: PresetSelection = pinned.map { .preset($0.id) } ?? .inherit
         // Library, speed test and logs dial with the pinned identity, and an unpinned host would
-        // accept any certificate. So they wait for a pairing.
+        // accept any certificate. So they wait for a pairing. The demo host has neither a speed
+        // test nor a log inbox.
         let paired = host.pinnedSHA256 != nil
+        let measurable = paired && !DemoMode.isDemo(host)
         let wakeable = pinned == nil && !online && !host.wakeMacs.isEmpty
             && PunktfunkConnection.wakeOnLANAvailable
         self.init(
@@ -181,8 +183,8 @@ extension HostActions {
             forget: { store.forgetIdentity(host) },
             remove: { store.remove(host) },
             browseLibrary: paired ? { surface.browse(selection) } : nil,
-            speedTest: paired ? surface.speedTest : nil,
-            sendLogs: paired ? surface.sendLogs : nil,
+            speedTest: measurable ? surface.speedTest : nil,
+            sendLogs: measurable ? surface.sendLogs : nil,
             wake: wakeable ? surface.wake : nil,
             copyLink: LinkClipboard.isAvailable
                 ? { LinkClipboard.copy(DeepLink.forHost(host, preset: pinned?.id).urlString) }

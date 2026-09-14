@@ -1041,6 +1041,11 @@ final class SessionModel: ObservableObject {
     /// answered — or when it never will. Same lane and identity as the shelf's Resume badge.
     private func watchLaunch() {
         guard let hold = launchHold?.entry, let host = activeHost else { return }
+        // The demo host has no `/status`; its title is up the moment the stream is.
+        if DemoMode.isDemo(host) {
+            revealStream()
+            return
+        }
         let port = connection.map(\.hostMgmtPort).flatMap { $0 > 0 ? $0 : nil } ?? host.effectiveMgmtPort
         guard let identity = (try? ClientIdentityStore.shared.load())?.identity else {
             revealStream()

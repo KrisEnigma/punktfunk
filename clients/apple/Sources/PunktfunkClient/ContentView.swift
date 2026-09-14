@@ -342,6 +342,7 @@ struct ContentView: View {
         }
         .animation(.easeInOut(duration: 0.3), value: model.launchHold)
         .onAppear {
+            DemoMode.resume(in: store)
             seedDefaultModeIfNeeded()
             autoConnectIfAsked()
             applyStartScreen()
@@ -1791,6 +1792,12 @@ struct ContentView: View {
         guard let target = ProcessInfo.processInfo.environment["PUNKTFUNK_AUTOCONNECT"],
               !target.isEmpty, model.phase == .idle
         else { return }
+        // `demo`: add the demo address as Add Host does, then stream from the saved record.
+        if target == "demo" {
+            store.add(StoredHost(name: "", address: DemoMode.address))
+            if let demo = store.hosts.first(where: DemoMode.isDemo) { connect(demo) }
+            return
+        }
         let parts = target.split(separator: ":")
         var host = StoredHost(name: "", address: String(parts[0]))
         if parts.count == 2, let p = UInt16(parts[1]) { host.port = p }

@@ -938,6 +938,16 @@ struct LibraryView: View {
             return
         }
         #endif
+        // The demo host serves no management API; its shelf is built in.
+        if DemoMode.isDemo(host) {
+            artLoader = DemoMode.art
+            games = DemoMode.games
+            running = [:]
+            servedFromCacheAt = nil
+            errorText = nil
+            loading = false
+            return
+        }
         loading = true
         errorText = nil
         // Dev hook, the twin of the desktop console's `PUNKTFUNK_FAKE_LIBRARY`: a file holding

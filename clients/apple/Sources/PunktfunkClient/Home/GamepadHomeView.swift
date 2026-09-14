@@ -694,7 +694,8 @@ struct GamepadHomeView: View {
                 guard let preset = target.preset else { return }
                 store.setPinned(host.id, presetID: preset.id, pinned: false)
             },
-            onSendLogs: host.pinnedSHA256 != nil ? { await SendLogs.toHost(host) } : nil,
+            onSendLogs: host.pinnedSHA256 != nil && !DemoMode.isDemo(host)
+                ? { await SendLogs.toHost(host) } : nil,
             // A pinned card is a shortcut to one preset, not a second host, so it carries no
             // host actions — the same rule the touch grid and the console menu apply.
             hostActions: target.preset == nil ? hostPower.actions(for: host) : [],

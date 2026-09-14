@@ -408,37 +408,12 @@ enum ShotMock {
         #endif
     }
 
-    /// A believable shelf for the library coverflow. Decoded rather than constructed:
-    /// `GameEntry`'s memberwise init is internal to PunktfunkKit, and Codable is its public
-    /// construction surface. The `shot://art/…` posters are answered by [`ShotPosterArt.source`]
-    /// (drawn at capture time), so the shot stays offline; the Steam launcher entry stays artless
-    /// by design and renders its brand mark.
-    static let games: [GameEntry] = {
-        // Relative to the capture, so the Recently Played captions read the same every run.
-        let now = UInt64(Date().timeIntervalSince1970 * 1000)
-        let hour: UInt64 = 3_600_000
+    /// A believable shelf for the library coverflow: the demo host's titles (`DemoMode.games`)
+    /// plus the Steam launcher, which stays artless by design and renders its brand mark.
+    static let games: [GameEntry] = DemoMode.games + {
         let json = """
-        [
-          {"id": "custom:aurora", "store": "custom", "title": "Aurora Drift",
-           "platform": "PS3", "release_year": 2009, "developer": "Nine Lanterns",
-           "genres": ["Racing"], "art": {"portrait": "shot://art/aurora"},
-           "stats": {"last_played_unix_ms": \(now - 50 * hour), "play_time_ms": 9000000,
-                     "last_run_ms": 1800000, "launch_count": 6}},
-          {"id": "steam:starfall", "store": "steam", "title": "Starfall Vale",
-           "platform": "PC", "release_year": 2024, "developer": "Meridian Foundry",
-           "genres": ["Action", "Adventure"],
-           "art": {"portrait": "shot://art/starfall"},
-           "stats": {"last_played_unix_ms": \(now - 2 * hour), "play_time_ms": 50400000,
-                     "last_run_ms": 5400000, "launch_count": 31}},
-          {"id": "heroic:neon", "store": "heroic", "title": "Neon Circuit",
-           "platform": "PC", "art": {"portrait": "shot://art/neon"},
-           "stats": {"last_played_unix_ms": \(now - 21 * 24 * hour), "play_time_ms": 2100000,
-                     "last_run_ms": 2100000, "launch_count": 2}},
-          {"id": "gog:ember", "store": "gog", "title": "Ember Peaks",
-           "art": {"portrait": "shot://art/ember"}},
-          {"id": "steam:launcher", "store": "steam", "title": "Steam", "art": {},
-           "role": "launcher", "icon": "steam"}
-        ]
+        [{"id": "steam:launcher", "store": "steam", "title": "Steam", "art": {},
+          "role": "launcher", "icon": "steam"}]
         """
         return (try? JSONDecoder().decode([GameEntry].self, from: Data(json.utf8))) ?? []
     }()
