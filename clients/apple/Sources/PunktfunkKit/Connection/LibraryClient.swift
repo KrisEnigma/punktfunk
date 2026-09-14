@@ -93,12 +93,17 @@ public struct GameEntry: Codable, Hashable, Identifiable, Sendable {
     public var publisher: String?
     public var releaseYear: Int?
     public var genres: [String]?
+    /// A short blurb, plain text.
+    public var description: String?
+    public var tags: [String]?
+    /// Maximum simultaneous local players.
+    public var players: Int?
     /// Host play stats; `nil` until the host has launched the title once.
     public var stats: GameStats?
 
     private enum CodingKeys: String, CodingKey {
         case id, store, title, art, launch, role, icon, platform
-        case developer, publisher, genres, stats
+        case developer, publisher, genres, description, tags, players, stats
         case releaseYear = "release_year"
     }
 
@@ -156,7 +161,7 @@ public enum LibraryError: LocalizedError {
     case pinMismatch
     case http(Int)
     case unreachable(String)
-    /// A library entry's art URL is not something we will fetch (only http/https).
+    /// A library entry's art URL is not something we will load (only http/https, or inline base64).
     case badArtURL
 
     /// A phrase, never a sentence. Every caller supplies the frame — the library
@@ -171,7 +176,7 @@ public enum LibraryError: LocalizedError {
         case .http(let code):
             return "the host refused it (\(code))"
         case .badArtURL:
-            return "that title's artwork address isn't a web address"
+            return "that title's artwork isn't a web address or an inline image"
         case .unreachable(let why):
             return "couldn't reach the host — \(why)"
         }
@@ -555,6 +560,17 @@ public final class LibraryArtLoader: LibraryArtSource, @unchecked Sendable {
         return fetched
     }
 
+    /// The bytes of a base64 `data:` URL — art a plugin inlined rather than linked. Base64 is the
+    /// only form the kit emits; anything else, or a body over the transport ceiling, is refused.
+    static func inlineBytes(_ url: URL) throws -> Data {
+        let s = url.absoluteString
+        guard let comma = s.firstIndex(of: ","), s[..<comma].lowercased().hasSuffix(";base64"),
+              let data = Data(base64Encoded: String(s[s.index(after: comma)...])),
+              !data.isEmpty, data.count <= MgmtTransport.maxResponseBytes
+        else { throw LibraryError.badArtURL }
+        return data
+    }
+
     /// Release this host's pooled connections — call when the library screen goes away, so we
     /// don't sit on open TLS sockets the user is finished with.
     public func close() async {
@@ -564,10 +580,11 @@ public final class LibraryArtLoader: LibraryArtSource, @unchecked Sendable {
 
     private func fetch(_ url: URL) async throws -> Data {
         guard isHostOrigin(url) else {
-            // A library entry names its own art URL, so this is host-supplied. Web schemes only —
-            // a `file:` URL would make the client read its own container and cache the result as a
-            // poster — and the same ceiling the pinned path enforces, since nothing else bounds a
-            // CDN body.
+            // A library entry names its own art URL, so this is host-supplied. Web schemes and
+            // inline `data:` only — a `file:` URL would make the client read its own container and
+            // cache the result as a poster — and the same ceiling the pinned path enforces, since
+            // nothing else bounds a CDN body.
+            if url.scheme?.lowercased() == "data" { return try Self.inlineBytes(url) }
             guard let scheme = url.scheme?.lowercased(), scheme == "https" || scheme == "http"
             else { throw LibraryError.badArtURL }
             let data = try await cdn.data(from: url).0

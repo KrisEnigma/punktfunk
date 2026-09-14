@@ -47,6 +47,11 @@ struct TitleDetailSheet: View {
                         poster
                         info
                     }
+                    if let about = game.description, !about.isEmpty {
+                        Text(about)
+                            .font(.geist(14, relativeTo: .body))
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                     if let stats = PlayStatsText.summary(game.stats) {
                         Label(stats, systemImage: "clock")
                             .font(.geist(factSize, relativeTo: .subheadline))
@@ -205,16 +210,20 @@ struct TitleDetailSheet: View {
         }
     }
 
-    /// Store · platform, then the credits, then the genres: a line only when it has something.
+    /// Store · platform, the credits, the genres (tags when there are none), then the player
+    /// count: a line only when it has something.
     private var facts: [String] {
         let credits = [
             game.developer, game.publisher == game.developer ? nil : game.publisher,
             game.releaseYear.map { String($0) },
         ]
+        let kinds = (game.genres ?? []).isEmpty ? (game.tags ?? []) : (game.genres ?? [])
+        let players = game.players.flatMap { $0 > 1 ? "Up to \($0) players" : nil }
         return [
             origin ?? "",
             credits.compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " \u{b7} "),
-            (game.genres ?? []).joined(separator: ", "),
+            kinds.joined(separator: ", "),
+            players ?? "",
         ].filter { !$0.isEmpty }
     }
     #endif
