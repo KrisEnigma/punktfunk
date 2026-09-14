@@ -160,8 +160,8 @@ pub struct GamepadService {
     escape_rx: async_channel::Receiver<()>,
     disconnect_rx: async_channel::Receiver<()>,
     menu_rx: async_channel::Receiver<MenuEvent>,
-    /// Select+A while streaming — swallowed; opens the ring.
-    ring_rx: async_channel::Receiver<()>,
+    /// Select+A while streaming — swallowed; opens the ring. Carries the pad's wire index.
+    ring_rx: async_channel::Receiver<u8>,
 }
 
 impl GamepadService {
@@ -257,8 +257,9 @@ impl GamepadService {
         self.menu_rx.clone()
     }
 
-    /// Select+A on a forwarded pad — both buttons swallowed. One event per chord.
-    pub fn ring_events(&self) -> async_channel::Receiver<()> {
+    /// Select+A on a forwarded pad — both buttons swallowed. One event per chord, carrying the
+    /// pad's wire index.
+    pub fn ring_events(&self) -> async_channel::Receiver<u8> {
         self.ring_rx.clone()
     }
 
@@ -824,7 +825,7 @@ struct Worker {
     menu_mode: bool,
     menu_nav: MenuNav,
     menu_tx: async_channel::Sender<MenuEvent>,
-    ring_tx: async_channel::Sender<()>,
+    ring_tx: async_channel::Sender<u8>,
     /// Overlay owns input: pads held neutral, slots still OPEN.
     masked: bool,
     /// In-stream ring: first slot → [`MenuEvent`]s even while masked.
@@ -1733,7 +1734,7 @@ impl Worker {
                         slot.gesture.swallow_for_ring();
                         slot.swallow_a = true;
                         slot.held_buttons.push(bit);
-                        let _ = self.ring_tx.try_send(());
+                        let _ = self.ring_tx.try_send(slot.index);
                         return;
                     }
                     let mut due = Vec::new();
@@ -2051,7 +2052,7 @@ impl Worker {
         escape_tx: async_channel::Sender<()>,
         disconnect_tx: async_channel::Sender<()>,
         menu_tx: async_channel::Sender<MenuEvent>,
-        ring_tx: async_channel::Sender<()>,
+        ring_tx: async_channel::Sender<u8>,
     ) -> Worker {
         Worker {
             subsystem,
@@ -2093,7 +2094,7 @@ fn run(
     escape_tx: &async_channel::Sender<()>,
     disconnect_tx: &async_channel::Sender<()>,
     menu_tx: &async_channel::Sender<MenuEvent>,
-    ring_tx: &async_channel::Sender<()>,
+    ring_tx: &async_channel::Sender<u8>,
 ) -> Result<(), String> {
     // Off-main-thread, no video: keep SDL away from signals; poll pads on this thread.
     sdl3::hint::set("SDL_NO_SIGNAL_HANDLERS", "1");

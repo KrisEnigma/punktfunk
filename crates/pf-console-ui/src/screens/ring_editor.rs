@@ -122,6 +122,8 @@ impl RingEditorScreen {
             touch_mode: "trackpad".into(),
             stats_tier: "Compact".into(),
             mic_available: true,
+            pad_mouse_target: 0b1,
+            pointer_granted: true,
             mode: (1920, 1080, 60),
             native_mode: (1920, 1080, 60),
             ..RingFacts::default()

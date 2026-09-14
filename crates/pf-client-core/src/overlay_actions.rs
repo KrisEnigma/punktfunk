@@ -32,6 +32,8 @@ pub enum SlotId {
     Guide,
     /// The host's quick-access button — `BTN_MISC1`, the Deck's `…`.
     Qam,
+    /// Controller mouse: the pad drives the host pointer instead of its virtual pad.
+    PadMouse,
     Host(String),
     Shortcut(String),
 }
@@ -50,6 +52,7 @@ impl SlotId {
             SlotId::SendText => "send_text".into(),
             SlotId::Guide => "guide".into(),
             SlotId::Qam => "qam".into(),
+            SlotId::PadMouse => "pad_mouse".into(),
             SlotId::Host(id) => format!("host:{id}"),
             SlotId::Shortcut(id) => format!("shortcut:{id}"),
         }
@@ -68,6 +71,7 @@ impl SlotId {
             "send_text" => SlotId::SendText,
             "guide" => SlotId::Guide,
             "qam" => SlotId::Qam,
+            "pad_mouse" => SlotId::PadMouse,
             _ => {
                 if let Some(id) = s.strip_prefix("host:").filter(|id| !id.is_empty()) {
                     SlotId::Host(id.into())
@@ -425,6 +429,7 @@ pub fn catalogue(cfg: &OverlayConfig, platform: RingPlatform) -> Vec<CatalogueGr
                     "Quick access menu",
                     "Only where the host's pad is Steam-shaped",
                 ),
+                e("pad_mouse", "Controller mouse", ""),
             ],
         },
         CatalogueGroup {
@@ -485,6 +490,7 @@ pub fn slot_icon(id: &str, state: &str) -> Option<&'static str> {
         "send_text" => "send",
         "guide" => "house",
         "qam" => "panel-right",
+        "pad_mouse" => "mouse",
         "more" => "ellipsis",
         "host:power.sleep" => "moon",
         "host:power.reboot" => "rotate-cw",
@@ -696,6 +702,7 @@ mod tests {
             "send_text",
             "guide",
             "qam",
+            "pad_mouse",
             "host:power.reboot",
             "shortcut:s2",
         ] {
