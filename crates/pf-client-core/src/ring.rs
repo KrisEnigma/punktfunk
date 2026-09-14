@@ -39,6 +39,8 @@ pub enum RingCommand {
     /// A synthetic tap of one system button on the host's pad — a `gamepad::wire::BTN_*` bit
     /// (guide or `MISC1`), the same verb the session control socket exposes.
     TapButton(u32),
+    /// Flip [`RingFacts::pad_mouse_target`] between controller mouse and passthrough.
+    TogglePadMouse,
 }
 
 /// 100 % scale, client design units (px on Skia, dp/pt on phones). Shared so editors cannot drift.
@@ -93,6 +95,13 @@ pub struct RingFacts {
     pub stats_tier: String,
     pub mic_available: bool,
     pub mic_muted: bool,
+    /// Wire pads the controller-mouse toggle acts on: the pad that opened the ring, else every
+    /// live pad. `0` = no controller.
+    pub pad_mouse_target: u16,
+    /// Every target pad is in controller mouse.
+    pub pad_mouse_on: bool,
+    /// The host grants pointer input; controller mouse needs it.
+    pub pointer_granted: bool,
     /// Live `(w, h, hz)`. `native_mode` is the Welcome native.
     pub mode: (u32, u32, u32),
     pub native_mode: (u32, u32, u32),

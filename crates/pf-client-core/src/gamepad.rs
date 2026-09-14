@@ -160,8 +160,8 @@ pub struct GamepadService {
     escape_rx: async_channel::Receiver<()>,
     disconnect_rx: async_channel::Receiver<()>,
     menu_rx: async_channel::Receiver<MenuEvent>,
-    /// Select+A while streaming — swallowed; opens the ring.
-    ring_rx: async_channel::Receiver<()>,
+    /// Select+A while streaming — swallowed; opens the ring. Carries the pad's wire index.
+    ring_rx: async_channel::Receiver<u8>,
 }
 
 impl GamepadService {
@@ -257,8 +257,9 @@ impl GamepadService {
         self.menu_rx.clone()
     }
 
-    /// Select+A on a forwarded pad — both buttons swallowed. One event per chord.
-    pub fn ring_events(&self) -> async_channel::Receiver<()> {
+    /// Select+A on a forwarded pad — both buttons swallowed. One event per chord, carrying the
+    /// pad's wire index.
+    pub fn ring_events(&self) -> async_channel::Receiver<u8> {
         self.ring_rx.clone()
     }
 
@@ -687,6 +688,13 @@ impl Slot {
     }
 }
 
+/// A pressed with Select already held opens the quick-action ring, whether or not the guide
+/// gesture is on. Select-first only: A is the ring's confirm. Once the hold became Guide, A
+/// belongs to whatever that opened on the host.
+fn opens_ring(held: &[u32], bit: u32, select_as_guide: bool) -> bool {
+    bit == wire::BTN_A && held.contains(&wire::BTN_BACK) && !select_as_guide
+}
+
 /// Hold-Select→guide ([`GUIDE_HOLD`]). Pure: transitions + clock emit `(bit, down)`
 /// pairs. Select alone is pending; another button already down passes through (the
 /// escape chord ends in Select). A button while pending makes it a real Select (deferred
@@ -715,13 +723,11 @@ impl SelectGesture {
         false
     }
 
-    /// Ring chord: nothing goes out; the Select's later release is dropped too.
-    fn swallow_for_ring(&mut self) -> bool {
+    /// Ring chord: a pending Select never goes out, so its later release is dropped too.
+    fn swallow_for_ring(&mut self) {
         if self.pending_since.take().is_some() {
             self.swallowed = true;
-            return true;
         }
-        false
     }
 
     /// Pending Select is real after all — deferred down goes out before the new button.
@@ -819,7 +825,7 @@ struct Worker {
     menu_mode: bool,
     menu_nav: MenuNav,
     menu_tx: async_channel::Sender<MenuEvent>,
-    ring_tx: async_channel::Sender<()>,
+    ring_tx: async_channel::Sender<u8>,
     /// Overlay owns input: pads held neutral, slots still OPEN.
     masked: bool,
     /// In-stream ring: first slot → [`MenuEvent`]s even while masked.
@@ -1722,11 +1728,13 @@ impl Worker {
                     if !self.system_forward && matches!(bit, wire::BTN_GUIDE | wire::BTN_MISC1) {
                         return;
                     }
-                    // Select+A, Select first: both swallowed (Select was still pending).
-                    if bit == wire::BTN_A && slot.gesture.swallow_for_ring() {
+                    // Select+A: A is withheld. A pending Select is dropped with it; one already
+                    // on the wire is lifted by the ring's mask flush.
+                    if opens_ring(&slot.held_buttons, bit, slot.gesture.as_guide) {
+                        slot.gesture.swallow_for_ring();
                         slot.swallow_a = true;
                         slot.held_buttons.push(bit);
-                        let _ = self.ring_tx.try_send(());
+                        let _ = self.ring_tx.try_send(slot.index);
                         return;
                     }
                     let mut due = Vec::new();
@@ -2044,7 +2052,7 @@ impl Worker {
         escape_tx: async_channel::Sender<()>,
         disconnect_tx: async_channel::Sender<()>,
         menu_tx: async_channel::Sender<MenuEvent>,
-        ring_tx: async_channel::Sender<()>,
+        ring_tx: async_channel::Sender<u8>,
     ) -> Worker {
         Worker {
             subsystem,
@@ -2086,7 +2094,7 @@ fn run(
     escape_tx: &async_channel::Sender<()>,
     disconnect_tx: &async_channel::Sender<()>,
     menu_tx: &async_channel::Sender<MenuEvent>,
-    ring_tx: &async_channel::Sender<()>,
+    ring_tx: &async_channel::Sender<u8>,
 ) -> Result<(), String> {
     // Off-main-thread, no video: keep SDL away from signals; poll pads on this thread.
     sdl3::hint::set("SDL_NO_SIGNAL_HANDLERS", "1");
@@ -2189,14 +2197,32 @@ mod select_gesture_tests {
         let mut out = Vec::new();
         let t = Instant::now();
         assert!(g.on_select_down(t, true, &mut out));
-        assert!(g.swallow_for_ring());
+        g.swallow_for_ring();
         assert!(out.is_empty(), "the pending press stays swallowed: {out:?}");
         assert!(
             g.on_select_up(t, &mut out),
             "the release is owned, not forwarded"
         );
         assert!(out.is_empty(), "…and emits nothing: {out:?}");
-        assert!(!g.swallow_for_ring(), "no pending Select ⇒ not the chord");
+    }
+
+    #[test]
+    fn select_then_a_opens_the_ring_without_the_guide_gesture() {
+        assert!(opens_ring(&[wire::BTN_BACK], wire::BTN_A, false));
+        assert!(opens_ring(
+            &[wire::BTN_LB, wire::BTN_BACK],
+            wire::BTN_A,
+            false
+        ));
+        assert!(!opens_ring(&[], wire::BTN_A, false), "A alone");
+        assert!(
+            !opens_ring(&[wire::BTN_A], wire::BTN_BACK, false),
+            "A first"
+        );
+        assert!(
+            !opens_ring(&[wire::BTN_BACK], wire::BTN_A, true),
+            "Select became Guide"
+        );
     }
 
     #[test]

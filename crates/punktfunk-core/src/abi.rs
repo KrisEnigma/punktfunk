@@ -3108,6 +3108,83 @@ pub unsafe extern "C" fn punktfunk_connection_set_pad_audio_caps(
     })
 }
 
+/// Switch the pads in `mask` (bit = wire pad index) to controller mouse: their buttons and sticks
+/// drive the host pointer and a few keys while the host pad sits neutral. `0` returns every pad
+/// to passthrough. Session-scoped. `Unsupported` without `PUNKTFUNK_GRANT_POINTER`.
+///
+/// # Safety
+/// `c` is a valid connection handle. Callable from any thread.
+#[cfg(feature = "quic")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn punktfunk_connection_set_pad_mouse(
+    c: *mut PunktfunkConnection,
+    mask: u16,
+) -> PunktfunkStatus {
+    guard(|| {
+        // SAFETY: caller handle or null; `as_ref` never dereferences null.
+        let c = match unsafe { c.as_ref() } {
+            Some(c) => c,
+            None => return PunktfunkStatus::NullPointer,
+        };
+        match c.inner.set_pad_mouse(mask) {
+            Ok(()) => PunktfunkStatus::Ok,
+            Err(e) => e.status(),
+        }
+    })
+}
+
+/// Pads in controller mouse now. A removed pad or a lost pointer grant clears its bit.
+///
+/// # Safety
+/// `c` is a valid connection handle; `mask` is writable (NULL is skipped).
+#[cfg(feature = "quic")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn punktfunk_connection_pad_mouse(
+    c: *const PunktfunkConnection,
+    mask: *mut u16,
+) -> PunktfunkStatus {
+    guard(|| {
+        // SAFETY: caller handle or null; `as_ref` never dereferences null.
+        let c = match unsafe { c.as_ref() } {
+            Some(c) => c,
+            None => return PunktfunkStatus::NullPointer,
+        };
+        // SAFETY: out-param is optional; null-checked before write.
+        unsafe {
+            if !mask.is_null() {
+                *mask = c.inner.pad_mouse();
+            }
+        }
+        PunktfunkStatus::Ok
+    })
+}
+
+/// Wire pad indices the host holds now, a bit per pad: declared or driven, not yet removed.
+///
+/// # Safety
+/// `c` is a valid connection handle; `mask` is writable (NULL is skipped).
+#[cfg(feature = "quic")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn punktfunk_connection_live_pads(
+    c: *const PunktfunkConnection,
+    mask: *mut u16,
+) -> PunktfunkStatus {
+    guard(|| {
+        // SAFETY: caller handle or null; `as_ref` never dereferences null.
+        let c = match unsafe { c.as_ref() } {
+            Some(c) => c,
+            None => return PunktfunkStatus::NullPointer,
+        };
+        // SAFETY: out-param is optional; null-checked before write.
+        unsafe {
+            if !mask.is_null() {
+                *mask = c.inner.live_pads();
+            }
+        }
+        PunktfunkStatus::Ok
+    })
+}
+
 /// Pull the next rumble update, waiting up to `timeout_ms`. Amplitudes are
 /// 0..0xFFFF (`low`/`high` motors), `(0, 0)` = stop. Same timeout/closed as
 /// [`punktfunk_connection_next_audio`]. Drops the v2 self-terminating TTL —

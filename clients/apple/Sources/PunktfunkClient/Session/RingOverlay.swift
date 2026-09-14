@@ -38,6 +38,8 @@ final class RingState: ObservableObject {
     @Published var lastTouch = Date()
     /// The mode the Welcome carried, captured at first open — the Resolution row's first chip.
     var native: (w: UInt32, h: UInt32, hz: UInt32)?
+    /// The wire pad whose `Select+A` opened the ring; `nil` for any other open.
+    var opener: UInt32?
     /// The pad's highlight: a slot 0…5, or 6 for the centre (the initial one — `Select+A`
     /// then A opens the sheet in two presses). `nil` until a pad moves it.
     @Published var highlight: Int?
@@ -139,6 +141,7 @@ final class RingState: ObservableObject {
         hint = nil
         highlight = nil
         twistArmed = false
+        opener = nil
     }
 
     func touch() { lastTouch = Date() }
@@ -165,6 +168,12 @@ struct RingActions {
     var togglePad: () -> Void
     /// One synthetic system-button tap on the host's pad (a `GamepadWire` bit).
     var tapPadButton: (UInt32) -> Void
+    /// Controller mouse: the pointer grant it needs, the wire pads it acts on (a bit per pad,
+    /// `0` = none), whether they are all on, and the toggle.
+    var pointerGranted: () -> Bool
+    var padMouseTarget: () -> UInt16
+    var padMouseOn: () -> Bool
+    var togglePadMouse: () -> Void
     var currentMode: () -> (w: UInt32, h: UInt32, hz: UInt32)
     var requestMode: (UInt32, UInt32, UInt32) -> Void
 }
@@ -258,6 +267,12 @@ func spec(_ slot: SlotId, _ cfg: OverlayConfig, _ a: RingActions) -> SlotSpec {
     case .qam:
         return SlotSpec(id: "qam", label: "Quick access menu", icon: "sidebar.right",
                         enabled: a.padAvailable(), reason: padOffReason)
+    case .padMouse:
+        return SlotSpec(id: "pad_mouse", label: "Controller mouse", icon: "computermouse",
+                        enabled: a.pointerGranted() && a.padMouseTarget() != 0,
+                        reason: a.pointerGranted() ? "No controller is connected"
+                            : "This host only allows controller input",
+                        toggle: true, state: a.padMouseOn() ? "On" : "Off")
     case .host(let id):
         let act = a.hostActions().first { $0.id == id }
         // Three power actions, three glyphs — the same icon on all three made them one button.
@@ -568,6 +583,7 @@ struct RingOverlay: View {
         // The host's own overlay is taking the screen: close first, like End stream.
         case .guide: state.close(); actions.tapPadButton(GamepadWire.guide)
         case .qam: state.close(); actions.tapPadButton(GamepadWire.misc1)
+        case .padMouse: actions.togglePadMouse()
         case .host(let id):
             if let act = actions.hostActions().first(where: { $0.id == id }) {
                 state.close()
@@ -780,6 +796,10 @@ extension RingOverlay {
                 a.tapPadButton(bit)
             })
         }
+        let pm = spec(.padMouse, cfg, a)
+        rows.append(SheetRowSpec(label: pm.label, value: pm.enabled ? pm.state : pm.reason, enabled: pm.enabled) {
+            if pm.enabled { a.togglePadMouse() }
+        })
         rows.append(SheetRowSpec(header: "View", label: "Statistics", value: a.stats().label) { a.cycleStats() })
         let mic = spec(.mic, cfg, a)
         rows.append(SheetRowSpec(header: "Audio", label: mic.label, value: mic.enabled ? mic.state : mic.reason,

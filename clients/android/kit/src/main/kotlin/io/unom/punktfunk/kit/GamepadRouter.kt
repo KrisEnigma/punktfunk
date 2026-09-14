@@ -241,9 +241,9 @@ class GamepadRouter(
      * `Select+A`, Select first ([opensRing]): the quick-action ring's opener
      * (design/touch-client-overlay.md §2.6) — the one chord the host never sees the A of. On a
      * gamepad-only session this is the only route to the ring at all: Back is a wire button while
-     * streaming, and the twist needs a touchscreen.
+     * streaming, and the twist needs a touchscreen. Carries the pad's wire index.
      */
-    var onRingChord: (() -> Unit)? = null
+    var onRingChord: ((Int) -> Unit)? = null
 
     /** A pad press while the ring owns the pad ([setRingOpen]). Main thread. */
     var onRingNav: ((RingNav) -> Unit)? = null
@@ -416,7 +416,7 @@ class GamepadRouter(
                 }
                 slot.swallowA = true
                 slot.held = slot.held or bit
-                onRingChord?.invoke()
+                onRingChord?.invoke(slot.index)
                 return
             }
             if (guideGesture && send) {
@@ -616,6 +616,9 @@ class GamepadRouter(
      * mirror), which must stand down with it. Read from the sensor thread.
      */
     fun sendsEnabled(): Boolean = forwarding
+
+    /** Wire pad indices of the open slots, a bit per pad. */
+    fun padMask(): Int = slots.values.fold(0) { m, s -> m or (1 shl s.index) }
 
     /**
      * Whether wire pad [pad]'s motion already comes from the controller's OWN IMU — either a

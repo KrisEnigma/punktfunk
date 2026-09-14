@@ -224,8 +224,9 @@ final class SessionModel: ObservableObject {
     private var audio: SessionAudio?
     private var gamepadCapture: GamepadCapture?
     /// The in-stream ring's pad path (design/touch-client-overlay.md §2.6), forwarded from the
-    /// capture so the view can wire them once per session.
-    var onRingChord: (() -> Void)?
+    /// capture so the view can wire them once per session. The chord carries the pad's wire
+    /// index; a remote's Back and a captured Steam Controller carry none.
+    var onRingChord: ((UInt32?) -> Void)?
     var onRingNav: ((RingNav) -> Void)?
 
     /// The ring is up: the pad belongs to it (flushed on the host, edges become navigation).
@@ -1126,7 +1127,7 @@ final class SessionModel: ObservableObject {
         // A pad with a gyro that this session cannot carry — say so once, briefly, and name the
         // setting that fixes it. Already main-actor (GamepadCapture fires it there).
         capture.onMotionUnreachable = { [weak self] kind in self?.noteMotionUnreachable(kind) }
-        capture.onRingChord = { [weak self] in self?.onRingChord?() }
+        capture.onRingChord = { [weak self] pad in self?.onRingChord?(pad) }
         capture.onRingNav = { [weak self] nav in self?.onRingNav?(nav) }
         capture.start()
         gamepadCapture = capture
@@ -1151,7 +1152,7 @@ final class SessionModel: ObservableObject {
             // bypasses GC entirely, so it brings its own way out of the stream.
             sc2.onDisconnectRequest = { [weak self] in self?.disconnect() }
             // The ring's pad path, the same two hooks GamepadCapture gets above.
-            sc2.onRingChord = { [weak self] in self?.onRingChord?() }
+            sc2.onRingChord = { [weak self] in self?.onRingChord?(nil) }
             sc2.onRingNav = { [weak self] nav in self?.onRingNav?(nav) }
             // Claim/release → the bottom-stack badge (the capture's only UI surface).
             sc2.onPhaseChange = { [weak self] phase in self?.noteSc2Phase(phase) }
@@ -1174,7 +1175,7 @@ final class SessionModel: ObservableObject {
         pointer.onDisconnectRequest = { [weak self] in self?.disconnect() }
         // The remote's short Back is the ring's opener on tvOS — the same hook the pad chord
         // uses, so the view wires one closure for both.
-        pointer.onShortBack = { [weak self] in self?.onRingChord?() }
+        pointer.onShortBack = { [weak self] in self?.onRingChord?(nil) }
         pointer.onRingNav = { [weak self] nav in self?.onRingNav?(nav) }
         pointer.start()
         remotePointer = pointer

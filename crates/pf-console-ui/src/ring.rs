@@ -343,6 +343,9 @@ impl Ring {
         self.facts.touch_mode.hash(&mut h);
         self.facts.stats_tier.hash(&mut h);
         self.facts.mic_muted.hash(&mut h);
+        self.facts.pad_mouse_on.hash(&mut h);
+        self.facts.pad_mouse_target.hash(&mut h);
+        self.facts.pointer_granted.hash(&mut h);
         self.facts.mode.hash(&mut h);
         // Hash `frame` while animating so the overlay keeps drawing until springs land.
         if self.animating() {
@@ -459,6 +462,22 @@ impl Ring {
             },
             SlotId::Guide => plain("guide", "Guide button", "Guide"),
             SlotId::Qam => plain("qam", "Quick access menu", "QAM"),
+            SlotId::PadMouse => Spec {
+                enabled: f.pointer_granted && f.pad_mouse_target != 0,
+                reason: if f.pointer_granted {
+                    "No controller is connected"
+                } else {
+                    "This host only allows controller input"
+                }
+                .into(),
+                toggle: true,
+                state: if f.pad_mouse_on { "On" } else { "Off" }.into(),
+                ..plain(
+                    "pad_mouse",
+                    "Controller mouse",
+                    if f.pad_mouse_on { "Mouse ✓" } else { "Mouse" },
+                )
+            },
             SlotId::Host(id) if self.editing.is_some() => Spec {
                 armed: true,
                 ..plain(&format!("host:{id}"), preview_host_label(id), "Power")
@@ -530,6 +549,7 @@ impl Ring {
             }
             SlotId::Stats => self.pending.push_back(RingCommand::CycleStats),
             SlotId::Mic => self.pending.push_back(RingCommand::ToggleMic),
+            SlotId::PadMouse => self.pending.push_back(RingCommand::TogglePadMouse),
             SlotId::Pad | SlotId::SendText => {}
             // The host's own overlay is about to take the screen: close first, like End stream.
             SlotId::Guide | SlotId::Qam => {
@@ -577,6 +597,7 @@ impl Ring {
             SheetRow::Slot(SlotId::Keyboard),
             SheetRow::Slot(SlotId::Guide),
             SheetRow::Slot(SlotId::Qam),
+            SheetRow::Slot(SlotId::PadMouse),
             SheetRow::Slot(SlotId::Stats),
             SheetRow::Slot(SlotId::Mic),
         ];
@@ -1471,6 +1492,44 @@ mod tests {
             r.take_command(),
             Some(RingCommand::TapButton(wire::BTN_MISC1))
         );
+    }
+
+    #[test]
+    fn controller_mouse_toggles_in_place_and_needs_a_pad_and_the_pointer_grant() {
+        let mut r = Ring::new();
+        r.set_facts(&RingFacts {
+            pad_mouse_target: 0b1,
+            pointer_granted: true,
+            ..facts()
+        });
+        r.input(RingInput::Toggle { x: 1.0, y: 1.0 });
+        r.fire(&SlotId::PadMouse);
+        assert_eq!(r.take_command(), Some(RingCommand::TogglePadMouse));
+        assert!(r.open(), "a toggle leaves the ring open");
+
+        let mut r = Ring::new();
+        r.set_facts(&RingFacts {
+            pad_mouse_target: 0b1,
+            ..facts()
+        });
+        r.fire(&SlotId::PadMouse);
+        assert_eq!(r.take_command(), None);
+        assert!(r
+            .hint
+            .as_deref()
+            .is_some_and(|h| h.contains("controller input")));
+
+        let mut r = Ring::new();
+        r.set_facts(&RingFacts {
+            pointer_granted: true,
+            ..facts()
+        });
+        r.fire(&SlotId::PadMouse);
+        assert_eq!(r.take_command(), None);
+        assert!(r
+            .hint
+            .as_deref()
+            .is_some_and(|h| h.contains("No controller")));
     }
 
     #[test]

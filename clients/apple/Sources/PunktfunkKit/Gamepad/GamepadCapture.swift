@@ -164,7 +164,7 @@ public final class GamepadCapture {
     /// `Select+A`, Select first, while Select is still pending its guide hold: the quick-action
     /// ring's opener (design/touch-client-overlay.md §2.6) — the first chord the host never
     /// sees. A is "jump" or "confirm" in most games, so both presses are swallowed.
-    public var onRingChord: (() -> Void)?
+    public var onRingChord: ((UInt32) -> Void)?
     /// A pad press while the ring owns the pad (`ringOpen`).
     public var onRingNav: ((RingNav) -> Void)?
     /// The ring is up: everything held is released on the host NOW (a held sprint must not
@@ -489,6 +489,7 @@ public final class GamepadCapture {
         // Raw system buttons stay local when passthrough is off: misc1 (share/QAM) is
         // masked here, guide is gated at its own handler.
         if !systemForward { raw &= ~GamepadWire.misc1 }
+        raw = ringChordFiltered(slot, raw)
         // The hold-Select gesture rewrites the mask: a Select pressed alone is held out
         // until it resolves (tap on release / synthetic guide past the threshold).
         if guideGesture { raw = gestureFiltered(slot, raw) }
@@ -580,6 +581,23 @@ public final class GamepadCapture {
         ]
     }
 
+    /// `Select+A`, Select first, with Select already on the wire (sent, or the guide gesture is
+    /// off): the ring chord. A is withheld until it physically releases; the ring's flush lifts
+    /// the Select. A Select still pending its guide hold is `gestureFiltered`'s case.
+    private func ringChordFiltered(_ slot: Slot, _ rawIn: UInt32) -> UInt32 {
+        var raw = rawIn
+        if slot.swallowA {
+            if raw & GamepadWire.a != 0 { raw &= ~GamepadWire.a } else { slot.swallowA = false }
+        }
+        let aPressed = raw & GamepadWire.a != 0 && slot.buttons & GamepadWire.a == 0
+        if aPressed, !ringOpen, slot.buttons & GamepadWire.back != 0 {
+            slot.swallowA = true
+            onRingChord?(slot.pad)
+            raw &= ~GamepadWire.a
+        }
+        return raw
+    }
+
     /// The hold-Select→guide state machine over one sync's raw mask (pf-client-core's
     /// `SelectGesture` rules): Select pressed ALONE is suppressed while pending; another
     /// button joining makes it real (unsuppressed — the diff sends its down); released
@@ -594,11 +612,8 @@ public final class GamepadCapture {
     private func gestureFiltered(_ slot: Slot, _ rawIn: UInt32) -> UInt32 {
         let back = GamepadWire.back
         var raw = rawIn
-        // A swallowed chord's buttons stay out of the mask until they physically release: their
-        // presses never went out, so their releases must not either.
-        if slot.swallowA {
-            if raw & GamepadWire.a != 0 { raw &= ~GamepadWire.a } else { slot.swallowA = false }
-        }
+        // A swallowed Select stays out of the mask until it physically releases: its press never
+        // went out, so its release must not either.
         if slot.swallowSelect {
             if raw & back != 0 { raw &= ~back } else { slot.swallowSelect = false }
         }
@@ -621,7 +636,7 @@ public final class GamepadCapture {
                 endPending(slot)
                 slot.swallowSelect = true
                 slot.swallowA = true
-                onRingChord?()
+                onRingChord?(slot.pad)
                 return raw & ~back & ~GamepadWire.a
             }
             if othersDown {

@@ -29,9 +29,9 @@ final class Sc2RingGate {
         case nav(RingNav)
     }
 
-    /// The quick-action ring's opener, `Select+A`. GamepadCapture reaches the same chord through
-    /// its hold-Select guide gesture, which this path does not run — an SC2's raw feed leaves the
-    /// Steam and QAM buttons to the host's own Steam, so Select here is only ever Select.
+    /// The quick-action ring's opener, `Select+A`, as in GamepadCapture. This path runs no
+    /// hold-Select guide gesture — an SC2's raw feed leaves the Steam and QAM buttons to the
+    /// host's own Steam, so Select here is only ever Select.
     static let ringChord: UInt32 = GamepadWire.back | GamepadWire.a
     /// The stats-overlay chord, `Select+X` — equal to `GamepadCapture.statsChord` (pinned by
     /// `Sc2RingGateTests`, the escape chord's mirror rule) and disjoint from the other two.

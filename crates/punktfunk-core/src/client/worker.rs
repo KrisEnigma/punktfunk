@@ -58,6 +58,8 @@ pub(crate) struct WorkerArgs {
     /// Per-pad render caps (bit0 haptics, bit1 speaker). OR'd into GamepadArrival
     /// flags (bits 8/9) toward a `HOST_CAP_PAD_AUDIO` host only.
     pub(crate) pad_audio_caps: Arc<[AtomicU8; crate::input::MAX_PADS]>,
+    /// Pads the embedder switched to controller mouse.
+    pub(crate) pad_mouse: Arc<super::pad_mouse::PadMouseShared>,
     pub(crate) hdr_meta_tx: SyncSender<HdrMeta>,
     pub(crate) host_timing_tx: SyncSender<crate::quic::HostTiming>,
     pub(crate) cursor_shape_tx: SyncSender<crate::quic::CursorShape>,

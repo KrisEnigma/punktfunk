@@ -642,6 +642,8 @@ fn run_inner(mut opts: SessionOpts, mut mode: ModeCtl) -> Result<Option<Outcome>
     // Ring pad ownership, edge-tracked: open masks the pads (a held trigger is released
     // on the host) and polls them into menu events; close re-adopts them.
     let mut ring_was_open = false;
+    // The pad whose Select+A opened the ring; `None` for a keyboard, touch or closed ring.
+    let mut ring_opener: Option<u8> = None;
     let disconnect_rx = gamepad.disconnect_events();
     let menu_rx = gamepad.menu_events();
     if matches!(mode, ModeCtl::Browse(_)) {
@@ -1269,8 +1271,9 @@ fn run_inner(mut opts: SessionOpts, mut mode: ModeCtl) -> Result<Option<Outcome>
 
         // `Select+A` on a pad: the ring at the window centre. The pad highlight starts
         // on the centre, so `Select+A` then `A` opens the sheet.
-        while ring_rx.try_recv().is_ok() {
+        while let Ok(pad) = ring_rx.try_recv() {
             if let (Some(o), true) = (overlay.as_mut(), stream.is_some()) {
+                ring_opener = Some(pad);
                 let (pw, ph) = window.size_in_pixels();
                 o.ring_input(RingInput::Toggle {
                     x: pw as f32 / 2.0,
@@ -1288,6 +1291,9 @@ fn run_inner(mut opts: SessionOpts, mut mode: ModeCtl) -> Result<Option<Outcome>
         if ring_open != ring_was_open {
             ring_was_open = ring_open;
             gamepad.set_ring_nav(ring_open);
+            if !ring_open {
+                ring_opener = None;
+            }
             // The ring takes the pointer plane too: it eats every event while open, so a
             // button already down would never see its release forwarded and would stay
             // pressed on the host.
@@ -1716,6 +1722,11 @@ fn run_inner(mut opts: SessionOpts, mut mode: ModeCtl) -> Result<Option<Outcome>
                     bump_stats_tier(&mut stats_verbosity, &mut stream);
                 }
                 RingCommand::Keyboard => ring_keyboard = !ring_keyboard,
+                RingCommand::TogglePadMouse => {
+                    if let Some(c) = stream.as_ref().and_then(|st| st.connector.as_ref()) {
+                        toggle_pad_mouse(c, ring_opener);
+                    }
+                }
                 // The pad worker owns the wire index and the owed release, so this one is
                 // the service's, not `ring_command`'s.
                 RingCommand::TapButton(bit) => gamepad.tap_button(bit),
@@ -1785,7 +1796,7 @@ fn run_inner(mut opts: SessionOpts, mut mode: ModeCtl) -> Result<Option<Outcome>
             let ring_facts = stream
                 .as_ref()
                 .filter(|st| st.connector.is_some())
-                .map(|st| ring_facts(st, &opts, stats_verbosity, mic_muted));
+                .map(|st| ring_facts(st, &opts, stats_verbosity, mic_muted, ring_opener));
             let ctx = FrameCtx {
                 width: pw,
                 height: ph,
@@ -2889,9 +2900,11 @@ fn ring_facts(
     opts: &SessionOpts,
     stats: StatsVerbosity,
     mic_muted: bool,
+    ring_opener: Option<u8>,
 ) -> RingFacts {
     let c = st.connector.as_ref().expect("filtered on connector");
     let m = c.mode();
+    let target = pad_mouse_target(c, ring_opener);
     RingFacts {
         overlay_actions: opts.overlay_actions.clone(),
         touch_mode: st
@@ -2906,6 +2919,9 @@ fn ring_facts(
         // with a mic is one whose settings asked for it.
         mic_available: st.params.mic_enabled,
         mic_muted,
+        pad_mouse_target: target,
+        pad_mouse_on: target != 0 && c.pad_mouse() & target == target,
+        pointer_granted: c.access_grants() & punktfunk_core::quic::GRANT_POINTER != 0,
         mode: (m.width, m.height, m.refresh_hz),
         native_mode: st.native_mode,
         addr: st.params.host.clone(),
@@ -2915,8 +2931,30 @@ fn ring_facts(
     }
 }
 
-/// Run one ring command against the live session (stats tier and keyboard are the
-/// loop's own and are handled at the call site).
+/// Pads the controller-mouse toggle acts on: the pad that opened the ring, else every live pad.
+fn pad_mouse_target(c: &NativeClient, ring_opener: Option<u8>) -> u16 {
+    ring_opener.map_or_else(
+        || c.live_pads(),
+        |pad| 1u16.checked_shl(pad.into()).unwrap_or(0),
+    )
+}
+
+/// All target pads in controller mouse go back to passthrough; otherwise they all switch.
+fn toggle_pad_mouse(c: &NativeClient, ring_opener: Option<u8>) {
+    let target = pad_mouse_target(c, ring_opener);
+    let on = c.pad_mouse();
+    let next = if on & target == target {
+        on & !target
+    } else {
+        on | target
+    };
+    if let Err(e) = c.set_pad_mouse(next) {
+        tracing::warn!(error = %e, "ring: controller mouse");
+    }
+}
+
+/// Run one ring command against the live session (stats tier, keyboard, system buttons and
+/// controller mouse are the loop's own and are handled at the call site).
 fn ring_command(
     cmd: RingCommand,
     st: &mut StreamState,
@@ -2980,7 +3018,10 @@ fn ring_command(
                 }
             }
         }
-        RingCommand::CycleStats | RingCommand::Keyboard | RingCommand::TapButton(_) => {}
+        RingCommand::CycleStats
+        | RingCommand::Keyboard
+        | RingCommand::TapButton(_)
+        | RingCommand::TogglePadMouse => {}
     }
 }
 

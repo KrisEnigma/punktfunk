@@ -12,9 +12,68 @@
 //! Events already queued behind the one just received fold into the same snapshot: an
 //! embedder pushes one pad report as one event per axis, and a datagram per axis was six
 //! per report on a stick being moved. The drain never waits, so nothing is delayed for it.
+//!
+//! A controller-mouse pad ([`super::super::pad_mouse`]) bypasses the fold: its host snapshot
+//! stays neutral and alive on the refresh, and its events become pointer, scroll and key events.
 
+use super::super::pad_mouse::{PadMouse, PadMouseShared, TICK};
 use super::*;
 use crate::input::{GamepadSnapshot, MAX_PADS};
+
+/// What the controller-mouse translator reads beside the input queue.
+pub(super) struct MouseArgs {
+    pub(super) shared: Arc<PadMouseShared>,
+    /// Live grants: pointer and key outputs each need theirs.
+    pub(super) grants: Arc<AtomicU32>,
+    /// Current stream mode; pointer speed scales with its height.
+    pub(super) mode: Arc<std::sync::Mutex<Mode>>,
+}
+
+fn send_all(conn: &quinn::Connection, evs: Vec<InputEvent>) {
+    for ev in evs {
+        let _ = conn.send_datagram(ev.encode().to_vec().into());
+    }
+}
+
+/// Match the translator to the embedder's mask under the live grants. An entering pad's host
+/// snapshot goes neutral; a leaving pad releases what it held. No pointer grant clears the mask.
+fn sync_mouse(
+    conn: &quinn::Connection,
+    mouse: &mut PadMouse,
+    args: &MouseArgs,
+    pads: &mut [Option<GamepadSnapshot>; MAX_PADS],
+    dirty: &mut [bool; MAX_PADS],
+) {
+    let grants = args.grants.load(std::sync::atomic::Ordering::Relaxed);
+    if grants & crate::quic::GRANT_POINTER == 0 {
+        args.shared.clear_all();
+    }
+    let want = args.shared.active(grants);
+    let on = mouse.on_mask();
+    for idx in 0..MAX_PADS {
+        let bit = 1u16 << idx;
+        if want & bit != 0 && on & bit == 0 {
+            let pad = idx as u8;
+            mouse.enter(
+                idx,
+                pads[idx].unwrap_or(GamepadSnapshot {
+                    pad,
+                    ..Default::default()
+                }),
+            );
+            if let Some(snap) = pads[idx].as_mut() {
+                *snap = GamepadSnapshot {
+                    pad,
+                    seq: snap.seq,
+                    ..Default::default()
+                };
+                dirty[idx] = true;
+            }
+        } else if want & bit == 0 && on & bit != 0 {
+            send_all(conn, mouse.leave(idx));
+        }
+    }
+}
 
 /// One seq-stamped snapshot per pad flagged in `dirty`; clears the flags.
 fn flush_dirty(
@@ -45,9 +104,15 @@ pub(super) async fn run(
     // bit0 haptics, bit1 speaker. Fed by [`NativeClient::set_pad_audio_caps`] and
     // by arrival events that already carry the bits.
     pad_audio_caps: std::sync::Arc<[std::sync::atomic::AtomicU8; crate::input::MAX_PADS]>,
+    mouse_args: MouseArgs,
 ) {
     use crate::input::InputKind;
     use std::sync::atomic::Ordering;
+    let mut mouse = PadMouse::default();
+    let mut mouse_tick = tokio::time::interval(TICK);
+    mouse_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // Unset while no stick is deflected, so a fresh push starts from one nominal tick.
+    let mut last_mouse_tick: Option<std::time::Instant> = None;
     // Slot appears on the first event for that index; refresh never invents a pad.
     let mut pads: [Option<GamepadSnapshot>; MAX_PADS] = [None; MAX_PADS];
     // Pads folded into since their last send — see [`flush_dirty`].
@@ -88,6 +153,18 @@ pub(super) async fn run(
                 let mut pending = Some(first);
                 while let Some(ev) = pending.take().or_else(|| input_rx.try_recv().ok()) {
                     let idx = ev.flags as usize;
+                    if matches!(ev.kind, InputKind::GamepadButton | InputKind::GamepadAxis)
+                        && mouse.is_on(idx)
+                    {
+                        flush_dirty(&conn, &mut pads, &mut seq, &mut dirty);
+                        let grants = mouse_args.grants.load(Ordering::Relaxed);
+                        send_all(&conn, mouse.fold(idx, &ev, grants));
+                        continue;
+                    }
+                    if ev.kind == InputKind::GamepadRemove && mouse.is_on(idx) {
+                        send_all(&conn, mouse.leave(idx));
+                        mouse_args.shared.clear(idx);
+                    }
                     if gamepad_snapshots
                         && matches!(ev.kind, InputKind::GamepadButton | InputKind::GamepadAxis)
                         && idx < MAX_PADS
@@ -143,8 +220,32 @@ pub(super) async fn run(
                     let _ = conn.send_datagram(ev.encode().to_vec().into());
                 }
                 flush_dirty(&conn, &mut pads, &mut seq, &mut dirty);
+                if !mouse.moving() {
+                    last_mouse_tick = None;
+                }
+                let live = (0..MAX_PADS)
+                    .filter(|&i| pads[i].is_some() || arrival[i].is_some())
+                    .fold(0u16, |m, i| m | 1 << i);
+                mouse_args.shared.set_live(live);
+            }
+            _ = mouse_args.shared.changed.notified() => {
+                sync_mouse(&conn, &mut mouse, &mouse_args, &mut pads, &mut dirty);
+                flush_dirty(&conn, &mut pads, &mut seq, &mut dirty);
+                if !mouse.moving() {
+                    last_mouse_tick = None;
+                }
+            }
+            _ = mouse_tick.tick(), if mouse.moving() => {
+                let now = std::time::Instant::now();
+                let dt = last_mouse_tick.map_or(TICK, |t| now.duration_since(t));
+                last_mouse_tick = Some(now);
+                let height = mouse_args.mode.lock().map(|m| m.height).unwrap_or(0);
+                let grants = mouse_args.grants.load(Ordering::Relaxed);
+                send_all(&conn, mouse.tick(dt.as_secs_f64(), height, grants));
             }
             _ = refresh.tick() => {
+                // Grants arrive without a wake-up; losing the pointer grant ends mouse mode here.
+                sync_mouse(&conn, &mut mouse, &mouse_args, &mut pads, &mut dirty);
                 for idx in 0..MAX_PADS {
                     // Caps moved after the burst drained: re-arm. Live declared pads only;
                     // a steady session sends nothing.
@@ -201,11 +302,7 @@ mod tests {
     use crate::input::{gamepad, InputEvent, InputKind};
     use std::sync::atomic::AtomicU8;
 
-    /// Six axis events queued together — one pad report — leave as ONE snapshot carrying all six,
-    /// not six datagrams each carrying one more axis. Current-thread runtime, so the task cannot
-    /// run between the sends.
-    #[tokio::test]
-    async fn one_pad_report_leaves_as_one_snapshot() {
+    async fn loopback() -> (quinn::Endpoint, quinn::Connection, quinn::Connection) {
         let server = crate::quic::endpoint::server("127.0.0.1:0".parse().unwrap()).unwrap();
         let addr = server.local_addr().unwrap();
         let client = crate::quic::endpoint::client_insecure().unwrap();
@@ -219,10 +316,107 @@ mod tests {
             (server, conn)
         });
         let client_conn = client.connect(addr, "punktfunk").unwrap().await.unwrap();
-        let (_server, host_conn) = accept.await.unwrap();
+        let (server, host_conn) = accept.await.unwrap();
+        (server, client_conn, host_conn)
+    }
+
+    fn mouse_args(shared: &Arc<PadMouseShared>) -> MouseArgs {
+        MouseArgs {
+            shared: shared.clone(),
+            grants: Arc::new(AtomicU32::new(crate::quic::GRANT_ALL)),
+            mode: Arc::new(std::sync::Mutex::new(Mode {
+                width: 1920,
+                height: 1080,
+                refresh_hz: 60,
+            })),
+        }
+    }
+
+    fn button(bit: u32, pad: u32) -> InputEvent {
+        InputEvent {
+            kind: InputKind::GamepadButton,
+            _pad: [0; 3],
+            code: bit,
+            x: 1,
+            y: 0,
+            flags: pad,
+        }
+    }
+
+    /// Next datagram that is not a snapshot of a pad in `skip`. Pad 0 is the mouse pad.
+    async fn next_event(host: &quinn::Connection, skip: &[u8]) -> InputEvent {
+        loop {
+            let dg = tokio::time::timeout(Duration::from_secs(2), host.read_datagram())
+                .await
+                .expect("a datagram")
+                .unwrap();
+            let ev = InputEvent::decode(&dg).unwrap();
+            match GamepadSnapshot::from_event(&ev) {
+                Some(s) if skip.contains(&s.pad) => {
+                    assert!(s.pad != 0 || s.buttons == 0, "a mouse pad stays neutral")
+                }
+                _ => return ev,
+            }
+        }
+    }
+
+    /// Entering sends the pad neutral; its presses become keys while pad 1 still forwards.
+    #[tokio::test]
+    async fn a_mouse_pad_goes_neutral_and_its_buttons_become_keys() {
+        let (_server, client_conn, host_conn) = loopback().await;
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let caps = Arc::new(std::array::from_fn(|_| AtomicU8::new(0)));
-        let task = tokio::spawn(run(client_conn, rx, true, false, caps));
+        let shared = Arc::new(PadMouseShared::default());
+        let task = tokio::spawn(run(client_conn, rx, true, false, caps, mouse_args(&shared)));
+
+        tx.send(button(gamepad::BTN_A, 0)).unwrap();
+        let held = next_event(&host_conn, &[]).await;
+        assert_eq!(
+            GamepadSnapshot::from_event(&held).unwrap().buttons,
+            gamepad::BTN_A
+        );
+
+        shared.request(1);
+        // A refresh of the held A may still be in flight; the neutral snapshot follows it.
+        loop {
+            let snap = GamepadSnapshot::from_event(&next_event(&host_conn, &[]).await)
+                .expect("only snapshots so far");
+            if snap.buttons == 0 {
+                assert_eq!(snap.pad, 0);
+                break;
+            }
+        }
+
+        tx.send(button(gamepad::BTN_B, 0)).unwrap();
+        let esc = next_event(&host_conn, &[0]).await;
+        assert_eq!((esc.kind, esc.code), (InputKind::KeyDown, 0x1B));
+
+        tx.send(button(gamepad::BTN_A, 1)).unwrap();
+        let other = next_event(&host_conn, &[0]).await;
+        let other = GamepadSnapshot::from_event(&other).expect("pad 1 forwards");
+        assert_eq!((other.pad, other.buttons), (1, gamepad::BTN_A));
+        assert_eq!(shared.live(), 0b11, "both pads are live on the host");
+
+        shared.request(0);
+        let up = next_event(&host_conn, &[0, 1]).await;
+        assert_eq!(
+            (up.kind, up.code),
+            (InputKind::KeyUp, 0x1B),
+            "leaving releases Escape"
+        );
+        task.abort();
+    }
+
+    /// Six axis events queued together — one pad report — leave as ONE snapshot carrying all six,
+    /// not six datagrams each carrying one more axis. Current-thread runtime, so the task cannot
+    /// run between the sends.
+    #[tokio::test]
+    async fn one_pad_report_leaves_as_one_snapshot() {
+        let (_server, client_conn, host_conn) = loopback().await;
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let caps = Arc::new(std::array::from_fn(|_| AtomicU8::new(0)));
+        let shared = Arc::new(PadMouseShared::default());
+        let task = tokio::spawn(run(client_conn, rx, true, false, caps, mouse_args(&shared)));
         let axes = [
             (gamepad::AXIS_LS_X, 1_000),
             (gamepad::AXIS_LS_Y, -2_000),

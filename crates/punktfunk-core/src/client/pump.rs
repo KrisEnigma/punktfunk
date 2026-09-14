@@ -53,6 +53,7 @@ pub(super) async fn run_pump(args: WorkerArgs) {
         hidout_tx,
         pad_audio_tx,
         pad_audio_caps,
+        pad_mouse,
         hdr_meta_tx,
         host_timing_tx,
         cursor_shape_tx,
@@ -153,6 +154,11 @@ pub(super) async fn run_pump(args: WorkerArgs) {
         gamepad_snapshots,
         pad_audio_arrivals,
         pad_audio_caps,
+        input_task::MouseArgs {
+            shared: pad_mouse,
+            grants: access_grants.clone(),
+            mode: mode_slot.clone(),
+        },
     ));
 
     // Smoothed path round trip for the overlay, sampled while the connection lives.

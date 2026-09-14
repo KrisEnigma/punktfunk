@@ -459,13 +459,14 @@ struct ContentView: View {
                 // macOS the chord and the menu item do — on both, a second press closes it again,
                 // because on neither is there a finger to tap the scrim with. iOS opens only: the
                 // twist that opened it also winds it back.
-                model.onRingChord = { [ring] in
+                model.onRingChord = { [ring] pad in
                     #if os(tvOS) || os(macOS)
                     ring.toggleCentred()
                     #else
                     ring.pressTick &+= 1
                     ring.openCentred()
                     #endif
+                    if ring.committed { ring.opener = pad }
                 }
                 model.onRingNav = { [ring] nav in ring.nav(nav) }
                 // A session actually started — remember it on the card ("Connected … ago"
@@ -1466,11 +1467,29 @@ struct ContentView: View {
             padShown: { [model] in model.virtualPadShown },
             togglePad: { [model] in model.toggleVirtualPad() },
             tapPadButton: { [model] bit in model.tapPadButton(bit) },
+            pointerGranted: { conn.canSendPointer },
+            padMouseTarget: { [ring] in Self.padMouseTarget(ring, conn) },
+            padMouseOn: { [ring] in
+                let t = Self.padMouseTarget(ring, conn)
+                return t != 0 && conn.padMouse & t == t
+            },
+            togglePadMouse: { [ring] in
+                let t = Self.padMouseTarget(ring, conn)
+                let on = conn.padMouse
+                conn.setPadMouse(on & t == t ? on & ~t : on | t)
+            },
             currentMode: {
                 let m = conn.currentMode()
                 return (m.width, m.height, m.refreshHz)
             },
             requestMode: { w, h, hz in conn.requestMode(width: w, height: h, refreshHz: hz) })
+    }
+    #endif
+    #if os(iOS) || os(tvOS) || os(macOS)
+    /// The wire pads the controller-mouse toggle acts on: the ring's opener, else every live pad.
+    private static func padMouseTarget(_ ring: RingState, _ conn: PunktfunkConnection) -> UInt16 {
+        guard let pad = ring.opener else { return conn.livePads }
+        return pad < 16 ? 1 << pad : 0
     }
     #endif
     #if !os(iOS)
