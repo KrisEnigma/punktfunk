@@ -104,7 +104,9 @@ fn preview_host_label(id: &str) -> &str {
     }
 }
 
-pub(crate) struct Ring {
+/// The in-stream quick-action dial. A host feeds it pad or key events and facts, draws it over the
+/// stream once per frame, and drains its commands; it never touches the session itself.
+pub struct Ring {
     progress: f32,
     committed: bool,
     clockwise: bool,
@@ -142,8 +144,14 @@ pub(crate) struct Ring {
     edits: VecDeque<EditEvent>,
 }
 
+impl Default for Ring {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Ring {
-    pub(crate) fn new() -> Ring {
+    pub fn new() -> Ring {
         Ring {
             progress: 0.0,
             committed: false,
@@ -174,7 +182,7 @@ impl Ring {
         }
     }
 
-    pub(crate) fn open(&self) -> bool {
+    pub fn open(&self) -> bool {
         self.committed || self.progress > 0.0
     }
 
@@ -226,7 +234,7 @@ impl Ring {
     }
 
     /// Overlay config is re-parsed only when the blob changes.
-    pub(crate) fn set_facts(&mut self, facts: &RingFacts) {
+    pub fn set_facts(&mut self, facts: &RingFacts) {
         if facts.overlay_actions != self.facts.overlay_actions {
             self.cfg = OverlayConfig::parse(&facts.overlay_actions, RingPlatform::Desktop);
         }
@@ -235,8 +243,7 @@ impl Ring {
 
     // In-stream surface (`skia_overlay`), so a build without that overlay sees these unused.
     // `allow` rather than `cfg`, which would cascade into the parameter types' imports.
-    #[cfg_attr(not(feature = "vulkan-overlay"), allow(dead_code))]
-    pub(crate) fn input(&mut self, input: RingInput) {
+    pub fn input(&mut self, input: RingInput) {
         match input {
             RingInput::Turn {
                 progress,
@@ -299,7 +306,7 @@ impl Ring {
 
     /// Idle-close after `IDLE_CLOSE` unless the sheet or editor is up; drop arm/hint
     /// after `HINT_LIFE`. Once per frame, before `damage` is read.
-    pub(crate) fn tick(&mut self) {
+    pub fn tick(&mut self) {
         self.frame = self.frame.wrapping_add(1);
         if self.committed
             && !self.sheet
@@ -314,19 +321,16 @@ impl Ring {
         }
     }
 
-    #[cfg_attr(not(feature = "vulkan-overlay"), allow(dead_code))]
-    pub(crate) fn take_command(&mut self) -> Option<RingCommand> {
+    pub fn take_command(&mut self) -> Option<RingCommand> {
         self.pending.pop_front()
     }
 
-    #[cfg_attr(not(feature = "vulkan-overlay"), allow(dead_code))]
-    pub(crate) fn take_cmds(&mut self) -> Vec<ConsoleCmd> {
+    pub fn take_cmds(&mut self) -> Vec<ConsoleCmd> {
         std::mem::take(&mut self.cmds)
     }
 
     /// Overlay damage key: redraw only when this changes.
-    #[cfg_attr(not(feature = "vulkan-overlay"), allow(dead_code))]
-    pub(crate) fn damage(&self) -> u64 {
+    pub fn damage(&self) -> u64 {
         if !self.visible() {
             return 0;
         }
@@ -356,7 +360,6 @@ impl Ring {
 
     /// True while a spring, ease, or entrance is short of its target. Read before
     /// the next frame: this is the state the last render left.
-    #[cfg_attr(not(feature = "vulkan-overlay"), allow(dead_code))]
     fn animating(&self) -> bool {
         if self.closing {
             return true;
@@ -802,8 +805,7 @@ impl Ring {
     }
 
     /// Pad vocabulary on keys. Always consumed while open, including unknown keys.
-    #[cfg_attr(not(feature = "vulkan-overlay"), allow(dead_code))]
-    pub(crate) fn key(&mut self, key: Key) -> bool {
+    pub fn key(&mut self, key: Key) -> bool {
         if !self.open() {
             return false;
         }
@@ -824,7 +826,7 @@ impl Ring {
     /// Pad while open: Right/Left step the ring, Up is 12 o'clock, Down is 6, Y is
     /// centre. A fires (centre opens the sheet); B closes (sheet first). In the sheet
     /// the list takes moves; Left/Right adjust a resolution row.
-    pub(crate) fn menu(&mut self, ev: MenuEvent) -> Option<MenuPulse> {
+    pub fn menu(&mut self, ev: MenuEvent) -> Option<MenuPulse> {
         if !self.open() {
             return None;
         }
@@ -950,7 +952,7 @@ impl Ring {
 
     /// `scale` is the chrome scale.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn render(
+    pub fn render(
         &mut self,
         canvas: &Canvas,
         width: u32,

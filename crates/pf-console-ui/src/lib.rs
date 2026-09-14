@@ -47,9 +47,9 @@ pub mod os_marks;
 pub mod os_theme;
 pub mod platform;
 pub mod pointer;
-// In-stream ring is the desktop shell's (Android has Compose). Android
-// draws this module only as the settings editor; the host-action cache
-// is desktop-gated and is not consulted there.
+// In-stream ring: the desktop overlay hosts it, and so does a GL shell (webOS) through
+// [`Ring`]. Android draws it only as the settings editor. The host-action cache is
+// desktop-gated and is not consulted elsewhere.
 mod ring;
 mod screens;
 mod shell;
@@ -76,6 +76,7 @@ pub use model::{
     SpeedStatus, WakeStatus,
 };
 pub use platform::{Platform, PlatformScreen};
+pub use ring::Ring;
 pub use shell::{ConsoleOptions, DEFAULT_GPU_CACHE_BYTES, MIN_GPU_CACHE_BYTES};
 #[cfg(all(any(target_os = "linux", windows), feature = "vulkan-overlay"))]
 pub use skia_overlay::SkiaOverlay;
