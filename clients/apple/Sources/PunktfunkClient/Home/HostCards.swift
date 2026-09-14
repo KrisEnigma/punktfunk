@@ -376,6 +376,10 @@ struct HostCardView: View {
             #endif
             .disabled(isBusy)
             .contextMenu { menuItems }
+            #if os(tvOS)
+            // A TV card has no ⓘ: Play/Pause opens the page, as the menu's Host Details… does.
+            .onPlayPauseCommand { actions.showDetails?() }
+            #endif
             #if !os(tvOS)
             // A sibling of the card, not part of its label: a button inside a button never
             // receives the tap. tvOS reaches the page from the context menu instead.

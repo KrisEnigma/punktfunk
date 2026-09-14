@@ -1,7 +1,7 @@
 // The host page (design/apple-touch-ui-overhaul.md §2.4): everything about one saved host that
-// is not "connect to it", with the acts its card's menu offers. Touch pushes it as one form; the
-// Mac's `MacHostWindow` shows one section at a time beside a sidebar. It reads the live record
-// by id, so an edit shows at once and a removal closes it.
+// is not "connect to it", with the acts its card's menu offers. An iPhone pushes it as one form;
+// the Mac, the iPad and the TV show one section at a time beside a sidebar (HostSectionsView). It
+// reads the live record by id, so an edit shows at once and a removal closes it.
 
 import PunktfunkKit
 import SwiftUI
@@ -149,15 +149,23 @@ struct HostDetailView: View {
         if let menu = a.presets, !menu.presets.isEmpty {
             Section {
                 // A binding to a deleted preset reads as Default settings, as a connect does.
-                Picker("Connect with", selection: Binding(
+                let boundID = Binding(
                     get: { menu.presets.contains { $0.id == menu.boundID } ? menu.boundID ?? "" : "" },
-                    set: { menu.setDefault($0.isEmpty ? nil : $0) }
-                )) {
+                    set: { menu.setDefault($0.isEmpty ? nil : $0) })
+                #if os(tvOS)
+                TVSelectionRow(
+                    title: "Connect with",
+                    options: [(label: "Default settings", tag: "")]
+                        + menu.presets.map { (label: $0.name, tag: $0.id) },
+                    selection: boundID)
+                #else
+                Picker("Connect with", selection: boundID) {
                     Text("Default settings").tag("")
                     ForEach(menu.presets) { preset in
                         Text(preset.name).tag(preset.id)
                     }
                 }
+                #endif
                 ForEach(menu.presets) { preset in
                     Toggle("Pin \u{201C}\(preset.name)\u{201D} as a card", isOn: Binding(
                         get: { menu.pinnedIDs.contains(preset.id) },

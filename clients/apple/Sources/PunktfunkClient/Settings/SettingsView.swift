@@ -426,6 +426,8 @@ struct SettingsView: View {
             }
             .padding(.horizontal, 60))
             .navigationTitle("Settings")
+            // Focus enters on the chosen pane, so coming back finds the category left open.
+            .defaultFocus($tvFocusedPane, tvPane)
             .onChange(of: tvFocusedPane) { _, pane in
                 if let pane { tvPane = pane }
             }
