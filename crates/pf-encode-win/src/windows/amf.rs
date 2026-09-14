@@ -292,12 +292,12 @@ struct CodecProps {
     /// Intra-refresh: (units-per-slot, block edge px). AVC 16-px MBs, HEVC 64-px CTBs. `None` on
     /// AV1 (mode enum only, no slot-size control).
     intra_refresh: Option<(PCWSTR, u32)>,
-    /// LTR-RFI property names. `None` on AV1 — this path does not drive its frame-marking OBU.
+    /// LTR-RFI property names, on every codec.
     ltr: Option<LtrProps>,
 }
 
-/// AMF LTR property names, codec-prefixed (AVC bare, HEVC `Hevc*`). Two static at open, two
-/// per-frame on the input surface.
+/// AMF LTR property names, codec-prefixed (AVC bare, HEVC `Hevc*`, AV1 `Av1*`). Two static at
+/// open, two per-frame on the input surface.
 struct LtrProps {
     /// `MaxOfLTRFrames` — user LTR slots (we request [`NUM_LTR_SLOTS`]).
     max_ltr_frames: PCWSTR,
@@ -420,7 +420,12 @@ fn codec_props(codec: Codec) -> CodecProps {
             out_primaries: w!("Av1OutputColorPrimaries"),
             hdr_metadata: Some(w!("Av1InHDRMetadata")),
             intra_refresh: None,
-            ltr: None,
+            ltr: Some(LtrProps {
+                max_ltr_frames: w!("Av1MaxNumLTRFrames"),
+                max_num_ref_frames: w!("Av1MaxNumRefFrames"),
+                mark_ltr_index: w!("Av1MarkCurrentWithLTRIndex"),
+                force_ltr_bitfield: w!("Av1ForceLTRReferenceBitfield"),
+            }),
         },
         Codec::PyroWave => unreachable!("PyroWave never opens the AMF backend"),
     }
@@ -924,11 +929,10 @@ impl AmfEncoder {
         })
     }
 
-    /// Attempt LTR-RFI: AVC/HEVC only, unless `PUNKTFUNK_NO_AMF_LTR`. Driver accept is `ltr_active`.
+    /// Attempt LTR-RFI unless `PUNKTFUNK_NO_AMF_LTR` or the periodic wave asked otherwise. Driver
+    /// accept is `ltr_active`.
     fn ltr_wanted(&self) -> bool {
-        !ltr_disabled()
-            && !super::policy::intra_refresh_requested()
-            && matches!(self.codec, Codec::H264 | Codec::H265)
+        !ltr_disabled() && !super::policy::intra_refresh_requested()
     }
 
     /// VBV/HRD buffer (bits) at `bps`: ~1 frame interval, `PUNKTFUNK_VBV_FRAMES`-scaled.
@@ -2655,7 +2659,7 @@ mod tests {
     /// (default 40) answered `PF_WAVE_LAG` frames later (default 2) through
     /// `invalidate_ref_frames`. The full stream and the view without the lost frames land in
     /// `PUNKTFUNK_SMOKE_DIR` with `.idx` sidecars, for `gpu_parity`'s field hashers. HEVC, or
-    /// H.264 with `PF_WAVE_CODEC=h264`; shape `PF_WAVE_SMOKE=WxH:8:fps:mbps`, `PF_WAVE_SOAK` losses.
+    /// `PF_WAVE_CODEC=h264` or `av1` (an `.obu` for `field_av1`); shape `PF_WAVE_SMOKE=WxH:8:fps:mbps`, `PF_WAVE_SOAK` losses.
     ///
     /// `cargo test -p pf-encode-win --lib amf_ltr_anchor_soak -- --ignored --nocapture`
     #[test]
@@ -2689,11 +2693,10 @@ mod tests {
             count("PF_WAVE_LAG", 2),
         );
         assert!(lag >= 1 && lag < gap, "PF_WAVE_LAG=1..PF_WAVE_GAP");
-        let h264 = std::env::var("PF_WAVE_CODEC").is_ok_and(|v| v == "h264");
-        let (codec, ext) = if h264 {
-            (Codec::H264, "h264")
-        } else {
-            (Codec::H265, "h265")
+        let (codec, ext) = match std::env::var("PF_WAVE_CODEC").as_deref() {
+            Ok("h264") => (Codec::H264, "h264"),
+            Ok("av1") => (Codec::Av1, "obu"),
+            _ => (Codec::H265, "h265"),
         };
         let mut enc = AmfEncoder::open(
             codec,

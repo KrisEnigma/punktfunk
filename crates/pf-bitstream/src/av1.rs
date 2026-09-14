@@ -685,6 +685,42 @@ mod tests {
     use super::*;
     use cros_codecs::bitstream_utils::IvfIterator;
 
+    /// `PF_AV1_DUMP=<capture>` with its `.idx`: print each frame's type, entropy source and
+    /// references, to read an encoder's recovery frames off a capture. Diagnostics only.
+    #[test]
+    #[ignore = "diagnostic: set PF_AV1_DUMP to a capture"]
+    fn print_frame_headers_of_a_capture() {
+        let path = std::env::var("PF_AV1_DUMP").expect("PF_AV1_DUMP=<capture>");
+        let bytes = std::fs::read(&path).expect("read the capture");
+        let idx = std::fs::read_to_string(format!("{path}.idx")).expect("read the .idx");
+        let mut planner = Av1Planner::new();
+        for (i, line) in idx.lines().enumerate() {
+            let f: Vec<usize> = line
+                .split_whitespace()
+                .take(2)
+                .filter_map(|s| s.parse().ok())
+                .collect();
+            let [off, len] = f[..] else { continue };
+            match planner.plan_au(&bytes[off..off + len]) {
+                Ok(plans) => {
+                    for p in plans {
+                        let h = &p.header;
+                        println!(
+                            "{i}: {:?} er {} primary {} refs {:?} refresh {:#04x} warnings {:?}",
+                            h.frame_type,
+                            h.error_resilient_mode,
+                            h.primary_ref_frame,
+                            h.ref_frame_idx,
+                            h.refresh_frame_flags,
+                            p.warnings
+                        );
+                    }
+                }
+                Err(e) => println!("{i}: {e}"),
+            }
+        }
+    }
+
     /// Vendored 25 fps conformance vector. Driven through the planner; the
     /// crate's vendor-pin smoke test walks the same file through the parser.
     const AV1_25FPS: &[u8] =
