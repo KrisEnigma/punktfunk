@@ -87,14 +87,11 @@ pub fn wake_and_connect(
                 Some(WakeOutcome::Online) => {
                     waiting.close();
                     let mut req = req.clone();
-                    // Re-key on a new DHCP lease so this + future connects dial the
-                    // live address.
+                    // Dial a new DHCP lease. The saved card moves only when the probe
+                    // sweep hears its pin there — an advert's address can be another machine's.
                     if let Some((addr, port)) =
                         seen.filter(|(a, p)| *a != req.addr || *p != req.port)
                     {
-                        if let Some(fp) = &req.fp_hex {
-                            trust::rekey_addr(fp, &addr, port);
-                        }
                         req.addr = addr;
                         req.port = port;
                     }

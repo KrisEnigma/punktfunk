@@ -770,8 +770,8 @@ pub(crate) fn hosts_page(props: &HostsProps, cx: &mut RenderCx) -> Element {
             // host it was meant to wake.
             let online = props.probed.get(&k.fp_hex).copied().unwrap_or(false);
             // Everything the advert teaches: wake MAC(s), OS chain (so the mark survives going
-            // offline), management port — a host moved off 47990 loses its library once mDNS is
-            // gone unless we write it down. No disk write when unchanged.
+            // offline), management port, and its address as a place the probe sweep asks —
+            // the card moves there only once its pin answers. No disk write when unchanged.
             if let Some(a) = hosts
                 .iter()
                 .find(|h| pf_client_core::discovery::same_host(k, h))
@@ -780,15 +780,11 @@ pub(crate) fn hosts_page(props: &HostsProps, cx: &mut RenderCx) -> Element {
                     &k.fp_hex,
                     &k.addr,
                     k.port,
+                    &a.addr,
                     &a.mac,
                     &a.os,
                     a.mgmt_port,
                 );
-                // Follow the advert only once the saved address stopped answering: a routed
-                // one (Tailscale) answers on the LAN too, and must survive coming home.
-                if props.probed.get(&k.fp_hex) == Some(&false) {
-                    crate::trust::rekey_addr(&k.fp_hex, &a.addr, a.port);
-                }
             }
             let can_wake = !online && !k.mac.is_empty();
             // What this host last said it lets this device do to it. Kept warm here — on the

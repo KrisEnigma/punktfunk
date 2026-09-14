@@ -1005,22 +1005,18 @@ impl ServiceState {
                     .find(|d| discovery::same_host(h, d));
                 let online = probed.get(&key).copied().unwrap_or(false);
                 // Everything the advert teaches, while it is visible: mgmt port, OS chain, wake
-                // MAC — a Deck in Gaming Mode runs only this console and the Decky panel, and a
-                // record with no MAC can never be woken. No disk write when unchanged.
+                // MAC (a Deck in Gaming Mode runs only this console and the Decky panel), and an
+                // address the sweep asks; the card moves only once its pin answers there.
                 if let Some(a) = advert {
                     pf_client_core::trust::learn_from_advert(
                         &h.fp_hex,
                         &h.addr,
                         h.port,
+                        &a.addr,
                         &a.mac,
                         &a.os,
                         a.mgmt_port,
                     );
-                    // Follow the advert only once the saved address stopped answering: a routed
-                    // one (Tailscale) answers on the LAN too, and must survive coming home.
-                    if probed.get(&key) == Some(&false) {
-                        pf_client_core::trust::rekey_addr(&h.fp_hex, &a.addr, a.port);
-                    }
                 }
                 let row = HostRow {
                     key: key.clone(),

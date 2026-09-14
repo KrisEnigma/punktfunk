@@ -296,9 +296,10 @@ pub struct KnownHost {
     /// No lookup here is keyed by it — `fp_hex` / `addr:port` stay the keys.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
-    /// Addresses this host was moved away from automatically, newest first, at most
+    /// Addresses this host left or was advertised at, newest first, at most
     /// [`PREV_ADDRS_MAX`]. A host lives at more than one — its LAN lease at home, a
-    /// Tailscale address anywhere — so when `addr` goes silent `probe_known` asks these too.
+    /// Tailscale address anywhere — so when `addr` goes silent `probe_known` asks these too,
+    /// and moves there only when the pin answers.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub prev_addrs: Vec<String>,
 }
@@ -750,10 +751,28 @@ fn learn_target<'a>(
     known.hosts.get_mut(i)
 }
 
-/// Copy MAC / OS / mgmt port from an advert onto a saved record; `true` if anything moved.
-/// Pure (no disk). An omitted field is left alone, and the MAC is learned once — see below.
-fn apply_advert(h: &mut KnownHost, mac: &[String], os: &str, mgmt_port: Option<u16>) -> bool {
+/// Copy MAC / OS / mgmt port from an advert onto a saved record and note the address it
+/// advertises; `true` if anything moved. Pure (no disk). An omitted field is left alone, and
+/// the MAC is learned once — see below.
+fn apply_advert(
+    h: &mut KnownHost,
+    addr: &str,
+    mac: &[String],
+    os: &str,
+    mgmt_port: Option<u16>,
+) -> bool {
     let mut changed = false;
+    // A candidate for `probe_known`, never a move: two machines sharing an mDNS hostname
+    // hand each other's IPs to both adverts. A record with no pin cannot verify one.
+    if !h.fp_hex.is_empty()
+        && !addr.is_empty()
+        && addr != h.addr
+        && !h.prev_addrs.iter().any(|a| a == addr)
+    {
+        h.prev_addrs.insert(0, addr.to_string());
+        h.prev_addrs.truncate(PREV_ADDRS_MAX);
+        changed = true;
+    }
     // An advert may TEACH a wake MAC, never replace one. The fingerprint it matched on is
     // broadcast in clear, so anything on the LAN can claim to be this host; every other
     // field here is corrected by the next real advert, but a MAC is not — a sleeping host
@@ -774,16 +793,18 @@ fn apply_advert(h: &mut KnownHost, mac: &[String], os: &str, mgmt_port: Option<u
     changed
 }
 
-/// Persist MAC / OS / mgmt port from a live advert onto the matched record. No-op, and
-/// no disk write, when nothing changed — call it on every discovery tick.
+/// Persist MAC / OS / mgmt port from a live advert onto the record saved at `addr:port`,
+/// and keep `advert_addr` as a place [`probe_known`] asks. No-op, and no disk write, when
+/// nothing changed — call it on every discovery tick.
 ///
 /// [`KnownHosts::read`], not [`KnownHosts::load`]: `punktfunk discover` is not an
-/// id-minter (see the race on [`KnownHosts::read`]). Takes three fields rather than a
+/// id-minter (see the race on [`KnownHosts::read`]). Takes the fields rather than a
 /// `DiscoveredHost` because core and the WinUI shell each have their own type.
 pub fn learn_from_advert(
     fp_hex: &str,
     addr: &str,
     port: u16,
+    advert_addr: &str,
     mac: &[String],
     os: &str,
     mgmt_port: Option<u16>,
@@ -792,14 +813,14 @@ pub fn learn_from_advert(
     let Some(h) = learn_target(&mut known, fp_hex, addr, port) else {
         return;
     };
-    if apply_advert(h, mac, os, mgmt_port) {
+    if apply_advert(h, advert_addr, mac, os, mgmt_port) {
         let _ = known.save();
     }
 }
 
 /// Re-point a saved host at the address it now answers at, matched by fingerprint, keeping
-/// the one it leaves in `prev_addrs`. No-op, and no disk write, when unchanged. Wake-and-wait,
-/// the hosts list and `probe_known` use this so later connects dial the live address.
+/// the one it leaves in `prev_addrs`. No-op, and no disk write, when unchanged. Only for an
+/// address where the pin answered: an mDNS advert's address is not proof of who is there.
 pub fn rekey_addr(fp_hex: &str, addr: &str, port: u16) {
     if fp_hex.is_empty() {
         return;
@@ -2449,21 +2470,44 @@ mod tests {
     fn apply_advert_learns_what_it_carries_and_keeps_what_it_omits() {
         let mut h = KnownHost::default();
         let mac = vec!["aa:bb:cc:dd:ee:ff".to_string()];
-        assert!(apply_advert(&mut h, &mac, "linux/arch", Some(47991)));
+        assert!(apply_advert(&mut h, "", &mac, "linux/arch", Some(47991)));
         assert_eq!(h.mac, mac);
         assert_eq!(h.os, "linux/arch");
         assert_eq!(h.mgmt_port, Some(47991));
-        assert!(!apply_advert(&mut h, &mac, "linux/arch", Some(47991)));
+        assert!(!apply_advert(&mut h, "", &mac, "linux/arch", Some(47991)));
         // Absent fields must not overwrite a known MAC — that would cost wake.
-        assert!(!apply_advert(&mut h, &[], "", None));
+        assert!(!apply_advert(&mut h, "", &[], "", None));
         assert_eq!(h.mac, mac);
         assert_eq!(h.os, "linux/arch");
         assert_eq!(h.mgmt_port, Some(47991));
         // 0 is "not advertised" from a caller with no Option — not a port.
-        assert!(!apply_advert(&mut h, &[], "", Some(0)));
+        assert!(!apply_advert(&mut h, "", &[], "", Some(0)));
         assert_eq!(h.mgmt_port, Some(47991));
-        assert!(apply_advert(&mut h, &[], "", Some(47992)));
+        assert!(apply_advert(&mut h, "", &[], "", Some(47992)));
         assert_eq!(h.mgmt_port, Some(47992));
+    }
+
+    /// An advertised address never moves a pinned card: two machines sharing a hostname
+    /// hand each other's IPs to both adverts. It waits in `prev_addrs` for `probe_known`.
+    #[test]
+    fn apply_advert_notes_its_address_without_moving() {
+        let mut h = KnownHost {
+            addr: "192.168.1.9".into(),
+            fp_hex: "ab".repeat(32),
+            ..Default::default()
+        };
+        assert!(apply_advert(&mut h, "192.168.1.20", &[], "", None));
+        assert_eq!(h.addr, "192.168.1.9");
+        assert_eq!(h.prev_addrs, ["192.168.1.20"]);
+        assert!(!apply_advert(&mut h, "192.168.1.20", &[], "", None));
+        assert!(!apply_advert(&mut h, "192.168.1.9", &[], "", None));
+        // Nothing to verify a candidate against without a pin.
+        let mut bare = KnownHost {
+            addr: "192.168.1.9".into(),
+            ..Default::default()
+        };
+        assert!(!apply_advert(&mut bare, "192.168.1.20", &[], "", None));
+        assert!(bare.prev_addrs.is_empty());
     }
 
     /// Pins render in card order, deduplicated; dangling ids disappear, never error.

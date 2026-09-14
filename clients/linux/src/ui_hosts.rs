@@ -1283,23 +1283,19 @@ impl HostsPage {
                 // exactly the host it was meant to wake.
                 let online = self.probed.get(&saved_key(k)).copied().unwrap_or(false);
                 // Learn what this host's live advert teaches: its wake MAC(s), its OS chain (so
-                // the icon survives it going offline), and its management port, which a host
-                // moved off 47990 needs once mDNS is gone.
+                // the icon survives it going offline), its management port, and an address the
+                // probe sweep asks — the card moves there only once its pin answers.
                 let advert = self.adverts.values().find(|a| matches(k, a));
                 if let Some(a) = advert {
                     crate::trust::learn_from_advert(
                         &k.fp_hex,
                         &k.addr,
                         k.port,
+                        &a.addr,
                         &a.mac,
                         &a.os,
                         a.mgmt_port,
                     );
-                    // Follow the advert only once the saved address stopped answering: a routed
-                    // one (Tailscale) answers on the LAN too, and must survive coming home.
-                    if self.probed.get(&saved_key(k)) == Some(&false) {
-                        crate::trust::rekey_addr(&k.fp_hex, &a.addr, a.port);
-                    }
                 }
                 // Keep this host's advertised actions warm, so the card's menu is built from a
                 // settled answer rather than one that arrives while the menu is open. Gated on

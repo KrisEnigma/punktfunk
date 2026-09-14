@@ -9,5 +9,5 @@
 
 pub use pf_client_core::trust::{
     hex, learn_from_advert, load_or_create_identity, pair_error_message, parse_hex32, probe_known,
-    rekey_addr, KnownHost, KnownHosts, Settings,
+    KnownHost, KnownHosts, Settings,
 };

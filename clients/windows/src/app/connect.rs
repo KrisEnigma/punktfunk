@@ -526,28 +526,14 @@ fn wake_and_connect(
             match tick.outcome {
                 Some(WakeOutcome::Online) => {
                     let mut target = target.clone();
-                    // Came back on a new IP (DHCP): dial the fresh address and re-key the saved
-                    // host so the pin stays reachable next time (keyed by fingerprint;
-                    // addr/port overwritten, `paired`/`mac` preserved by `upsert`).
-                    // Plain `upsert` on purpose — this is an mDNS advert talking, not a trust
-                    // decision, so it may never retire another saved host at that address.
+                    // Came back on a new IP (DHCP): dial the fresh address. The saved card
+                    // moves only when the probe sweep hears its pin there — an advert's
+                    // address can be another machine's.
                     if let Some((addr, port)) =
                         resolved.filter(|(a, p)| *a != target.addr || *p != target.port)
                     {
                         target.addr = addr;
                         target.port = port;
-                        if let Some(fp) = target.fp_hex.clone() {
-                            let mut k = KnownHosts::load();
-                            k.upsert(KnownHost {
-                                name: target.name.clone(),
-                                addr: target.addr.clone(),
-                                port: target.port,
-                                fp_hex: fp,
-                                mac: target.mac.clone(),
-                                ..Default::default()
-                            });
-                            let _ = k.save();
-                        }
                     }
                     initiate(&ctx, target, &ss, &st);
                     return;
