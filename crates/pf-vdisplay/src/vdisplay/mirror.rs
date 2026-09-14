@@ -62,6 +62,10 @@ impl VirtualDisplay for MirrorDisplay {
         "mirror"
     }
 
+    fn producer(&self) -> &'static str {
+        self.compositor.id()
+    }
+
     fn set_hw_cursor(&mut self, on: bool) {
         self.hw_cursor = on;
     }
@@ -207,6 +211,12 @@ fn refresh_hz(mhz: u32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_mirror_names_the_compositor_that_produces_its_stream() {
+        let kwin = MirrorDisplay::new(Compositor::Kwin, "DP-1".into()).unwrap();
+        assert_eq!((kwin.name(), kwin.producer()), ("mirror", "kwin"));
+    }
 
     fn head(connector: &str) -> monitors::PhysicalMonitor {
         monitors::PhysicalMonitor {

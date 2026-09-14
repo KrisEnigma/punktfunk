@@ -6,13 +6,14 @@
 //! same slot the portal path uses.
 //!
 //! Connect to every nested Xwayland (`--xwayland-count`); the pointer lives
-//! on the focused display only. Follow [`GS_CURSOR_FEEDBACK`] on the root —
-//! gamescope hides by warping the pointer to `(w-1, h-1)` and leaving the last
-//! opaque cursor, so motion and `XFixesGetCursorImage` both report the parked
-//! arrow. Poll position at [`POLL`]; refresh shape on `CursorNotify`; re-read
-//! the atom on `PropertyNotify` (and [`FEEDBACK_RESYNC`] if a notify is missed).
+//! on the focused display only. [`GS_MOUSE_FOCUS`] names that display, and its
+//! [`GS_CURSOR_FEEDBACK`] says whether gamescope draws the pointer — gamescope
+//! hides by warping the pointer to `(w-1, h-1)` and leaving the last opaque
+//! cursor, so motion and `XFixesGetCursorImage` both report the parked arrow.
+//! Poll position at [`POLL`]; refresh shape on `CursorNotify`; re-read both
+//! atoms on `PropertyNotify` (and [`FEEDBACK_RESYNC`] if a notify is missed).
 //!
-//! Pin: `pick_active` and [`scale_to_frame`] tests in this module.
+//! Pin: `pick_active`, `focus_index` and [`scale_to_frame`] tests in this module.
 
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
@@ -43,10 +44,14 @@ const REDISCOVER: Duration = Duration::from_secs(2);
 /// the composited position and must out-run a 240 fps session.
 const POLL: Duration = Duration::from_millis(4);
 
-/// gamescope's pointer verdict on every nested root: `1` on the drawing
-/// server, `0` elsewhere and on all of them once hidden. Motion cannot
-/// answer this — see the module docs.
+/// gamescope's pointer verdict on each nested root. Only the focused display's
+/// value is live: gamescope refreshes it for the cursor it draws, and a display
+/// that loses focus keeps its last value. Motion cannot answer this.
 const GS_CURSOR_FEEDBACK: &str = "GAMESCOPE_CURSOR_VISIBLE_FEEDBACK";
+
+/// Name (`:1`) of the display whose cursor gamescope draws, on the root
+/// Xwayland only. A focus on no X display (a Wayland window) draws the root's.
+const GS_MOUSE_FOCUS: &str = "GAMESCOPE_MOUSE_FOCUS_DISPLAY";
 
 /// Covers a missed `PropertyNotify` and an atom published after connect.
 /// One `GetProperty` per display per interval vs the 250 Hz pointer poll.
@@ -143,8 +148,8 @@ fn rediscover(displays: &mut Vec<XDisplay>, targets: &GamescopeCursorTargets, fi
             continue;
         }
         match connect(&dpy, xauth.as_deref()) {
-            Ok((conn, root, root_size, feedback)) => {
-                let d = XDisplay::new(dpy.clone(), conn, root, root_size, feedback);
+            Ok((conn, root, root_size, atoms)) => {
+                let d = XDisplay::new(dpy.clone(), conn, root, root_size, atoms);
                 match existing {
                     Some(i) => {
                         tracing::info!(dpy = %dpy, "gamescope cursor: reconnected a nested Xwayland");
@@ -169,10 +174,9 @@ fn rediscover(displays: &mut Vec<XDisplay>, targets: &GamescopeCursorTargets, fi
     }
 }
 
-/// Connection, root, root pixel size (for [`scale_to_frame`]), and this
-/// display's initial [`GS_CURSOR_FEEDBACK`] reading. Value is `None` when
-/// gamescope publishes no such property here.
-type Connected = (RustConnection, Window, (u16, u16), (Atom, Option<bool>));
+/// Connection, root, root pixel size (for [`scale_to_frame`]), and the interned
+/// [`GS_CURSOR_FEEDBACK`] and [`GS_MOUSE_FOCUS`] atoms (`0` = intern failed).
+type Connected = (RustConnection, Window, (u16, u16), [Atom; 2]);
 
 fn connect(dpy: &str, xauthority: Option<&str>) -> Result<Connected, String> {
     let (conn, screen_num) = connect_conn(dpy, xauthority)?;
@@ -201,12 +205,13 @@ fn connect(dpy: &str, xauthority: Option<&str>) -> Result<Connected, String> {
     // Intern with `only_if_exists=false` so we have an id if gamescope sets
     // the property later. PROPERTY_CHANGE failure is not fatal: resync still
     // tracks it at [`FEEDBACK_RESYNC`].
-    let feedback_atom = conn
-        .intern_atom(false, GS_CURSOR_FEEDBACK.as_bytes())
-        .map_err(ReplyError::from)
-        .and_then(|c| c.reply())
-        .map(|r| r.atom)
-        .unwrap_or(0);
+    let atoms = [GS_CURSOR_FEEDBACK, GS_MOUSE_FOCUS].map(|name| {
+        conn.intern_atom(false, name.as_bytes())
+            .map_err(ReplyError::from)
+            .and_then(|c| c.reply())
+            .map(|r| r.atom)
+            .unwrap_or(0)
+    });
     if let Ok(c) = conn.change_window_attributes(
         root,
         &ChangeWindowAttributesAux::new().event_mask(EventMask::PROPERTY_CHANGE),
@@ -214,8 +219,7 @@ fn connect(dpy: &str, xauthority: Option<&str>) -> Result<Connected, String> {
         let _ = c.check();
     }
     let _ = conn.flush();
-    let feedback = read_cursor_feedback(&conn, root, feedback_atom);
-    Ok((conn, root, root_size, (feedback_atom, feedback)))
+    Ok((conn, root, root_size, atoms))
 }
 
 /// Open `dpy` with `xauthority`'s cookie without touching this process's
@@ -352,6 +356,35 @@ fn read_cursor_feedback(conn: &RustConnection, root: Window, atom: Atom) -> Opti
     Some(value != 0)
 }
 
+/// [`GS_MOUSE_FOCUS`] as a display name; `None` when absent (not the root, or
+/// an older gamescope).
+///
+/// gamescope passes the C string as format 32, so Xlib reads it as an array of
+/// `long` and sends each one's low four bytes. The first element still holds
+/// `:0`..`:99` plus the NUL.
+fn read_mouse_focus(conn: &RustConnection, root: Window, atom: Atom) -> Option<String> {
+    if atom == 0 {
+        return None;
+    }
+    let reply = conn
+        .get_property(false, root, atom, AtomEnum::CARDINAL, 0, 4)
+        .ok()?
+        .reply()
+        .ok()?;
+    match reply.format {
+        8 => focus_name(&reply.value),
+        32 => focus_name(&reply.value32()?.next()?.to_le_bytes()),
+        _ => None,
+    }
+}
+
+/// Bytes up to the first NUL; `None` when empty or not UTF-8.
+fn focus_name(bytes: &[u8]) -> Option<String> {
+    let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+    let name = std::str::from_utf8(&bytes[..end]).ok()?;
+    (!name.is_empty()).then(|| name.to_string())
+}
+
 struct XDisplay {
     name: String,
     conn: RustConnection,
@@ -368,6 +401,10 @@ struct XDisplay {
     feedback_atom: Atom,
     /// `Some(true)` = drawing here, `Some(false)` = not, `None` = no verdict.
     gs_visible: Option<bool>,
+    /// Interned [`GS_MOUSE_FOCUS`] (`0` = intern failed, treated as absent).
+    focus_atom: Atom,
+    /// [`GS_MOUSE_FOCUS`] as published here; `Some` only on the root Xwayland.
+    mouse_focus: Option<String>,
     dead: bool,
 }
 
@@ -377,9 +414,9 @@ impl XDisplay {
         conn: RustConnection,
         root: Window,
         root_size: (u16, u16),
-        (feedback_atom, gs_visible): (Atom, Option<bool>),
+        [feedback_atom, focus_atom]: [Atom; 2],
     ) -> Self {
-        XDisplay {
+        let mut d = XDisplay {
             name,
             conn,
             root,
@@ -388,17 +425,25 @@ impl XDisplay {
             shape: Shape::default(),
             need_shape: true,
             feedback_atom,
-            gs_visible,
+            gs_visible: None,
+            focus_atom,
+            mouse_focus: None,
             dead: false,
-        }
+        };
+        d.resync_gamescope_atoms();
+        d
     }
 
-    /// Keep a previously-seen verdict if the read fails: a transient miss
+    /// Keep a previously-seen value if the read fails: a transient miss
     /// must not look like "no feedback" and re-arm the motion heuristic.
-    fn resync_feedback(&mut self) {
+    fn resync_gamescope_atoms(&mut self) {
         let fresh = read_cursor_feedback(&self.conn, self.root, self.feedback_atom);
         if fresh.is_some() || self.gs_visible.is_none() {
             self.gs_visible = fresh;
+        }
+        let fresh = read_mouse_focus(&self.conn, self.root, self.focus_atom);
+        if fresh.is_some() || self.mouse_focus.is_none() {
+            self.mouse_focus = fresh;
         }
     }
 }
@@ -474,14 +519,15 @@ fn run(
             if d.dead {
                 continue;
             }
-            // CursorNotify = shape changed. PropertyNotify on the feedback atom
-            // = gamescope republished its verdict (the root has many properties).
+            // CursorNotify = shape changed. PropertyNotify on either gamescope atom
+            // = a new verdict or focus (the root has many properties).
             let mut need_feedback = resync;
             loop {
                 match d.conn.poll_for_event() {
                     Ok(Some(Event::XfixesCursorNotify(_))) => d.need_shape = true,
                     Ok(Some(Event::PropertyNotify(ev))) => {
-                        need_feedback |= d.feedback_atom != 0 && ev.atom == d.feedback_atom;
+                        need_feedback |=
+                            ev.atom != 0 && (ev.atom == d.feedback_atom || ev.atom == d.focus_atom);
                     }
                     Ok(Some(_)) => {}
                     Ok(None) => break,
@@ -492,7 +538,7 @@ fn run(
                 }
             }
             if need_feedback && !d.dead {
-                d.resync_feedback();
+                d.resync_gamescope_atoms();
             }
             match fetch_pointer(&d.conn, d.root) {
                 Ok(p) if p.same_screen => {
@@ -514,8 +560,15 @@ fn run(
 
         let states: Vec<(bool, Option<bool>)> =
             displays.iter().map(|d| (d.dead, d.gs_visible)).collect();
+        let focus = focus_index(
+            &displays
+                .iter()
+                .map(|d| (d.dead, d.name.as_str(), d.mouse_focus.as_deref()))
+                .collect::<Vec<_>>(),
+        );
         let hidden_by_gamescope;
-        (active, hidden_by_gamescope) = pick_active(&states, active, active_moved, other_moved);
+        (active, hidden_by_gamescope) =
+            pick_active(&states, focus, active, active_moved, other_moved);
         if displays.get(active).is_none_or(|d| d.dead) {
             match displays.iter().position(|d| !d.dead) {
                 Some(k) => active = k,
@@ -595,18 +648,38 @@ fn run(
     }
 }
 
-/// `(active, hidden)` from per-display `(dead, gs_visible)`.
+/// Live display gamescope draws the cursor from, per `(dead, name, mouse_focus)`.
 ///
-/// Prefer gamescope's verdict: it is right for a static pointer, which motion
-/// cannot read (gamescope parks the pointer at `(w-1, h-1)`). Fallback, only
-/// when no live display publishes a verdict: sticky while the active pointer
-/// moves, else follow another that moved. `hidden` is never set on fallback.
+/// `None` unless a live display publishes [`GS_MOUSE_FOCUS`] and it names a
+/// live connected display. A Wayland window, a display not connected yet, or
+/// an unreadable name keeps [`pick_active`]'s verdict rule.
+fn focus_index(displays: &[(bool, &str, Option<&str>)]) -> Option<usize> {
+    let focus = displays
+        .iter()
+        .find_map(|&(dead, _, focus)| focus.filter(|_| !dead))?;
+    let want = display_number(focus)?;
+    displays
+        .iter()
+        .position(|&(dead, name, _)| !dead && display_number(name).as_ref() == Some(&want))
+}
+
+/// `(active, hidden)` from per-display `(dead, gs_visible)` and [`focus_index`].
+///
+/// With a focus, its verdict alone decides: the other displays' verdicts are
+/// stale. Without one, the first display drawing wins — right for a static
+/// pointer, which motion cannot read (gamescope parks it at `(w-1, h-1)`).
+/// With no verdict either: sticky while the active pointer moves, else follow
+/// another that moved, never `hidden`.
 fn pick_active(
     states: &[(bool, Option<bool>)],
+    focus: Option<usize>,
     active: usize,
     active_moved: bool,
     other_moved: Option<usize>,
 ) -> (usize, bool) {
+    if let Some(i) = focus {
+        return (i, states[i].1 == Some(false));
+    }
     let live = |&(dead, _): &(bool, Option<bool>)| !dead;
     if states.iter().filter(|s| live(s)).any(|(_, v)| v.is_some()) {
         return match states.iter().position(|s| live(s) && s.1 == Some(true)) {
@@ -675,7 +748,8 @@ fn argb_premul_to_straight_rgba(argb: &[u32]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::{
-        display_number, mit_magic_cookie, pick_active, scale_to_frame, MIT_MAGIC_COOKIE_1,
+        display_number, focus_index, focus_name, mit_magic_cookie, pick_active, scale_to_frame,
+        MIT_MAGIC_COOKIE_1,
     };
 
     fn entry(family: u16, address: &[u8], number: &[u8], name: &[u8], data: &[u8]) -> Vec<u8> {
@@ -806,39 +880,104 @@ mod tests {
     fn follows_the_display_gamescope_draws_on() {
         // Verdict beats motion, including when only the parked display moved.
         let states = [(false, Some(false)), (false, Some(true))];
-        assert_eq!(pick_active(&states, BPM, false, Some(BPM)), (GAME, false));
+        assert_eq!(
+            pick_active(&states, None, BPM, false, Some(BPM)),
+            (GAME, false)
+        );
     }
 
     #[test]
     fn a_pointer_gamescope_draws_nowhere_is_hidden_not_parked() {
         let states = [(false, Some(false)), (false, Some(false))];
         // Keep `active` (shape + last position stay warm) but hidden.
-        assert_eq!(pick_active(&states, GAME, false, None), (GAME, true));
+        assert_eq!(pick_active(&states, None, GAME, false, None), (GAME, true));
     }
 
     #[test]
     fn re_show_returns_to_the_drawing_display() {
         let states = [(false, Some(true)), (false, Some(false))];
-        assert_eq!(pick_active(&states, GAME, false, None), (BPM, false));
+        assert_eq!(pick_active(&states, None, GAME, false, None), (BPM, false));
     }
 
     #[test]
     fn a_dead_displays_verdict_is_ignored() {
         // Stale `Some(true)` on an exited Xwayland must not win.
         let states = [(false, Some(true)), (true, Some(true))];
-        assert_eq!(pick_active(&states, GAME, false, None), (BPM, false));
+        assert_eq!(pick_active(&states, None, GAME, false, None), (BPM, false));
         // A dead display's `Some` must not count as "this gamescope publishes
         // a verdict" — that would blank the cursor forever.
         let states = [(false, None), (true, Some(false))];
-        assert_eq!(pick_active(&states, BPM, false, Some(GAME)), (GAME, false));
+        assert_eq!(
+            pick_active(&states, None, BPM, false, Some(GAME)),
+            (GAME, false)
+        );
     }
 
     #[test]
     fn no_verdict_falls_back_to_the_motion_heuristic() {
         let none = [(false, None), (false, None)];
-        assert_eq!(pick_active(&none, BPM, true, Some(GAME)), (BPM, false));
-        assert_eq!(pick_active(&none, BPM, false, Some(GAME)), (GAME, false));
+        assert_eq!(
+            pick_active(&none, None, BPM, true, Some(GAME)),
+            (BPM, false)
+        );
+        assert_eq!(
+            pick_active(&none, None, BPM, false, Some(GAME)),
+            (GAME, false)
+        );
         // Never `hidden` on this path (would blank an older gamescope).
-        assert_eq!(pick_active(&none, BPM, false, None), (BPM, false));
+        assert_eq!(pick_active(&none, None, BPM, false, None), (BPM, false));
+    }
+
+    #[test]
+    fn a_game_hiding_the_pointer_beats_big_pictures_stale_verdict() {
+        // Big Picture lost focus while drawing, so its `1` never clears.
+        let states = [(false, Some(true)), (false, Some(false))];
+        assert_eq!(
+            pick_active(&states, Some(GAME), BPM, false, None),
+            (GAME, true)
+        );
+        // The Steam overlay takes focus back to display 0.
+        let states = [(false, Some(true)), (false, Some(true))];
+        assert_eq!(
+            pick_active(&states, Some(BPM), GAME, false, Some(GAME)),
+            (BPM, false)
+        );
+        // A focused display with no verdict yet shows its shape.
+        let states = [(false, Some(true)), (false, None)];
+        assert_eq!(
+            pick_active(&states, Some(GAME), BPM, false, None),
+            (GAME, false)
+        );
+    }
+
+    #[test]
+    fn focus_resolves_against_the_connected_displays() {
+        let root = |focus| [(false, ":0", Some(focus)), (false, ":1.0", None)];
+        assert_eq!(focus_index(&root(":1")), Some(GAME));
+        assert_eq!(focus_index(&root(":0")), Some(BPM));
+        // Wayland window, not connected (yet), or unreadable: the verdict rule.
+        assert_eq!(focus_index(&root("gamescope-0")), None);
+        assert_eq!(focus_index(&root(":2")), None);
+        assert_eq!(focus_index(&root("game")), None);
+        let dead_game = [(false, ":0", Some(":1")), (true, ":1", None)];
+        assert_eq!(focus_index(&dead_game), None);
+        // No live root publishing a focus: the verdict fallback.
+        assert_eq!(
+            focus_index(&[(false, ":0", None), (false, ":1", None)]),
+            None
+        );
+        assert_eq!(
+            focus_index(&[(true, ":0", Some(":1")), (false, ":1", None)]),
+            None
+        );
+    }
+
+    #[test]
+    fn a_format_32_focus_name_parses_from_its_first_element() {
+        // Format 32 keeps bytes 0..4 of the string: `:1`, its NUL, one stray byte.
+        assert_eq!(focus_name(&[b':', b'1', 0, 0xAB]).as_deref(), Some(":1"));
+        assert_eq!(focus_name(b":12\0").as_deref(), Some(":12"));
+        assert_eq!(focus_name(b"game").as_deref(), Some("game"));
+        assert_eq!(focus_name(&[0, 1, 2, 3]), None);
     }
 }
