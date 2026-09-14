@@ -9,14 +9,15 @@ handshake, and a setting the host can't honor is a quiet downgrade rather than a
 
 ## Where the settings live
 
-The Linux, Windows, Mac, iPhone/iPad and Android apps group settings the same way — **General**,
-**Display**, **Input**, **Audio**, **Controllers** — under *Preferences* on Linux and *Settings*
-elsewhere. The Apple TV app and any settings screen reached with a controller show one steppable
-list instead — **Stream**, **Video**, **Presentation**, **Audio**, **Controller**, **Touchscreen**,
-**Interface**, **Presets** — the client's **console home** (not the host's
-[web console](/docs/web-console)). On a Steam Deck that list *is* the settings surface: the
-[Decky plugin](/docs/steam-deck) is a launcher with no settings of its own, and its **Open
-Punktfunk** button opens the console home from the Quick Access Menu.
+The Linux, Windows, Mac, iPhone/iPad, Apple TV and Android apps group settings the same way —
+**General**, **Display**, **Input**, **Audio**, **Controllers** — under *Preferences* on Linux and
+*Settings* elsewhere. The Apple TV has no **Input**, gives the quick-action dial its own **Quick
+Actions** category, and keeps its categories down the left of the **Settings** tab. Any settings
+screen reached with a controller shows one steppable list instead — **Stream**, **Video**,
+**Presentation**, **Audio**, **Controller**, **Touchscreen**, **Interface**, **Presets** — the
+client's **console home** (not the host's [web console](/docs/web-console)). On a Steam Deck that
+list *is* the settings surface: the [Decky plugin](/docs/steam-deck) is a launcher with no settings
+of its own, and its **Open Punktfunk** button opens the console home from the Quick Access Menu.
 
 Linux stores them in `~/.config/punktfunk/client-gtk-settings.json` (shared with the console home);
 Windows in `%APPDATA%\punktfunk\client-windows-settings.json`; the Apple and Android apps use their
@@ -246,9 +247,11 @@ there is nothing to inhibit.
 **Quick actions** — *Android, iPhone/iPad, macOS, Apple TV and the console home.* What the six
 buttons of the in-stream dial hold, and the custom shortcut chords they can send. The editor is the dial
 itself on every client — tap or click a button to change it, drag one onto another to swap; with a
-controller, the stick walks the buttons, A changes one, Y lifts it and A drops it on another. A
-shortcut is a name, the modifiers, and a key picked on a keyboard. The console keeps the global
-dial only (it never edits presets). See [the quick-action dial](/docs/input#the-quick-action-dial).
+controller, the stick walks the buttons, A changes one, Y lifts it and A drops it on another; on
+Apple TV, Select changes a button and holding it moves or clears it. A shortcut is a name, the
+modifiers, and a key picked on a keyboard. The console keeps the global dial only (it never edits
+presets). Apple TV's default dial leaves out touch mode, the keyboard, the microphone and the
+virtual controller, which a TV can't use. See [the quick-action dial](/docs/input#the-quick-action-dial).
 
 **Virtual controller** — *Android and iPhone/iPad only*, under Quick actions. **Layout**
 (*default: Full*) picks which controls the on-screen controller shows: Full, Sticks and shoulders,

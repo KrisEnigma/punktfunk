@@ -241,7 +241,7 @@ Back; on Android, macOS, Linux and Windows **Ctrl+Alt+Shift+O** (**⌃⌥⇧O** 
 **Stream** menu's Quick Actions item); with a controller, **Select+A** (Select first) on every
 client, and the host never sees the two presses. A mouse's Back button goes to the host, not to
 the dial. What the six buttons hold is the **Quick actions** setting, and the
-editor is the dial itself — on every client but Apple TV, which takes whatever the preset carries.
+editor is the dial itself on every client, Apple TV included (**Settings → Quick Actions**).
 
 While the dial is up the controller belongs to it and the host sees nothing. The **left stick
 aims**: the dial highlights whatever slot your thumb points at, and letting go returns to the

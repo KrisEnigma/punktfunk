@@ -385,7 +385,7 @@ macOS, iOS/iPadOS and tvOS. Android is one app, with Android TV being the same a
 | Windows desktop | ✅ | ✅ | ✅ ¹ | ✅ | ✅ | ❌ ³ |
 | macOS | ✅ | ✅ | ✅ ⁴ | ✅ | ✅ | ❌ ³ |
 | iPhone · iPad | ✅ | ✅ | ✅ ⁴ | ✅ | ✅ | ❌ ³ |
-| Apple TV | ⚠️ ⁵ | ✅ | ✅ ⁴ | ✅ | ✅ | ❌ ³ |
+| Apple TV | ✅ ⁵ | ✅ | ✅ ⁴ | ✅ | ✅ | ❌ ³ |
 | Android · Android TV | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ ³ |
 | Decky (Steam Deck) | ⚠️ ⁶ | ❌ | ⚠️ ⁷ | ❌ | ✅ | ✅ ⁸ |
 | `punktfunk` CLI | ✅ | ✅ ⁹ | ✅ | ✅ | ✅ | ❌ |
@@ -401,12 +401,10 @@ macOS, iOS/iPadOS and tvOS. Android is one app, with Android TV being the same a
    [Updating](/docs/updating).
 3. Updates arrive through the store or installer you got the app from.
 4. On by default on Apple.
-5. Presets are **honoured** on tvOS but cannot be **made** there: the Apple TV settings screens
-   edit the global defaults only — there is no scope switcher and no preset editor. The catalog
-   is per-device and does not sync, and a `punktfunk://` link can only name a preset that already
-   exists, so a fresh Apple TV has none. Of the settings a preset can carry, tvOS also drops the
-   ones the platform has no input for: inverted scroll, modifier layout, variable refresh rate,
-   mouse mode and touch mode.
+5. Made and edited in the Apple TV's **Settings**, from the **Editing** row. The catalog is
+   per-device and does not sync, so a preset made on a phone is not on the TV. Of the settings a
+   preset can carry, tvOS drops the ones the platform has no input for: inverted scroll, modifier
+   layout, variable refresh rate, mouse mode and touch mode.
 6. The panel *shows* the presets a host has pinned, as nested one-tap cards, and streams with
    them; it has no preset surface of its own. Pins are made in a client's own UI — including the
    console home **Open Punktfunk** opens — and are shared, so every client shows the same cards.
