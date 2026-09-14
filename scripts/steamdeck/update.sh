@@ -276,5 +276,7 @@ log "Restarting services"
 systemctl --user restart --no-block punktfunk-host.service
 ok "punktfunk-host restart queued"
 if [ "$WEB" = 1 ]; then systemctl --user restart --no-block punktfunk-web.service; ok "punktfunk-web restart queued"; fi
+# The runner was rebuilt above; try-restart leaves an opted-out runner off.
+systemctl --user try-restart --no-block punktfunk-scripting.service 2>/dev/null || true
 echo
 log "Updated. Status: systemctl --user status punktfunk-host"
