@@ -900,7 +900,7 @@ private fun DisplaySettings(s: Settings, update: (Settings) -> Unit, context: an
     SettingsGroup("Host output", footer = "Display changes apply from the next session.") {
         SettingDropdown(
             label = "Compositor",
-            options = COMPOSITOR_OPTIONS.mapIndexed { i, lbl -> i to lbl },
+            options = COMPOSITOR_OPTIONS,
             selected = s.compositor,
             field = "compositor",
             caption = "Linux hosts only; falls back to auto-detection when unavailable.",

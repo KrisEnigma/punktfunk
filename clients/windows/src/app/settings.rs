@@ -138,8 +138,9 @@ const SMOOTH_BUFFERS: &[(u8, &str)] = &[
 const COMPOSITORS: &[(&str, &str)] = &[
     ("auto", "Automatic"),
     ("kwin", "KWin"),
-    ("wlroots", "wlroots (Sway/Hyprland)"),
     ("mutter", "Mutter (GNOME)"),
+    ("hyprland", "Hyprland"),
+    ("wlroots", "wlroots (Sway/River)"),
     ("gamescope", "gamescope"),
 ];
 

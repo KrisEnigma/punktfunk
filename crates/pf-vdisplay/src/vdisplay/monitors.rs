@@ -124,6 +124,10 @@ pub fn list(compositor: Compositor) -> Result<Vec<PhysicalMonitor>> {
         // ones this crate spawns are headless. Empty list, not an error, for those.
         #[cfg(target_os = "linux")]
         Compositor::Gamescope => crate::gamescope::list_monitors(),
+        #[cfg(target_os = "linux")]
+        Compositor::Windows => {
+            anyhow::bail!("physical-monitor enumeration needs a Linux backend")
+        }
         #[cfg(not(target_os = "linux"))]
         _ => bail!("physical-monitor enumeration is implemented for the Linux backends only"),
     }

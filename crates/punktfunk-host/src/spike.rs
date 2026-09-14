@@ -531,9 +531,9 @@ mod plat {
         ))
     }
 
-    /// The Windows virtual display answers to the KWin name.
+    /// Windows has one virtual-display backend.
     pub(super) fn spike_compositor() -> Result<crate::vdisplay::Compositor> {
-        Ok(crate::vdisplay::Compositor::Kwin)
+        Ok(crate::vdisplay::Compositor::Windows)
     }
 
     /// IDD-push keeps the pixels in the driver and hands this process access units, so the

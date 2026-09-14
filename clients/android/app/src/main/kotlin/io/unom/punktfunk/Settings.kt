@@ -830,13 +830,14 @@ val BITRATE_OPTIONS = listOf(
     500_000 to "500 Mbps",
 )
 
-/** index = CompositorPref wire byte. */
+/** (CompositorPref wire byte, label). Byte 6, a Windows host's echo, is never a choice. */
 val COMPOSITOR_OPTIONS = listOf(
-    "Automatic",
-    "KWin (KDE Plasma)",
-    "wlroots (Sway / Hyprland)",
-    "Mutter (GNOME)",
-    "gamescope",
+    0 to "Automatic",
+    1 to "KWin (KDE Plasma)",
+    3 to "Mutter (GNOME)",
+    5 to "Hyprland",
+    2 to "wlroots (Sway / River)",
+    4 to "gamescope",
 )
 
 /** (verbosity, label) for the stats-overlay detail picker. Order = the live 3-finger-tap cycle. */

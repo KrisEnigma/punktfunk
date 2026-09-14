@@ -14,8 +14,9 @@ enum SettingsOptions {
     static let compositors: [(label: String, tag: Int)] = [
         ("Automatic", 0),
         ("KWin (KDE Plasma)", 1),
-        ("wlroots (Sway / Hyprland)", 2),
         ("Mutter (GNOME)", 3),
+        ("Hyprland", 5),
+        ("wlroots (Sway / River)", 2),
         ("gamescope", 4),
     ]
 

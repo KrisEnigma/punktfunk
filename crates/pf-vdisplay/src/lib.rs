@@ -93,6 +93,8 @@ pub enum Compositor {
     /// [`Wlroots`]: it kept the wlr client protocols after dropping wlroots, so
     /// virtual-input is shared but IPC and portal are not. `design/hyprland-support.md`.
     Hyprland,
+    /// The pf-vdisplay IddCx driver — a Windows host's only backend. Never in [`Compositor::all`].
+    Windows,
 }
 
 impl Compositor {
@@ -104,6 +106,7 @@ impl Compositor {
             Compositor::Mutter => "mutter",
             Compositor::Gamescope => "gamescope",
             Compositor::Hyprland => "hyprland",
+            Compositor::Windows => "windows",
         }
     }
 
@@ -120,6 +123,7 @@ impl Compositor {
             Compositor::Mutter => "Mutter / GNOME",
             Compositor::Gamescope => "gamescope",
             Compositor::Hyprland => "Hyprland",
+            Compositor::Windows => "Windows virtual display",
         }
     }
 
@@ -130,12 +134,13 @@ impl Compositor {
             Compositor::Wlroots => P::Wlroots,
             Compositor::Mutter => P::Mutter,
             Compositor::Gamescope => P::Gamescope,
-            // No distinct wire byte: Hyprland shares the wlroots-family `Wlroots` pref.
-            // `pick_compositor` (host `native`) picks whichever of the two is live.
-            Compositor::Hyprland => P::Wlroots,
+            Compositor::Hyprland => P::Hyprland,
+            Compositor::Windows => P::Windows,
         }
     }
 
+    /// `Wlroots` names the exact backend here; `pick_compositor` (host `native`) widens it
+    /// to Hyprland too, because clients before the Hyprland byte sent it for both.
     pub fn from_pref(p: punktfunk_core::CompositorPref) -> Option<Compositor> {
         use punktfunk_core::CompositorPref as P;
         Some(match p {
@@ -144,10 +149,12 @@ impl Compositor {
             P::Wlroots => Compositor::Wlroots,
             P::Mutter => Compositor::Mutter,
             P::Gamescope => Compositor::Gamescope,
+            P::Hyprland => Compositor::Hyprland,
+            P::Windows => Compositor::Windows,
         })
     }
 
-    /// Every backend, in stable UI/enumeration order.
+    /// Every Linux backend, in stable UI/enumeration order.
     pub fn all() -> [Compositor; 5] {
         [
             Compositor::Kwin,
@@ -191,6 +198,7 @@ pub fn available() -> Vec<Compositor> {
                         Compositor::Mutter => mutter::is_available(),
                         Compositor::Wlroots => wlroots::is_available(),
                         Compositor::Hyprland => hyprland::is_available(),
+                        Compositor::Windows => false,
                     }
             })
             .collect()
@@ -388,11 +396,14 @@ pub fn open(compositor: Compositor) -> Result<Box<dyn VirtualDisplay>> {
             Compositor::Mutter => Ok(Box::new(mutter::MutterDisplay::new()?)),
             Compositor::Wlroots => Ok(Box::new(wlroots::WlrootsDisplay::new()?)),
             Compositor::Hyprland => Ok(Box::new(hyprland::HyprlandDisplay::new()?)),
+            Compositor::Windows => {
+                anyhow::bail!("the Windows virtual display needs a Windows host")
+            }
         }
     }
     #[cfg(target_os = "windows")]
     {
-        // Sole backend is the IddCx driver; `compositor` is unused on Windows.
+        // Sole backend is the IddCx driver, whatever `compositor` says.
         let _ = compositor;
         // `ensure_available` waits out a D0 re-register (wake-from-sleep) and
         // reloads a hostless-zombie adapter (devnode present, interface gone).
@@ -435,6 +446,9 @@ pub fn probe(compositor: Compositor) -> Result<()> {
             Compositor::Hyprland => hyprland::probe(),
             // Spawn / D-Bus / output-on-demand: nothing to pre-check beyond "Linux".
             Compositor::Gamescope | Compositor::Mutter | Compositor::Wlroots => Ok(()),
+            Compositor::Windows => {
+                anyhow::bail!("the Windows virtual display needs a Windows host")
+            }
         }
     }
     #[cfg(target_os = "windows")]

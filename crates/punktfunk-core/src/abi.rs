@@ -1359,12 +1359,16 @@ unsafe fn opt_cstr<'a>(p: *const std::os::raw::c_char) -> std::result::Result<Op
 pub const PUNKTFUNK_COMPOSITOR_AUTO: u32 = 0;
 /// KWin / KDE Plasma.
 pub const PUNKTFUNK_COMPOSITOR_KWIN: u32 = 1;
-/// wlroots (Sway / Hyprland).
+/// wlroots (Sway / River). Older clients sent it for Hyprland too; the host still honors that.
 pub const PUNKTFUNK_COMPOSITOR_WLROOTS: u32 = 2;
 /// Mutter / GNOME.
 pub const PUNKTFUNK_COMPOSITOR_MUTTER: u32 = 3;
 /// gamescope (spawned nested).
 pub const PUNKTFUNK_COMPOSITOR_GAMESCOPE: u32 = 4;
+/// Hyprland.
+pub const PUNKTFUNK_COMPOSITOR_HYPRLAND: u32 = 5;
+/// A Windows host's virtual display. Only ever resolved, never requested.
+pub const PUNKTFUNK_COMPOSITOR_WINDOWS: u32 = 6;
 
 /// Gamepad-backend preference for [`punktfunk_connect_ex2`]: which virtual pad
 /// the host creates. Precedence: client choice > `PUNKTFUNK_GAMEPAD` env > X-Box 360.

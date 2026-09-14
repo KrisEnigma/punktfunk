@@ -113,6 +113,8 @@ impl VirtualDisplay for MirrorDisplay {
             Compositor::Gamescope => {
                 crate::gamescope::stream_existing_output(&target.connector, self.hw_cursor)?
             }
+            #[cfg(target_os = "linux")]
+            Compositor::Windows => bail!("mirroring needs a Linux backend"),
             // Linux match is exhaustive: a new `Compositor` is a compile error here.
             // This arm exists because every arm above is `cfg(target_os = "linux")`.
             #[cfg(not(target_os = "linux"))]
@@ -189,6 +191,7 @@ fn names_ours_conclusively(compositor: Compositor) -> bool {
         // Sway's `HEADLESS-N` includes its own; Mutter has no distinguishing name;
         // gamescope only reports the real DRM head. A hint at most.
         Compositor::Wlroots | Compositor::Mutter | Compositor::Gamescope => false,
+        Compositor::Windows => false,
     }
 }
 

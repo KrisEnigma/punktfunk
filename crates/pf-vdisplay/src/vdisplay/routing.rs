@@ -124,7 +124,7 @@ fn operator_gamescope() -> &'static OperatorGamescope {
 /// `pf_inject::set_backend_id` next to [`resolve_gamescope_route`].
 ///
 /// `&'static str` because this crate must not depend on pf-inject; the four
-/// ids are the injector's `PUNKTFUNK_INPUT_BACKEND` vocabulary.
+/// Linux ids are the injector's `PUNKTFUNK_INPUT_BACKEND` vocabulary.
 ///
 /// A return value, not a `setenv`: `pf_inject::default_backend` `getenv`s on
 /// the injector thread, and a per-session write races `environ`. The operator
@@ -143,6 +143,8 @@ pub fn input_backend_id(chosen: Compositor) -> &'static str {
         // Hyprland still speaks `zwlr_virtual_pointer_v1` + `zwp_virtual_keyboard_v1`
         // — same wlr injector as sway/river.
         Compositor::Wlroots | Compositor::Hyprland => "wlr",
+        // pf-inject ignores the id off Linux; Windows has one injector.
+        Compositor::Windows => "windows",
     }
 }
 
@@ -275,7 +277,8 @@ pub fn focus_streamed_output(compositor: Compositor, name: &str) -> bool {
         | Compositor::Wlroots
         | Compositor::Kwin
         | Compositor::Mutter
-        | Compositor::Gamescope => false,
+        | Compositor::Gamescope
+        | Compositor::Windows => false,
     }
 }
 
@@ -536,6 +539,7 @@ mod tests {
         // Hyprland shares sway's wlr virtual-input protocols — same injector on purpose.
         assert_eq!(input_backend_id(Compositor::Wlroots), "wlr");
         assert_eq!(input_backend_id(Compositor::Hyprland), "wlr");
+        assert_eq!(input_backend_id(Compositor::Windows), "windows");
     }
 
     /// Sample must not move when `PUNKTFUNK_GAMESCOPE_NODE` is written afterwards.

@@ -24,9 +24,8 @@ fn pick_compositor(
     use crate::vdisplay::Compositor;
     match Compositor::from_pref(pref) {
         Some(want) if available.contains(&want) => Some(want),
-        // `CompositorPref::Wlroots` is the family (sway/river + Hyprland), not
-        // one backend. Honor it with the live family member, else the first
-        // available of the two.
+        // Clients before the Hyprland byte sent `Wlroots` for Hyprland too, so it
+        // stays the family: the live member, else the first available of the two.
         Some(Compositor::Wlroots) => match detected {
             Some(d @ (Compositor::Wlroots | Compositor::Hyprland)) => Some(d),
             _ => [Compositor::Wlroots, Compositor::Hyprland]
@@ -102,12 +101,12 @@ pub(super) fn resolve_compositor(
     Option<crate::vdisplay::GamescopeRoute>,
 )> {
     use crate::vdisplay::Compositor;
-    // Windows has one virtual-display backend; `vdisplay::open` ignores the
-    // compositor arg, so skip the Linux session-detection state machine.
+    // Windows has one virtual-display backend, so skip the Linux
+    // session-detection state machine.
     #[cfg(target_os = "windows")]
     {
         let _ = (pref, dedicated_launch);
-        Ok((Compositor::Kwin, None))
+        Ok((Compositor::Windows, None))
     }
     #[cfg(not(target_os = "windows"))]
     {
@@ -284,6 +283,18 @@ mod tests {
         );
         // `Wlroots` pref is the family: resolve to whichever of sway/river
         // and Hyprland is the live session.
+        assert_eq!(
+            pick_compositor(
+                CompositorPref::Hyprland,
+                &[Hyprland, Gamescope],
+                Some(Gamescope)
+            ),
+            Some(Hyprland)
+        );
+        assert_eq!(
+            pick_compositor(CompositorPref::Windows, &[Kwin], Some(Kwin)),
+            Some(Kwin)
+        );
         assert_eq!(
             pick_compositor(CompositorPref::Wlroots, &[Hyprland], Some(Hyprland)),
             Some(Hyprland)

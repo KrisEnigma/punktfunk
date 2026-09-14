@@ -69,6 +69,9 @@ pub enum CompositorPref {
     Mutter,
     /// Nested process; available wherever the binary is installed.
     Gamescope,
+    Hyprland,
+    /// The Windows virtual display, that host's only backend. A Welcome echo, never a choice.
+    Windows,
 }
 
 impl CompositorPref {
@@ -79,6 +82,8 @@ impl CompositorPref {
             CompositorPref::Wlroots => 2,
             CompositorPref::Mutter => 3,
             CompositorPref::Gamescope => 4,
+            CompositorPref::Hyprland => 5,
+            CompositorPref::Windows => 6,
         }
     }
 
@@ -89,6 +94,8 @@ impl CompositorPref {
             2 => CompositorPref::Wlroots,
             3 => CompositorPref::Mutter,
             4 => CompositorPref::Gamescope,
+            5 => CompositorPref::Hyprland,
+            6 => CompositorPref::Windows,
             _ => CompositorPref::Auto,
         }
     }
@@ -98,9 +105,11 @@ impl CompositorPref {
         Some(match s.trim().to_ascii_lowercase().as_str() {
             "auto" | "detect" | "default" => CompositorPref::Auto,
             "kwin" | "kde" | "plasma" => CompositorPref::Kwin,
-            "wlroots" | "sway" | "hyprland" | "wlr" => CompositorPref::Wlroots,
+            "wlroots" | "sway" | "river" | "wlr" => CompositorPref::Wlroots,
             "mutter" | "gnome" => CompositorPref::Mutter,
             "gamescope" => CompositorPref::Gamescope,
+            "hyprland" => CompositorPref::Hyprland,
+            "windows" => CompositorPref::Windows,
             _ => return None,
         })
     }
@@ -112,6 +121,8 @@ impl CompositorPref {
             CompositorPref::Wlroots => "wlroots",
             CompositorPref::Mutter => "mutter",
             CompositorPref::Gamescope => "gamescope",
+            CompositorPref::Hyprland => "hyprland",
+            CompositorPref::Windows => "windows",
         }
     }
 }
@@ -747,6 +758,8 @@ mod tests {
             CompositorPref::Wlroots,
             CompositorPref::Mutter,
             CompositorPref::Gamescope,
+            CompositorPref::Hyprland,
+            CompositorPref::Windows,
         ] {
             assert_eq!(CompositorPref::from_u8(p.to_u8()), p);
             assert_eq!(CompositorPref::from_name(p.as_str()), Some(p));
