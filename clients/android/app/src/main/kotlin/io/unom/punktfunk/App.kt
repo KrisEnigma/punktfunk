@@ -176,6 +176,18 @@ fun App(forceGamepadUi: Boolean = false) {
         onDispose { lifecycle.removeObserver(obs) }
     }
 
+    // The key service's disclosure, once, in normal use: Play rejects one reachable only from
+    // Settings. Only where the service matters (a hardware keyboard, not a TV), never mid-stream.
+    var keyDisclosure by remember {
+        mutableStateOf(!tv && hasPhysicalKeyboard() && !KeyCaptureService.disclosureAnswered(context))
+    }
+    if (keyDisclosure && session == null && !KeyCaptureService.running) {
+        KeyCaptureDisclosure(onDismiss = {
+            keyDisclosure = false
+            KeyCaptureService.markDisclosureAnswered(context)
+        })
+    }
+
     // System bars have ONE owner: this effect. The stream and the console shell both want the
     // whole panel (bars hidden, a swipe shows them transiently); the touch shell wants them back.
     // It cannot live inside the screens themselves: `AnimatedContent` below keeps the outgoing
