@@ -216,6 +216,7 @@ fn run(
             crate::launchreg::claim(
                 life.fingerprint.as_deref(),
                 t.game.id.as_deref(),
+                t.launcher,
                 fresh_stamp,
             )
         });
@@ -658,8 +659,9 @@ fn open_gs_virtual_source(
             crate::vdisplay::observe_session_instance(&active);
             crate::vdisplay::apply_session_env(&active);
             // Gate on a resolved command so an unresolvable entry falls back to auto routing.
+            // Host policy only: a Moonlight cert is not a console device, same as admission.
             let has_launch = launch.and_then(|t| t.command.as_deref()).is_some();
-            if crate::vdisplay::wants_dedicated_game_session(has_launch) {
+            if crate::vdisplay::wants_dedicated_game_session(has_launch, None) {
                 let c = crate::vdisplay::Compositor::Gamescope;
                 crate::inject::set_backend_id(crate::vdisplay::input_backend_id(c));
                 (c, crate::vdisplay::resolve_gamescope_route(c, true))

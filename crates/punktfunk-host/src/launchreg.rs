@@ -257,8 +257,16 @@ fn is_other_running(rec: &Record, fp: &str, keep_game_id: Option<&str>, live: Li
 /// taken before spawn; used for [`Plan::Spawn`], discarded for
 /// [`Plan::Adopt`]. Hold the returned [`Claim`] for the session
 /// ([`crate::gamelease::SessionGuard`]); drop starts the reconnect window.
-pub fn claim(fingerprint: Option<&str>, game_id: Option<&str>, fresh_stamp: Option<f64>) -> Claim {
-    let Some(key) = key_for(fingerprint, game_id) else {
+///
+/// A `launcher` tile is never recorded, so it always spawns: its lease is
+/// untracked, and re-opening a single-instance launcher UI is harmless.
+pub fn claim(
+    fingerprint: Option<&str>,
+    game_id: Option<&str>,
+    launcher: bool,
+    fresh_stamp: Option<f64>,
+) -> Claim {
+    let Some(key) = key_for(fingerprint, game_id.filter(|_| !launcher)) else {
         return Claim {
             key: None,
             id: 0,
@@ -587,13 +595,13 @@ mod tests {
     #[test]
     fn a_reconnect_adopts_the_original_launch() {
         let (fp, app) = (Some("fp-reconnect"), Some("steam:reconnect"));
-        let first = claim(fp, app, Some(100.0));
+        let first = claim(fp, app, false, Some(100.0));
         assert!(first.must_spawn(), "the first session starts the title");
         assert_eq!(first.stamp(), Some(100.0));
         first.launched();
         drop(first); // opens the reconnect window
 
-        let second = claim(fp, app, Some(900.0));
+        let second = claim(fp, app, false, Some(900.0));
         assert!(
             !second.must_spawn(),
             "a reconnect inside the window must adopt the running launch, not start a second copy"
@@ -607,21 +615,37 @@ mod tests {
         second.abandon(); // process-global registry; leave it as we found it
 
         // Unrecordable still carries this session's own stamp.
-        let anon = claim(None, app, Some(7.0));
+        let anon = claim(None, app, false, Some(7.0));
         assert!(anon.must_spawn());
         assert_eq!(anon.stamp(), Some(7.0));
         assert!(anon.procs().is_none());
     }
 
+    /// A launcher lease is untracked (`Unknown` forever), so a record would
+    /// swallow every reopen inside the window: the player gets no launcher.
+    #[test]
+    fn a_launcher_opens_again_on_every_session() {
+        let (fp, app) = (Some("fp-launcher"), Some("steam:big-picture"));
+        let first = claim(fp, app, true, Some(100.0));
+        assert!(first.must_spawn());
+        first.launched();
+        drop(first);
+
+        let second = claim(fp, app, true, Some(900.0));
+        assert!(second.must_spawn(), "a launcher must reopen, not adopt");
+        assert_eq!(second.stamp(), Some(900.0));
+        assert!(!second.superseded());
+    }
+
     #[test]
     fn an_abandoned_launch_is_never_reclaimed() {
         let (fp, app) = (Some("fp-fail"), Some("custom:fail"));
-        let first = claim(fp, app, Some(100.0));
+        let first = claim(fp, app, false, Some(100.0));
         assert!(first.must_spawn());
         first.abandon(); // the spawn failed
         drop(first);
 
-        let second = claim(fp, app, Some(900.0));
+        let second = claim(fp, app, false, Some(900.0));
         assert!(second.must_spawn(), "a failed launch must be retried");
         assert_eq!(second.stamp(), Some(900.0));
         second.abandon();
@@ -630,10 +654,10 @@ mod tests {
     #[test]
     fn an_overlapping_session_adopts_a_still_held_launch() {
         let (fp, app) = (Some("fp-overlap"), Some("steam:overlap"));
-        let old = claim(fp, app, Some(100.0));
+        let old = claim(fp, app, false, Some(100.0));
         old.launched();
         // The old session has not torn down yet.
-        let new = claim(fp, app, Some(900.0));
+        let new = claim(fp, app, false, Some(900.0));
         assert!(!new.must_spawn(), "a held launch is still ours");
         assert_eq!(new.stamp(), Some(100.0));
         // Old session sees superseded, so teardown policy leaves the game.
@@ -649,7 +673,7 @@ mod tests {
 
     #[test]
     fn an_unrecordable_launch_never_supersedes_anything() {
-        let anon = claim(None, None, None);
+        let anon = claim(None, None, false, None);
         assert!(anon.must_spawn());
         assert!(!anon.superseded());
         anon.launched(); // no-op

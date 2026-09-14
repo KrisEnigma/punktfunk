@@ -68,9 +68,10 @@ fn command_for(spec: &LaunchSpec) -> Option<String> {
             .then(|| format!("lutris lutris:rungameid/{}", spec.value)),
         #[cfg(target_os = "linux")]
         "heroic" => heroic_command(&spec.value),
-        // Steam client UI (design D4). Nested in gamescope this is SteamOS game-mode.
+        // Steam client UI (design D4). `-gamepadui` boots a fresh Steam into Big Picture (SteamOS
+        // game-mode when nested); an already-running Steam ignores it and obeys only the URI.
         "steam_ui" => match spec.value.as_str() {
-            "bigpicture" => Some("steam -gamepadui".into()),
+            "bigpicture" => Some("steam -gamepadui steam://open/bigpicture".into()),
             "desktop" => Some("steam".into()),
             _ => None,
         },
@@ -350,8 +351,11 @@ mod tests {
                 value: v.into(),
             })
         };
-        // Nested in gamescope this is the SteamOS `--steam` game-mode shape.
-        assert_eq!(ui("bigpicture").as_deref(), Some("steam -gamepadui"));
+        // The flag covers a cold Steam; the URI is all a running desktop Steam acts on.
+        assert_eq!(
+            ui("bigpicture").as_deref(),
+            Some("steam -gamepadui steam://open/bigpicture")
+        );
         assert_eq!(ui("desktop").as_deref(), Some("steam"));
         assert_eq!(ui("nonsense"), None);
         assert_eq!(ui(""), None);

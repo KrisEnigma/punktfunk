@@ -825,12 +825,6 @@ impl DisplayPolicyStore {
         self.configured().map(|p| p.effective())
     }
 
-    /// Game-session routing, read off the stored policy (default `Auto`).
-    /// A preset selection never resets it.
-    pub fn game_session(&self) -> GameSession {
-        self.get().game_session
-    }
-
     pub fn ddc_power_off(&self) -> bool {
         self.get().ddc_power_off
     }

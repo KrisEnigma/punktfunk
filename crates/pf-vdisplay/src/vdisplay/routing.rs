@@ -204,12 +204,16 @@ pub fn resolve_gamescope_route(
 
 /// Dedicated headless gamescope for this launch (`game_session=dedicated`).
 ///
-/// True only with a launch, dedicated policy, and gamescope actually
-/// available — else it degrades to `auto`. Handshake value, threaded into
+/// True only with a launch, dedicated policy for this `client` (its overlay
+/// over the host's), and gamescope actually available — else it degrades to
+/// `auto`. `None` is the host policy. Handshake value, threaded into
 /// [`resolve_gamescope_route`] / [`resolve_compositor`]; no new env knob.
-pub fn wants_dedicated_game_session(has_launch: bool) -> bool {
+pub fn wants_dedicated_game_session(has_launch: bool, client: Option<[u8; 32]>) -> bool {
     use policy::GameSession;
-    if !has_launch || policy::prefs().game_session() != GameSession::Dedicated {
+    let session = policy::prefs()
+        .get()
+        .game_session_for(policy::fp_hex(client).as_deref());
+    if !has_launch || session != GameSession::Dedicated {
         return false;
     }
     #[cfg(target_os = "linux")]
