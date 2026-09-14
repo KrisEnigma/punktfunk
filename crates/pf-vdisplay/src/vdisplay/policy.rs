@@ -219,12 +219,12 @@ pub struct DisplayPolicy {
     /// physical. Best-effort; no DDC/CI → skip. Orthogonal to `preset`; default off.
     #[serde(default)]
     pub ddc_power_off: bool,
-    /// Windows: disable the operator's physical monitor PnP nodes for the
-    /// stream and re-enable at teardown. Persistent so a re-HPD stays off.
-    /// Opt-in. Inactive externals are default-on via
-    /// [`standby_sink_neutralise`]; this flag still implies that. A crash
-    /// journal re-enables leftovers. Orthogonal to `preset`; default off.
-    #[serde(default)]
+    /// Windows: disable the PnP nodes of the physical monitors the isolate
+    /// switched off, for the stream; re-enabled at teardown. Persistent so a
+    /// re-HPD stays off. Inactive externals are [`standby_sink_neutralise`]'s.
+    /// A crash journal re-enables leftovers. Orthogonal to `preset`; default
+    /// on, and a v1 file migrates to on.
+    #[serde(default = "yes")]
     pub pnp_disable_monitors: bool,
     /// Windows/AMD: pin connector EDID emulation while streaming
     /// (`pf_win_display::adl_emul`). Locked at first Exclusive isolate
@@ -337,9 +337,10 @@ impl ClientOverlay {
     }
 }
 
-/// Schema this host writes. Other versions still load (fields default) but
-/// the mismatch is logged — silent treat-as-ours skips a migration.
-const CURRENT_VERSION: u32 = 1;
+/// Schema this host writes. A newer file loads best-effort with a warning; an
+/// older one migrates in [`DisplayPolicyStore::parse`]. 2: monitor PnP disable
+/// on by default.
+const CURRENT_VERSION: u32 = 2;
 
 /// Cap on `KeepAlive::Duration.seconds` (24 h). Longer is `forever`;
 /// unclamped `u32` is a deadline the reaper never reaches. `Forever` stays
@@ -352,6 +353,9 @@ const MAX_IDENTITY_SLOT: u32 = 15;
 
 fn one() -> u32 {
     1
+}
+fn yes() -> bool {
+    true
 }
 fn default_max_displays() -> u32 {
     4
@@ -372,7 +376,7 @@ impl Default for DisplayPolicy {
             max_displays: 4,
             game_session: GameSession::default(),
             ddc_power_off: false,
-            pnp_disable_monitors: false,
+            pnp_disable_monitors: true,
             edid_lock: false,
             capture_monitor: None,
             keep_monitors: Vec::new(),
@@ -696,7 +700,8 @@ impl DisplayPolicyStore {
     /// Parse with salvage. Split from [`Self::load_from`] so recovery is unit-tested.
     ///
     /// Three layers: (1) strict parse for console-written files; (2) version
-    /// check so a future document is announced, not silently treated as ours;
+    /// check: a future document is announced, not silently treated as ours,
+    /// and an older one migrates ([`CURRENT_VERSION`]);
     /// (3) per-axis salvage — a member that fails alone is dropped, the rest
     /// survive. Dropping one axis is smaller than reverting the whole file.
     ///
@@ -709,9 +714,9 @@ impl DisplayPolicyStore {
     ///   console-has-configured gate; `DisplayPolicy::default()` is `PerClient`
     ///   identity, while unconfigured Linux uses `Shared`. Judge "nothing" on
     ///   the result (dropped something and landed on default), not surviving
-    ///   keys — serde ignores unknowns and `version` selects no behaviour.
+    ///   keys — serde ignores unknowns, and `version` names no axis.
     fn parse(path: &std::path::Path, bytes: &[u8]) -> Option<DisplayPolicy> {
-        let value: serde_json::Value = match serde_json::from_slice(bytes) {
+        let mut value: serde_json::Value = match serde_json::from_slice(bytes) {
             Ok(v) => v,
             Err(e) => {
                 tracing::warn!(path = %path.display(),
@@ -724,11 +729,18 @@ impl DisplayPolicyStore {
             .get("version")
             .and_then(serde_json::Value::as_u64)
             .unwrap_or(CURRENT_VERSION as u64);
-        if claimed != CURRENT_VERSION as u64 {
+        if claimed > CURRENT_VERSION as u64 {
             tracing::warn!(path = %path.display(), claimed, current = CURRENT_VERSION,
                 "display-settings.json claims a schema version this host does not know — reading it \
                  best-effort (unknown axes are ignored); the next write pins it back to the current \
                  version");
+        }
+        // v1 wrote the monitor PnP disable while it was off by default: turn it on once. An
+        // operator who turns it off again writes a v2 file, which stays off.
+        if claimed < 2 {
+            if let Some(o) = value.as_object_mut() {
+                o.insert("pnp_disable_monitors".into(), serde_json::Value::Bool(true));
+            }
         }
         match serde_json::from_value::<DisplayPolicy>(value.clone()) {
             Ok(p) => Some(p.sanitized()),
@@ -823,8 +835,10 @@ impl DisplayPolicyStore {
         self.get().ddc_power_off
     }
 
+    /// PnP-disable the monitors the isolate switched off. Default on;
+    /// `PUNKTFUNK_STANDBY_SINK_KEEP` vetoes it with every other PnP disable.
     pub fn pnp_disable_monitors(&self) -> bool {
-        self.get().pnp_disable_monitors
+        self.get().pnp_disable_monitors && self.standby_sink_neutralise()
     }
 
     pub fn edid_lock(&self) -> bool {
@@ -832,11 +846,10 @@ impl DisplayPolicyStore {
     }
 
     /// Neutralise connected-but-inactive external sinks for the stream.
-    /// Default on ([`standby_sink_neutralise`]). Operator displays are the
-    /// opt-in [`Self::pnp_disable_monitors`] selector, not this one.
+    /// Default on ([`standby_sink_neutralise`]). Monitors the isolate switched
+    /// off are [`Self::pnp_disable_monitors`]'s, not this one's.
     pub fn standby_sink_neutralise(&self) -> bool {
         standby_sink_neutralise(std::env::var("PUNKTFUNK_STANDBY_SINK_KEEP").ok().as_deref())
-            || self.get().pnp_disable_monitors
     }
 
     /// Persist + adopt. Memory changes only after the disk write; the
@@ -1360,7 +1373,7 @@ mod tests {
             ..DisplayPolicy::default()
         }
         .sanitized();
-        assert_eq!(p.version, 1);
+        assert_eq!(p.version, CURRENT_VERSION);
         assert_eq!(p.max_displays, 1);
         let p = DisplayPolicy {
             max_displays: 999,
@@ -1416,9 +1429,26 @@ mod tests {
         assert_eq!(p.keep_alive, KeepAlive::default());
         assert_eq!(p.topology, Topology::Auto);
         assert_eq!(p.version, 1);
-        // Files from before the experimental axes default them off.
+        // Files from before these axes: DDC off, monitor PnP disable on.
         assert!(!p.ddc_power_off);
-        assert!(!p.pnp_disable_monitors);
+        assert!(p.pnp_disable_monitors);
+    }
+
+    /// A v1 file stored the monitor PnP disable off by default; loading turns it on once.
+    /// A v2 file that says off stays off.
+    #[test]
+    fn v1_file_migrates_pnp_disable_on() {
+        let path = std::path::Path::new("display-settings.json");
+        let v1 = br#"{ "version": 1, "preset": "custom", "pnp_disable_monitors": false }"#;
+        let p = DisplayPolicyStore::parse(path, v1).unwrap();
+        assert!(p.pnp_disable_monitors);
+        assert_eq!(p.version, CURRENT_VERSION);
+        let v2 = br#"{ "version": 2, "preset": "custom", "pnp_disable_monitors": false }"#;
+        assert!(
+            !DisplayPolicyStore::parse(path, v2)
+                .unwrap()
+                .pnp_disable_monitors
+        );
     }
 
     #[test]

@@ -231,7 +231,8 @@ and turn this off.
 ### Disable monitor devices (PnP)
 
 On top of removing the monitors from the desktop, the host disables their Windows device entries
-for the duration of the stream.
+for the duration of the stream. This one is **on by default**; turn it off if a monitor ever fails
+to come back after a stream.
 
 A standby monitor or TV that keeps waking its connection — auto input scan, instant-on — can then
 no longer interrupt the stream, because Windows ignores its wake events entirely while the device

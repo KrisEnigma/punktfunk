@@ -1,7 +1,7 @@
-//! PnP monitor-devnode disable. Two selectors, two defaults:
-//! [`disable_connected_inactive`] (standby sinks — on by default; see
-//! `pf_vdisplay::policy::standby_sink_neutralise`) and [`disable_for_deactivated`] (the operator's
-//! own displays — experimental opt-in `pnp_disable_monitors`).
+//! PnP monitor-devnode disable. Two selectors, both on by default:
+//! [`disable_connected_inactive`] (standby sinks; `pf_vdisplay::policy::standby_sink_neutralise`)
+//! and [`disable_for_deactivated`] (the displays the isolate switched off; the
+//! `pnp_disable_monitors` policy axis). `PUNKTFUNK_STANDBY_SINK_KEEP` vetoes both.
 //!
 //! An `Exclusive` isolate removes physical monitors from the CCD topology, but their PnP nodes
 //! stay live, so a standby sink that wakes the link still drives PnP arrival/removal, CCD
@@ -28,9 +28,8 @@ use windows::Win32::Devices::Display::{
 };
 use windows::Win32::Foundation::LUID;
 
-/// Which selector leased a devnode. `BaselineInactive` is the default automatic treatment (a sink
-/// that was dark before this acquire); `DeactivatedByUs` is the opt-in path over displays the
-/// isolate itself switched off. The split is what keeps automatic treatment to the former.
+/// Which selector leased a devnode: `BaselineInactive` (a sink that was dark before this acquire)
+/// or `DeactivatedByUs` (a display the isolate itself switched off).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LeaseSource {
     BaselineInactive,
