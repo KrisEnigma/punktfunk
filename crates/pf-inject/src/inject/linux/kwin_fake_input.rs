@@ -63,7 +63,7 @@ const UNITS_PER_DETENT: f64 = 10.0;
 /// channel has, so it converts through here — without that a 10 px flick buys a whole click
 /// and the page runs an order of magnitude too far. Only a source-carrying backend (libei,
 /// wlroots) scrolls a gesture by its true distance.
-const PRECISE_CLICK_PX: f64 = 60.0;
+pub(crate) const PRECISE_CLICK_PX: f64 = 60.0;
 
 /// Axis units for one scroll event: `x` is the wire's WHEEL_DELTA(120) delta, `precise` its
 /// [`SCROLL_FLAG_PRECISE`] bit. Vertical is negated by the caller, not here.

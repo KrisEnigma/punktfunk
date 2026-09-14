@@ -93,6 +93,7 @@ fn worker(rx: UnboundedReceiver<InputEvent>, source: EiSource) {
 async fn session_main(mut rx: UnboundedReceiver<InputEvent>, source: EiSource) {
     // Closing the portal session (end of fn) closes EIS. Bound setup so an unanswered
     // approval dialog cannot hang the worker.
+    let gamescope = matches!(source, EiSource::SocketPathFile(_));
     let (keepalive, context, mut events, output_hint) = match tokio::time::timeout(
         Duration::from_secs(30),
         connect(source),
@@ -115,6 +116,7 @@ async fn session_main(mut rx: UnboundedReceiver<InputEvent>, source: EiSource) {
 
     let mut state = EiState::new();
     state.output_hint = output_hint;
+    state.gamescope = gamescope;
     // 5s: a live EIS resumes a device right after handshake. Past that the socket
     // was stale — exit so InjectorService reopens instead of swallowing every event.
     let resume_deadline = tokio::time::sleep(Duration::from_secs(5));
@@ -498,6 +500,10 @@ struct EiState {
     /// Compositor output size (relay-file "WxH") — scale target when the device's
     /// region is degenerate. Without it the fallback is raw client pixels.
     output_hint: Option<(u32, u32)>,
+    /// Connected through gamescope's relayed socket, whose EIS counts scroll in clicks.
+    gamescope: bool,
+    /// Sub-v120 remainder of repriced precise scroll, `[horizontal, vertical]`.
+    scroll_rem: [i32; 2],
 }
 
 /// Last-warned unmatched anchor, so a sticky miss logs once per change rather
@@ -530,6 +536,22 @@ fn warn_anchor_miss(anchor: &AbsoluteAnchor, regions: &[reis::event::Region]) {
 /// multi-monitor layouts while rejecting that sentinel.
 fn sane_region(r: &reis::event::Region) -> bool {
     r.width > 0 && r.height > 0 && r.width <= 16_384 && r.height <= 16_384
+}
+
+/// v120 for gamescope, whose EIS turns any scroll into wheel clicks (`wlserver_mousewheel`
+/// sends value × 120), so a px delta of 10 is ten clicks. A wheel's wire value is already v120.
+/// A precise one is a distance at [`PRECISE_PX_PER_DETENT`] px per detent, repriced to the
+/// clicks it buys at [`crate::kwin_fake_input::PRECISE_CLICK_PX`]. `rem` keeps the remainder so
+/// a slow drag still scrolls.
+fn gamescope_v120(rem: &mut i32, x: i32, precise: bool) -> i32 {
+    if !precise {
+        return x;
+    }
+    let click_px = crate::kwin_fake_input::PRECISE_CLICK_PX as i64;
+    let num = i64::from(*rem) + i64::from(x) * PRECISE_PX_PER_DETENT as i64;
+    let v120 = num / click_px;
+    *rem = (num - v120 * click_px) as i32;
+    v120.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
 }
 
 fn kind_bit(kind: InputKind) -> u32 {
@@ -567,6 +589,8 @@ impl EiState {
             held_touches: Vec::new(),
             degraded_touch: None,
             output_hint: None,
+            gamescope: false,
+            scroll_rem: [0; 2],
         }
     }
 
@@ -875,6 +899,18 @@ impl EiState {
                 }
             }
             InputKind::MouseScroll => match slot.interface::<ei::Scroll>() {
+                Some(s) if self.gamescope => {
+                    // gamescope counts every scroll in wheel clicks, a px delta included, so
+                    // it gets v120 alone ([`gamescope_v120`]). Vertical is negated.
+                    let horizontal = ev.code == SCROLL_HORIZONTAL;
+                    let precise = ev.flags & SCROLL_FLAG_PRECISE != 0;
+                    let rem = &mut self.scroll_rem[usize::from(!horizontal)];
+                    match gamescope_v120(rem, ev.x, precise) {
+                        0 => {}
+                        v120 if horizontal => s.scroll_discrete(v120, 0),
+                        v120 => s.scroll_discrete(0, -v120),
+                    }
+                }
                 Some(s) => {
                     // Wire `x` is WHEEL_DELTA(120); vertical is negated. A precise delta is a
                     // distance, so it gets the continuous axis ALONE — a discrete step would
@@ -1014,6 +1050,18 @@ mod tests {
             scale: 1.0,
             mapping_id: mapping_id.map(str::to_string),
         }
+    }
+
+    /// A wheel passes through. A 10 px drag (wire 120) is a sixth of a 60 px click — 20 v120,
+    /// not the 1200 gamescope makes of a px delta. Sub-unit drags accumulate, never vanish.
+    #[test]
+    fn gamescope_scroll_is_priced_in_clicks() {
+        let mut rem = 0;
+        assert_eq!(gamescope_v120(&mut rem, 120, false), 120);
+        assert_eq!(gamescope_v120(&mut rem, 120, true), 20);
+        let slow: i32 = (0..6).map(|_| gamescope_v120(&mut rem, 1, true)).sum();
+        assert_eq!((slow, rem), (1, 0));
+        assert_eq!(gamescope_v120(&mut rem, -120, true), -20);
     }
 
     /// Two heads at the same size: size matching is a coin flip. Origin picks.
