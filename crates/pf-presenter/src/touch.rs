@@ -23,14 +23,16 @@ const TAP_SLOP: f32 = 12.0;
 const TAP_DRAG_MS: f64 = 250.0;
 /// ms of a still single finger: press left and hold until lift.
 const LONG_PRESS_MS: f64 = 500.0;
-/// px of two-finger pan per WHEEL(120) notch.
-const SCROLL_DIV: f32 = 4.0;
+/// Precise wheel units per px of two-finger pan: the wheel path's 120 per 10 px, which the
+/// host's `PRECISE_PX_PER_DETENT` undoes, so the content travels with the fingers.
+const SCROLL_UNITS_PER_PX: f32 = 12.0;
 /// Degrees of two-finger twist before the quick-action ring arms. Natural scrolls
 /// rotate a few degrees; much below 8° two-finger scrolling gets flaky.
 const DIAL_ARM_DEG: f32 = 10.0;
 /// Degrees at which the ring stays open after lift.
 const DIAL_COMMIT_DEG: f32 = 30.0;
-/// Centroid travel (px) beyond this before arming means scroll, not dial.
+/// Centroid travel (px) until which an unarmed pair can still become a twist; past it,
+/// the gesture is a scroll. The scroll itself never waits for it.
 const DIAL_SLOP: f32 = 2.0 * TAP_SLOP;
 /// ms. SDL splits one frame's fingers into separate events with the same timestamp.
 /// Judge twist only against a position this fresh — a mid-scroll pair otherwise
@@ -76,7 +78,7 @@ pub enum Act {
         gs: u32,
         down: bool,
     },
-    /// `axis` 0 = vertical, 1 = horizontal; `delta` in WHEEL(120) units.
+    /// `axis` 0 = vertical, 1 = horizontal; `delta` in precise WHEEL(120) units.
     Scroll {
         axis: u32,
         delta: i32,
@@ -102,7 +104,7 @@ pub enum Act {
 struct Dial {
     ids: (u64, u64),
     vec: (f32, f32),
-    /// Centroid at second-finger landing. Travel past `DIAL_SLOP` before arming is a scroll.
+    /// Centroid at second-finger landing. Travel past `DIAL_SLOP` before arming locks a scroll.
     anchor: (f32, f32),
     armed: bool,
     committed: bool,
@@ -112,7 +114,7 @@ struct Dial {
 /// Fed only direct touchscreen fingers.
 pub struct Gestures {
     trackpad: bool,
-    /// `-1` when invert-scroll is on. Applied where the notch is made, matching the
+    /// `-1` when invert-scroll is on. Applied where the scroll is made, matching the
     /// twins and the wheel path.
     scroll_sign: i32,
     /// Live fingers → window px. A move event carries only the finger that changed.
@@ -126,9 +128,14 @@ pub struct Gestures {
     max_fingers: usize,
     moved: bool,
     scrolling: bool,
+    /// Centroid at the last scroll step.
     scroll_anchor: (f32, f32),
-    /// A notch went on the wire this gesture: scroll for its lifetime, never a dial.
-    scroll_emitted: bool,
+    /// Sub-unit scroll remainder, so a slow pan is not lost to truncation.
+    scroll_carry: (f32, f32),
+    /// The pair travelled past `DIAL_SLOP` unarmed: scroll for the gesture's lifetime.
+    scroll_locked: bool,
+    /// Units scrolled while the pair was undecided, sent back if it becomes a twist or a tap.
+    provisional: (i32, i32),
     dial: Option<Dial>,
     /// Many-finger centroid, per finger count (0 = none). Fingers never land and lift
     /// in the same event, so a count change must re-anchor, not read as travel.
@@ -160,7 +167,9 @@ impl Gestures {
             moved: false,
             scrolling: false,
             scroll_anchor: (0.0, 0.0),
-            scroll_emitted: false,
+            scroll_carry: (0.0, 0.0),
+            scroll_locked: false,
+            provisional: (0, 0),
             dial: None,
             many_count: 0,
             many_anchor: (0.0, 0.0),
@@ -187,7 +196,9 @@ impl Gestures {
             self.max_fingers = 0;
             self.moved = false;
             self.scrolling = false;
-            self.scroll_emitted = false;
+            self.scroll_carry = (0.0, 0.0);
+            self.scroll_locked = false;
+            self.provisional = (0, 0);
             self.dial = None;
             self.many_count = 0;
             self.drag_held = t - self.last_tap_up < TAP_DRAG_MS
@@ -210,8 +221,8 @@ impl Gestures {
         }
         self.max_fingers = self.max_fingers.max(self.positions.len());
         match self.positions.len() {
-            // Second finger: snapshot the pair vector unless this gesture already scrolled.
-            2 if !self.scroll_emitted && self.dial.is_none() => {
+            // Second finger: snapshot the pair vector unless this gesture is a locked scroll.
+            2 if !self.scroll_locked && self.dial.is_none() => {
                 if let Some((&other, &op)) = self.positions.iter().find(|(k, _)| **k != id) {
                     self.dial = Some(Dial {
                         ids: (other, id),
@@ -276,6 +287,7 @@ impl Gestures {
                 down: false,
             });
         } else if !self.moved {
+            acts.extend(self.roll_back_provisional()); // a tap's jitter leaves no scroll
             match self.max_fingers {
                 n if n >= 3 => acts.push(Act::CycleStats),
                 2 => {
@@ -333,7 +345,8 @@ impl Gestures {
         self.track_id = None;
         self.active = false;
         self.scrolling = false;
-        self.scroll_emitted = false;
+        self.scroll_locked = false;
+        self.provisional = (0, 0);
         self.dial = None;
         self.moved = false;
         self.drag_held = false;
@@ -343,13 +356,13 @@ impl Gestures {
     /// Two-finger move. `Some` when the twist owns the gesture (scroll never runs);
     /// `None` when the hand is scrolling, or might still be.
     ///
-    /// Order: a notch already sent ⇒ never a dial; centroid past `DIAL_SLOP` before
-    /// arming ⇒ scroll; rotation ≥ `DIAL_ARM_DEG` ⇒ the twist owns it. Progress is
+    /// Order: centroid past `DIAL_SLOP` before arming locks a scroll; rotation ≥
+    /// `DIAL_ARM_DEG` arms the twist, which takes back the provisional scroll. Progress is
     /// `(|Δφ| − arm) / (commit − arm)`. At 1 the ring commits; winding back to 0 after
     /// a commit closes it. A pinch with no rotation never arms and moves no centroid.
     fn dial_step(&mut self, id: u64, t: f64) -> Option<Vec<Act>> {
         let dial = self.dial?;
-        if !dial.armed && self.scroll_emitted {
+        if !dial.armed && self.scroll_locked {
             return None;
         }
         // Judge rotation only against a current other-finger position: this same input
@@ -374,30 +387,33 @@ impl Gestures {
         // Signed rotation of the pair vector; positive is clockwise on a y-down screen.
         let phi = cross.atan2(dot).to_degrees();
         let (cx, cy) = self.centroid();
+        let mut acts = Vec::new();
         if !dial.armed {
             let travel = (cx - dial.anchor.0).hypot(cy - dial.anchor.1);
+            if travel >= TAP_SLOP {
+                self.moved = true;
+            }
             if travel >= DIAL_SLOP {
+                self.scroll_locked = true;
+                self.provisional = (0, 0);
                 return None;
             }
-            // Undecided: no notch yet — a notch is final, and a real twist drifts past
-            // `SCROLL_DIV` long before 10°. Follow the centroid so a later scroll starts
-            // smoothly once the slop is crossed.
+            // Undecided: the scroll goes out now, provisionally.
             if phi.abs() < DIAL_ARM_DEG {
-                self.scrolling = true;
-                self.scroll_anchor = (cx, cy);
-                return Some(Vec::new());
+                return None;
             }
+            acts = self.roll_back_provisional();
             self.moved = true; // a twist is never a tap
             self.scrolling = true; // and dropping to one finger must not jerk the cursor
         }
         let progress =
             ((phi.abs() - DIAL_ARM_DEG) / (DIAL_COMMIT_DEG - DIAL_ARM_DEG)).clamp(0.0, 1.0);
-        let mut acts = vec![Act::Dial {
+        acts.push(Act::Dial {
             progress,
             clockwise: phi > 0.0,
             x: cx,
             y: cy,
-        }];
+        });
         let d = self.dial.as_mut()?;
         d.armed = true;
         if progress >= 1.0 && !d.committed {
@@ -429,36 +445,42 @@ impl Gestures {
         (sx / n, sy / n)
     }
 
-    /// Two fingers: scroll by centroid delta, never move the cursor. One notch per
-    /// `SCROLL_DIV` px, then re-anchor. Finger-up / finger-right match host WHEEL(120).
+    /// Two fingers: scroll by centroid delta as a precise distance, never move the cursor.
+    /// While the pair is undecided the units are provisional (`roll_back_provisional`).
+    /// Finger-up / finger-right match host WHEEL(120).
     fn scroll_by_centroid(&mut self) -> Vec<Act> {
-        let mut acts = Vec::new();
         let (cx, cy) = self.centroid();
         if !self.scrolling {
+            // From the pair's landing, so the first move's travel scrolls too.
             self.scrolling = true;
-            self.scroll_anchor = (cx, cy);
+            self.scroll_anchor = self.dial.map_or((cx, cy), |d| d.anchor);
         }
-        let notches_y = ((self.scroll_anchor.1 - cy) / SCROLL_DIV) as i32;
-        let notches_x = ((cx - self.scroll_anchor.0) / SCROLL_DIV) as i32;
-        if notches_y != 0 {
-            acts.push(Act::Scroll {
-                axis: 0,
-                delta: notches_y * 120 * self.scroll_sign,
-            });
-            self.scroll_anchor.1 = cy;
+        let gain = SCROLL_UNITS_PER_PX * self.scroll_sign as f32;
+        self.scroll_carry.1 += (self.scroll_anchor.1 - cy) * gain;
+        self.scroll_carry.0 += (cx - self.scroll_anchor.0) * gain;
+        self.scroll_anchor = (cx, cy);
+        let dy = self.scroll_carry.1 as i32; // toward zero; remainder keeps the sign
+        let dx = self.scroll_carry.0 as i32;
+        self.scroll_carry.1 -= dy as f32;
+        self.scroll_carry.0 -= dx as f32;
+        if dx == 0 && dy == 0 {
+            return Vec::new();
+        }
+        if !self.scroll_locked && self.dial.is_some_and(|d| !d.armed) {
+            self.provisional.0 += dx;
+            self.provisional.1 += dy;
+        } else {
+            self.scroll_locked = true;
             self.moved = true;
-            self.scroll_emitted = true;
         }
-        if notches_x != 0 {
-            acts.push(Act::Scroll {
-                axis: 1,
-                delta: notches_x * 120 * self.scroll_sign,
-            });
-            self.scroll_anchor.0 = cx;
-            self.moved = true;
-            self.scroll_emitted = true;
-        }
-        acts
+        scroll_acts(dx, dy)
+    }
+
+    /// The undecided pair became a twist or a tap: send back what it scrolled.
+    fn roll_back_provisional(&mut self) -> Vec<Act> {
+        let (x, y) = std::mem::take(&mut self.provisional);
+        self.scroll_carry = (0.0, 0.0);
+        scroll_acts(-x, -y)
     }
 
     /// Three or more fingers: no scroll, no cursor. Travel past `TAP_SLOP` disqualifies
@@ -517,6 +539,18 @@ impl Gestures {
         }
         acts
     }
+}
+
+/// Vertical then horizontal scroll acts for a unit delta, skipping a zero axis.
+fn scroll_acts(dx: i32, dy: i32) -> Vec<Act> {
+    let mut acts = Vec::new();
+    if dy != 0 {
+        acts.push(Act::Scroll { axis: 0, delta: dy });
+    }
+    if dx != 0 {
+        acts.push(Act::Scroll { axis: 1, delta: dx });
+    }
+    acts
 }
 
 /// px. No finger drag moves this far in one SDL event; a leaked absolute position does.
@@ -726,7 +760,7 @@ mod tests {
     }
 
     #[test]
-    fn invert_scroll_flips_the_touch_notch() {
+    fn invert_scroll_flips_the_touch_scroll() {
         let mut g = Gestures::new(true, true);
         let _ = g.down(1, 100.0, 200.0, ABS, 0.0);
         let _ = g.down(2, 120.0, 200.0, ABS, 2.0);
@@ -839,16 +873,14 @@ mod tests {
         let _ = g.down(1, p1.0, p1.1, ABS, 0.0);
         let _ = g.down(2, p2.0, p2.1, ABS, 2.0);
         let mut commit_at = None;
+        let mut all = Vec::new();
         // 7° steps so no sample sits on a threshold where float rounding picks the side.
         for step in 1..=5 {
             let deg = 7.0 * step as f32;
             let (p1, p2) = twisted(c, deg);
             let mut acts = g.motion(1, p1.0, p1.1, ABS, 10.0 * step as f64);
             acts.extend(g.motion(2, p2.0, p2.1, ABS, 10.0 * step as f64 + 1.0));
-            assert!(
-                !acts.iter().any(|a| matches!(a, Act::Scroll { .. })),
-                "a twist never scrolls: {acts:?}"
-            );
+            all.extend(acts.iter().copied());
             let dial = dial_acts(&acts);
             if deg < DIAL_ARM_DEG {
                 assert!(
@@ -881,6 +913,12 @@ mod tests {
             Some(35.0),
             "commits exactly once, at the first sample past the commit angle"
         );
+        // One finger per SDL event shifts the centroid mid-frame; arming takes it back.
+        assert_eq!(
+            net_scroll(&all),
+            (0, 0),
+            "a twist leaves no scroll: {all:?}"
+        );
         // Committed: lift leaves the ring open.
         let mut acts = g.up(1, 100.0);
         acts.extend(g.up(2, 101.0));
@@ -897,7 +935,12 @@ mod tests {
         let (p1, p2) = twisted(c, 20.0);
         let mut acts = g.motion(1, p1.0, p1.1, ABS, 10.0);
         acts.extend(g.motion(2, p2.0, p2.1, ABS, 11.0));
-        assert!(matches!(acts.first(), Some(Act::Dial { .. })));
+        assert!(matches!(dial_acts(&acts).first(), Some(Act::Dial { .. })));
+        assert_eq!(
+            net_scroll(&acts),
+            (0, 0),
+            "arming takes the scroll back: {acts:?}"
+        );
         assert!(!acts.contains(&Act::DialCommit));
         let mut lift = g.up(1, 50.0);
         assert_eq!(lift, vec![Act::DialCancel], "the ring winds back in");
@@ -907,10 +950,70 @@ mod tests {
         assert_eq!(lift, vec![Act::DialCancel]);
     }
 
+    /// Net scroll units per axis (vertical, horizontal).
+    fn net_scroll(acts: &[Act]) -> (i32, i32) {
+        acts.iter().fold((0, 0), |(v, h), a| match a {
+            Act::Scroll { axis: 0, delta } => (v + delta, h),
+            Act::Scroll { delta, .. } => (v, h + delta),
+            _ => (v, h),
+        })
+    }
+
     #[test]
-    fn a_drifting_twist_still_arms_and_scrolls_nothing() {
-        // Real fingers drift a few px per sample while turning. Under the slop that
-        // drift is not a scroll — one notch would lock the gesture before 10°.
+    fn a_pan_scrolls_from_the_first_pixel_as_a_precise_distance() {
+        let mut g = Gestures::new(true, false);
+        let _ = g.down(1, 100.0, 200.0, ABS, 0.0);
+        let _ = g.down(2, 140.0, 200.0, ABS, 2.0);
+        // 2 px up, both fingers: far under the tap slop, and it already scrolls.
+        let mut acts = g.motion(1, 100.0, 198.0, ABS, 10.0);
+        acts.extend(g.motion(2, 140.0, 198.0, ABS, 11.0));
+        assert_eq!(net_scroll(&acts), (24, 0), "{acts:?}");
+        for step in 2..=10 {
+            let y = 200.0 - 2.0 * step as f32;
+            acts.extend(g.motion(1, 100.0, y, ABS, 10.0 * step as f64));
+            acts.extend(g.motion(2, 140.0, y, ABS, 10.0 * step as f64 + 1.0));
+        }
+        // 20 px of centroid travel is 240 units, every one of them sent.
+        assert_eq!(net_scroll(&acts), (240, 0), "{acts:?}");
+        assert!(dial_acts(&acts).is_empty());
+        assert!(g.up(1, 200.0).is_empty());
+        assert!(g.up(2, 201.0).is_empty(), "a scroll is not a tap");
+    }
+
+    #[test]
+    fn a_two_finger_tap_takes_back_its_jitter_before_the_click() {
+        let mut g = Gestures::new(true, false);
+        let _ = g.down(1, 100.0, 200.0, ABS, 0.0);
+        let _ = g.down(2, 140.0, 200.0, ABS, 2.0);
+        let mut acts = g.motion(1, 100.0, 196.0, ABS, 10.0);
+        acts.extend(g.motion(2, 140.0, 196.0, ABS, 11.0));
+        acts.extend(g.up(1, 40.0));
+        acts.extend(g.up(2, 41.0));
+        assert_eq!(
+            acts,
+            vec![
+                Act::Scroll { axis: 0, delta: 24 },
+                Act::Scroll { axis: 0, delta: 24 },
+                Act::Scroll {
+                    axis: 0,
+                    delta: -48
+                },
+                Act::Button {
+                    gs: BTN_RIGHT,
+                    down: true
+                },
+                Act::Button {
+                    gs: BTN_RIGHT,
+                    down: false
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_drifting_twist_arms_and_takes_back_its_scroll() {
+        // Real fingers drift a few px per sample while turning. The drift scrolls
+        // provisionally; arming the twist sends it back.
         let mut g = Gestures::new(true, false);
         let _ = g.down(1, 100.0, 200.0, ABS, 0.0);
         let _ = g.down(2, 140.0, 200.0, ABS, 2.0);
@@ -921,9 +1024,10 @@ mod tests {
             acts.extend(g.motion(1, p1.0, p1.1, ABS, 10.0 * step as f64));
             acts.extend(g.motion(2, p2.0, p2.1, ABS, 10.0 * step as f64 + 1.0));
         }
-        assert!(
-            !acts.iter().any(|a| matches!(a, Act::Scroll { .. })),
-            "no notch while the pair is undecided: {acts:?}"
+        assert_eq!(
+            net_scroll(&acts),
+            (0, 0),
+            "the twist leaves no scroll: {acts:?}"
         );
         assert!(
             acts.iter().any(|a| matches!(a, Act::Dial { .. })),

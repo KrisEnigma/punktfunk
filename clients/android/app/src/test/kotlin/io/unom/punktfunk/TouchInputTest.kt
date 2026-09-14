@@ -34,7 +34,9 @@ class TouchInputTest {
         override fun pointerMove(dx: Int, dy: Int) { log += "move $dx $dy" }
         override fun pointerAbs(x: Int, y: Int, w: Int, h: Int) { log += "abs $x $y" }
         override fun button(button: Int, down: Boolean) { log += "btn $button ${if (down) "down" else "up"}" }
-        override fun scroll(axis: Int, delta: Int, precise: Boolean) { log += "scroll $axis $delta" }
+        override fun scroll(axis: Int, delta: Int, precise: Boolean) {
+            log += "scroll $axis $delta" + if (precise) " precise" else ""
+        }
         override fun touch(id: Int, kind: Int, x: Int, y: Int, w: Int, h: Int) { log += "touch $id $kind" }
         fun buttons() = log.filter { it.startsWith("btn") }
         fun scrolls() = log.filter { it.startsWith("scroll") }
@@ -130,9 +132,24 @@ class TouchInputTest {
         }
         settle()
         assertTrue(sink.scrolls().isNotEmpty())
-        // Finger up → wheel up: positive vertical notches, in 120s.
-        assertTrue(sink.scrolls().all { it.startsWith("scroll 0 ") && it.split(" ")[2].toInt() % 120 == 0 && it.split(" ")[2].toInt() > 0 })
+        // Finger up → wheel up: positive, precise, and the whole 180 px of travel at 12 units/px.
+        assertTrue(sink.scrolls().all { it.startsWith("scroll 0 ") && it.endsWith(" precise") && it.split(" ")[2].toInt() > 0 })
+        assertEquals(2160, sink.scrolls().sumOf { it.split(" ")[2].toInt() })
         assertEquals(emptyList<String>(), sink.buttons())
+    }
+
+    @Test
+    fun twoFingerTapTakesBackItsJitterBeforeTheRightClick() {
+        compose()
+        compose.onNodeWithTag("surface").performTouchInput {
+            down(0, center); down(1, center + Offset(80f, 0f))
+            advanceEventTime(16)
+            updatePointerBy(0, Offset(0f, -5f)); updatePointerBy(1, Offset(0f, -5f)); move()
+            advanceEventTime(30); up(0); up(1)
+        }
+        settle()
+        // 5 px under the tap slop scrolls at once, then the tap sends it back before clicking.
+        assertEquals(listOf("scroll 0 60 precise", "scroll 0 -60 precise", "btn 3 down", "btn 3 up"), sink.log)
     }
 
     @Test

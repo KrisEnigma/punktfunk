@@ -63,9 +63,9 @@ final class TouchMouse {
         /// One finger held still this long (s) presses the left button and drags until it
         /// lifts — the touch idiom for "pick this up".
         static let longPress: TimeInterval = 0.5
-        /// Two-finger pan distance (pt) per 120-unit wheel notch — matches the feel of the
-        /// indirect-trackpad scroll path in StreamViewIOS (~10 pt per notch).
-        static let scrollNotchPt: CGFloat = 10
+        /// Precise wheel units per point of two-finger pan: the indirect trackpad's scale
+        /// (`StreamLayerUIView.forwardScroll`), so the content travels with the fingers.
+        static let scrollUnitsPerPt: CGFloat = 12
         /// Base finger-px → host-px gain (~1:1, never twitchy). The acceleration below lets a
         /// flick cross the screen while a slow drag stays precise.
         static let pointerSens: CGFloat = 1.3
@@ -80,8 +80,8 @@ final class TouchMouse {
         /// The dial (design/touch-client-overlay.md §2.1): a two-finger TWIST opens the
         /// quick-action ring. Below `dialArmDeg` the gesture is still a scroll candidate —
         /// natural scrolls rotate a few degrees, and this absorbs them; at `dialCommitDeg` the
-        /// ring commits and stays open after the fingers lift; centroid travel past
-        /// `dialSlop` (pt) before arming means scroll, not dial.
+        /// ring commits and stays open after the fingers lift. The scroll never waits: until
+        /// the centroid travels `dialSlop` (pt) the twist can still arm, past it never.
         static let dialArmDeg: CGFloat = 10
         static let dialCommitDeg: CGFloat = 30
         static let dialSlop: CGFloat = 2 * tapSlop
@@ -113,8 +113,12 @@ final class TouchMouse {
     }
 
     private var dial: Dial?
-    /// A scroll notch went on the wire: a scroll for the gesture's lifetime, never a dial.
-    private var scrollEmitted = false
+    /// The pair travelled past `dialSlop` unarmed: a scroll for the gesture's lifetime.
+    private var scrollLocked = false
+    /// Units scrolled while the pair was undecided, sent back if it turns out a twist or a tap.
+    private var provisional = (x: Int32(0), y: Int32(0))
+    /// Sub-unit scroll remainder, so a slow pan is not lost to truncation.
+    private var scrollCarry = CGPoint.zero
 
     /// No gesture in flight (all fingers up) — the view uses this to release its mode latch.
     var isIdle: Bool { !sessionActive && lastPos.isEmpty }
@@ -136,7 +140,7 @@ final class TouchMouse {
     private var prevTime: TimeInterval = 0
     private var carryX: CGFloat = 0
     private var carryY: CGFloat = 0
-    /// Scroll anchor (centroid) — re-anchored every time a notch fires.
+    /// Centroid at the last scroll step.
     private var scrollAnchor = CGPoint.zero
     // Keyboard-swipe state: the 3+-finger centroid anchor (per finger count, like the scroll
     // anchor) and a once-per-gesture latch.
@@ -165,7 +169,9 @@ final class TouchMouse {
             maxFingers = 0
             moved = false
             scrolling = false
-            scrollEmitted = false
+            scrollLocked = false
+            provisional = (0, 0)
+            scrollCarry = .zero
             dial = nil
             kbCount = 0
             kbFired = false
@@ -191,7 +197,7 @@ final class TouchMouse {
         maxFingers = max(maxFingers, lastPos.count)
         if lastPos.count > 1 { cancelLongPress() }
         switch lastPos.count {
-        case 2 where !scrollEmitted && dial == nil:
+        case 2 where !scrollLocked && dial == nil:
             // The second finger: remember the finger-to-finger vector — the dial's reference.
             let keys = Array(lastPos.keys)
             let (a, b) = (lastPos[keys[0]]!, lastPos[keys[1]]!)
@@ -215,13 +221,12 @@ final class TouchMouse {
     }
 
     /// The dial's share of a two-finger move; `true` when the twist owns the gesture (the
-    /// scroll path then never runs). Rules, in order (design §2.1): a scroll notch already
-    /// sent ⇒ never a dial; centroid travel past `dialSlop` before arming ⇒ scroll; rotation
-    /// ≥ `dialArmDeg` ⇒ the twist arms and owns the gesture; progress `(|Δφ| − arm) /
-    /// (commit − arm)` feeds the ring; at 1 the ring commits, and winding back to 0 after a
-    /// commit closes it again. A pinch with no rotation never arms and moves no centroid.
+    /// scroll path then never runs). Rules, in order (design §2.1): centroid travel past
+    /// `dialSlop` before arming locks a scroll; rotation ≥ `dialArmDeg` arms the twist, which
+    /// takes back the provisional scroll; progress `(|Δφ| − arm) / (commit − arm)` feeds the
+    /// ring; at 1 it commits, and winding back to 0 after a commit closes it again.
     private func dialStep() -> Bool {
-        guard var d = dial, d.armed || !scrollEmitted,
+        guard var d = dial, d.armed || !scrollLocked,
               let a = lastPos[d.keys.0], let b = lastPos[d.keys.1]
         else { return false }
         let v = CGVector(dx: b.x - a.x, dy: b.y - a.y)
@@ -231,16 +236,15 @@ final class TouchMouse {
         let c = CGPoint(x: (a.x + b.x) / 2, y: (a.y + b.y) / 2)
         if !d.armed {
             let travel = hypot(c.x - d.anchor.x, c.y - d.anchor.y)
-            if travel >= Tuning.dialSlop { return false }
-            // Undecided: under the slop and under the arm angle the pair may still become a
-            // twist, so no scroll notch goes out yet — a notch is final (`scrollEmitted`), and
-            // a real twist drifts its centroid past `scrollNotchPt` before it turns 10°. The
-            // anchor follows the centroid so the scroll starts smoothly once the slop is crossed.
-            if abs(phi) < Tuning.dialArmDeg {
-                scrolling = true
-                scrollAnchor = c
-                return true
+            if travel >= Tuning.tapSlop { moved = true }
+            if travel >= Tuning.dialSlop {
+                scrollLocked = true
+                provisional = (0, 0)
+                return false
             }
+            // Undecided: the scroll goes out now, provisionally.
+            if abs(phi) < Tuning.dialArmDeg { return false }
+            rollBackProvisional()
             d.armed = true
             moved = true // a twist is never a tap…
             scrolling = true // …and dropping to one finger must not jerk the cursor
@@ -315,6 +319,7 @@ final class TouchMouse {
             dragHeld = false
             send?(.mouseButton(Button.left, down: false)) // end the drag
         } else if !moved {
+            rollBackProvisional() // a tap's jitter must not leave the page nudged
             switch maxFingers {
             case 3...:
                 Self.cycleStats() // in-stream stats-tier cycle, same as Android
@@ -364,34 +369,46 @@ final class TouchMouse {
 
     // MARK: - Per-event work
 
-    /// Two fingers → scroll by the centroid delta; never move the cursor. Fires a notch per
-    /// `scrollNotchPt` of pan and re-anchors on fire; finger up scrolls up, finger right
-    /// scrolls right (the host WHEEL(120) convention).
+    /// Two fingers → scroll by the centroid delta as a precise distance; never move the cursor.
+    /// While the pair is undecided the units are provisional (`rollBackProvisional`). Finger
+    /// up scrolls up, finger right scrolls right (the host WHEEL(120) convention).
     private func scrollByCentroid() {
         let n = CGFloat(lastPos.count)
         let cx = lastPos.values.reduce(0) { $0 + $1.x } / n
         let cy = lastPos.values.reduce(0) { $0 + $1.y } / n
         if !scrolling {
+            // From the pair's landing, so the first move's travel scrolls too.
             scrolling = true
-            scrollAnchor = CGPoint(x: cx, y: cy)
+            scrollAnchor = dial?.anchor ?? CGPoint(x: cx, y: cy)
         }
-        // Read live, like `InputCapture.sendScroll`: these notches bypass that sink (they go
-        // straight to the connection), so the invert setting is applied here, at the notch.
-        let sign: Int32 = SessionSettings.current.invertScroll ? -1 : 1
-        let notchesY = Int32((scrollAnchor.y - cy) / Tuning.scrollNotchPt)
-        let notchesX = Int32((cx - scrollAnchor.x) / Tuning.scrollNotchPt)
-        if notchesY != 0 {
-            send?(.scroll(notchesY * 120 * sign))
-            scrollAnchor.y = cy
+        // Read live, like `InputCapture.sendScroll`: this path sends straight to the
+        // connection, so the invert setting is applied here.
+        let gain = Tuning.scrollUnitsPerPt * (SessionSettings.current.invertScroll ? -1 : 1)
+        scrollCarry.y += (scrollAnchor.y - cy) * gain
+        scrollCarry.x += (cx - scrollAnchor.x) * gain
+        scrollAnchor = CGPoint(x: cx, y: cy)
+        let dy = Int32(scrollCarry.y) // truncates toward zero → remainder kept with its sign
+        let dx = Int32(scrollCarry.x)
+        scrollCarry.y -= CGFloat(dy)
+        scrollCarry.x -= CGFloat(dx)
+        guard dx != 0 || dy != 0 else { return }
+        if !scrollLocked, dial?.armed == false {
+            provisional.x += dx
+            provisional.y += dy
+        } else {
+            scrollLocked = true
             moved = true
-            scrollEmitted = true
         }
-        if notchesX != 0 {
-            send?(.scroll(notchesX * 120 * sign, horizontal: true))
-            scrollAnchor.x = cx
-            moved = true
-            scrollEmitted = true
-        }
+        if dy != 0 { send?(.scroll(dy, precise: true)) }
+        if dx != 0 { send?(.scroll(dx, horizontal: true, precise: true)) }
+    }
+
+    /// The undecided pair became a twist or a tap: send back what it scrolled.
+    private func rollBackProvisional() {
+        if provisional.y != 0 { send?(.scroll(-provisional.y, precise: true)) }
+        if provisional.x != 0 { send?(.scroll(-provisional.x, horizontal: true, precise: true)) }
+        provisional = (0, 0)
+        scrollCarry = .zero
     }
 
     /// Three+ fingers → the keyboard swipe, never scroll (the documented vocabulary is

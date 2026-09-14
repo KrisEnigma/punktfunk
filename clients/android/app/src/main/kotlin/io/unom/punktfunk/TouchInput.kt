@@ -20,17 +20,19 @@ import kotlin.math.roundToInt
 
 // Touch-gesture tuning (px / ms). TAP_SLOP: movement under this still counts as a tap, not a drag.
 // TAP_DRAG_MS: a new touch within this long after a tap starts a left-button drag. LONG_PRESS_MS:
-// one finger held still this long presses the left button and drags until it lifts. SCROLL_DIV:
-// px of two-finger pan per wheel notch (smaller = faster scroll).
+// one finger held still this long presses the left button and drags until it lifts.
+// SCROLL_UNITS_PER_PX: precise wheel units per px of two-finger pan, the wheel path's 120 per
+// 10 px that the host undoes, so the content travels with the fingers.
 private const val TAP_SLOP = 12f
 private const val TAP_DRAG_MS = 250L
 private const val LONG_PRESS_MS = 500L
-private const val SCROLL_DIV = 4f
+private const val SCROLL_UNITS_PER_PX = 12f
 
 // The dial (design/touch-client-overlay.md §2.1): a two-finger TWIST opens the quick-action ring.
 // DIAL_ARM_DEG: below this rotation the gesture is still a scroll candidate — natural scrolls
 // rotate a few degrees, and this is what absorbs them. DIAL_COMMIT_DEG: the ring commits and stays
-// open after the fingers lift. DIAL_SLOP: centroid travel beyond this before arming means scroll.
+// open after the fingers lift. DIAL_SLOP: until the centroid travels this far the twist can still
+// arm; past it the gesture is a scroll. The scroll never waits for it.
 private const val DIAL_ARM_DEG = 10f
 private const val DIAL_COMMIT_DEG = 30f
 private const val DIAL_SLOP = 2 * TAP_SLOP
@@ -243,6 +245,7 @@ internal suspend fun PointerInputScope.streamTouchInput(
                 if (g.step(pressed)) ev.changes.forEach { it.consume() }
             }
             if (g.tap()) {
+                g.rollBackProvisional() // a tap's jitter must not leave the page nudged
                 when {
                     g.maxFingers >= 3 -> onCycleStats() // in-stream HUD verbosity cycle
                     g.maxFingers == 2 -> { // two-finger tap → right click
@@ -293,8 +296,14 @@ private class Gesture(
         private set
     private var scrolling = false
     private var scrollCount = 0 // pointer count the scroll centroid is anchored at
-    /** A scroll notch went on the wire: a scroll for the gesture's lifetime, never a dial. */
-    private var scrollEmitted = false
+    /** The pair travelled past DIAL_SLOP unarmed: a scroll for the gesture's lifetime. */
+    private var scrollLocked = false
+    /** Units scrolled while the pair was undecided, sent back if it becomes a twist or a tap. */
+    private var provisionalX = 0
+    private var provisionalY = 0
+    // Sub-unit scroll remainder, so a slow pan isn't lost to Int truncation.
+    private var scrollAccX = 0f
+    private var scrollAccY = 0f
     // The twist: the finger-to-finger vector when the pair formed, the centroid then, and
     // whether it has armed (owns the gesture) / committed (the ring stays open).
     private var dialIds: Pair<PointerId, PointerId>? = null
@@ -374,31 +383,37 @@ private class Gesture(
     }
 
     /**
-     * The dial first (design §2.1): a twist of the finger-to-finger vector past DIAL_ARM_DEG with
-     * the centroid still owns the gesture; a scroll notch already sent, or centroid travel past
-     * DIAL_SLOP, means the hand is scrolling. A pinch with no rotation is nothing.
+     * The dial first (design §2.1): centroid travel past DIAL_SLOP before arming locks a scroll; a
+     * twist of the finger-to-finger vector past DIAL_ARM_DEG before that owns the gesture and takes
+     * back the provisional scroll. A pinch with no rotation is nothing.
      */
     private fun twoFingers(pressed: List<PointerInputChange>): Boolean {
         val cx = (pressed.sumOf { it.position.x.toDouble() } / pressed.size).toFloat()
         val cy = (pressed.sumOf { it.position.y.toDouble() } / pressed.size).toFloat()
         val (a, b) = pressed
         val ids = a.id to b.id
-        if (dialIds != ids && !scrollEmitted) {
+        if (dialIds != ids && !scrollLocked) {
             dialIds = ids
             dialVx = b.position.x - a.position.x
             dialVy = b.position.y - a.position.y
             dialAnchorX = cx
             dialAnchorY = cy
         }
-        if (dialIds == ids && (dialArmed || !scrollEmitted)) {
+        if (dialIds == ids && (dialArmed || !scrollLocked)) {
             val vx = b.position.x - a.position.x
             val vy = b.position.y - a.position.y
             val phi = Math.toDegrees(
                 atan2(dialVx * vy - dialVy * vx, dialVx * vx + dialVy * vy).toDouble(),
             ).toFloat() // signed; + = clockwise on a y-down screen
             val travel = hypot(cx - dialAnchorX, cy - dialAnchorY)
-            if (dialArmed || (travel < DIAL_SLOP && abs(phi) >= DIAL_ARM_DEG)) {
+            if (!dialArmed && travel >= TAP_SLOP) moved = true
+            if (!dialArmed && travel >= DIAL_SLOP) {
+                scrollLocked = true
+                provisionalX = 0
+                provisionalY = 0
+            } else if (dialArmed || abs(phi) >= DIAL_ARM_DEG) {
                 if (!dialArmed) {
+                    rollBackProvisional()
                     dialArmed = true
                     moved = true // a twist is never a tap…
                     scrolling = true // …and dropping to one finger must not jerk the cursor
@@ -415,45 +430,49 @@ private class Gesture(
                 }
                 return true
             }
-            // Undecided: under DIAL_SLOP of travel and under DIAL_ARM_DEG of turn the pair may
-            // still become a twist, so no scroll notch goes out yet — a notch is final
-            // (scrollEmitted) and a real twist drifts its centroid past SCROLL_DIV long before
-            // it turns 10°. The anchor follows the centroid so the scroll starts smoothly.
-            if (!scrollEmitted && travel < DIAL_SLOP) {
-                scrolling = true
-                scrollCount = 2
-                prevCx = cx
-                prevCy = cy
-                // The editor's stage claims the undecided pair too, or the page's scroll
-                // container steals the fingers before the twist can arm.
-                return dialOnly
-            }
+            // Undecided: the editor's stage claims the pair without scrolling, or the page's
+            // scroll container steals the fingers before the twist can arm.
+            if (dialOnly && !scrollLocked) return true
         }
-        // Two fingers → scroll by the centroid delta; never move the cursor. (Re-)anchor
-        // whenever the finger COUNT changes, not just on scroll start: the centroid of three
-        // fingers sits far from the centroid of two, and real fingers never land (or lift) in
-        // the same input frame — so the 2→3 transition would otherwise read as a scroll notch.
+        // Two fingers → scroll by the centroid delta as a precise distance; never move the
+        // cursor. (Re-)anchor whenever the finger COUNT changes, not just on scroll start: the
+        // centroid of three fingers sits far from the centroid of two, and real fingers never land
+        // (or lift) in the same input frame — so the 2→3 transition would otherwise read as travel.
         if (!scrolling || pressed.size != scrollCount) {
             scrolling = true
             scrollCount = pressed.size
             prevCx = cx
             prevCy = cy
         }
-        val sy = ((prevCy - cy) / SCROLL_DIV).toInt() // finger up → wheel up
-        val sx = ((cx - prevCx) / SCROLL_DIV).toInt()
-        if (sy != 0) {
-            sink.scroll(0, sy * 120 * scrollDir, false)
-            prevCy = cy
+        scrollAccY += (prevCy - cy) * SCROLL_UNITS_PER_PX * scrollDir // finger up → wheel up
+        scrollAccX += (cx - prevCx) * SCROLL_UNITS_PER_PX * scrollDir
+        prevCx = cx
+        prevCy = cy
+        val sy = scrollAccY.toInt() // truncates toward zero → remainder kept w/ sign
+        val sx = scrollAccX.toInt()
+        scrollAccY -= sy
+        scrollAccX -= sx
+        if (sy == 0 && sx == 0) return true
+        if (!scrollLocked && dialIds == ids && !dialArmed) {
+            provisionalX += sx
+            provisionalY += sy
+        } else {
+            scrollLocked = true
             moved = true
-            scrollEmitted = true
         }
-        if (sx != 0) {
-            sink.scroll(1, sx * 120 * scrollDir, false)
-            prevCx = cx
-            moved = true
-            scrollEmitted = true
-        }
+        if (sy != 0) sink.scroll(0, sy, true)
+        if (sx != 0) sink.scroll(1, sx, true)
         return true
+    }
+
+    /** The undecided pair became a twist or a tap: send back what it scrolled. */
+    fun rollBackProvisional() {
+        if (provisionalY != 0) sink.scroll(0, -provisionalY, true)
+        if (provisionalX != 0) sink.scroll(1, -provisionalX, true)
+        provisionalX = 0
+        provisionalY = 0
+        scrollAccX = 0f
+        scrollAccY = 0f
     }
 
     /**
