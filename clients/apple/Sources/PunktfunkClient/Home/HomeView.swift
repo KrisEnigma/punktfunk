@@ -56,7 +56,9 @@ struct HomeView: View {
     @Environment(\.horizontalSizeClass) private var sizeClass
     /// The host whose page is up as the iPad's sheet of sections.
     @State private var sectionsHost: StoredHost?
-    /// An act that sheet handed back, run once the sheet is gone.
+    #endif
+    #if os(iOS) || os(tvOS)
+    /// An act the sectioned page handed back, run once the page is gone.
     @State private var pendingHandOff: HostPageRequest?
     #endif
     /// The start-screen pointer; the default host's card carries the accent bar.
@@ -174,8 +176,17 @@ struct HomeView: View {
             // from it. The Mac opens both in the host's own window (`MacHostWindow`).
             #if !os(macOS)
             .navigationDestination(item: $detailTarget) { id in
+                #if os(tvOS)
+                // The iPad's sectioned page; what it hands back runs once the pop has finished.
+                HostSectionsView(hostID: id, store: store) { request in
+                    pendingHandOff = request
+                    detailTarget = nil
+                }
+                .onDisappear(perform: runHandOff)
+                #else
                 HostDetailView(
                     store: store, hostID: id, actions: { hostActions(for: $0, pinned: nil) })
+                #endif
             }
             .navigationDestination(item: $speedTestTarget) { host in
                 SpeedTestView(host: host)
@@ -392,8 +403,9 @@ struct HomeView: View {
         #endif
     }
 
-    #if os(iOS)
-    /// The iPad's host sheet closed on an act that belongs to the grid: run it now it is gone.
+    #if os(iOS) || os(tvOS)
+    /// The iPad's host sheet or the TV's host page closed on an act that belongs to the grid: run
+    /// it now it is gone.
     private func runHandOff() {
         guard let request = pendingHandOff else { return }
         pendingHandOff = nil

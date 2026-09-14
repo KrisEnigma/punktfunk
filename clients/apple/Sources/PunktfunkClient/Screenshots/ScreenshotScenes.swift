@@ -219,6 +219,20 @@ enum ShotScenes {
         scenes.append(ShotScene(name: "23-tv-quick-actions", orientation: .natural, colorScheme: .dark) {
             AnyView(ShotTVTabs(tab: .settings, category: .quickActions))
         })
+        // The host page as the TV pushes it, and its speed test waiting for Start.
+        scenes.append(ShotScene(name: "24-tv-host-page", orientation: .natural, colorScheme: .dark) {
+            AnyView(NavigationStack {
+                HostSectionsView(
+                    hostID: ShotMock.battlestationID, store: ShotMock.pageStore, handOff: { _ in })
+            })
+        })
+        scenes.append(ShotScene(name: "24b-tv-host-speed-test", orientation: .natural, colorScheme: .dark) {
+            AnyView(NavigationStack {
+                HostSectionsView(
+                    hostID: ShotMock.battlestationID, store: ShotMock.pageStore, section: .speedTest,
+                    handOff: { _ in })
+            })
+        })
         #endif
         scenes.append(ShotScene(name: "10-edithost", orientation: .natural, colorScheme: .dark) {
             AnyView(ShotEditHost())
