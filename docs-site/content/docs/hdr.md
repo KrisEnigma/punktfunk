@@ -41,8 +41,8 @@ outrun the picture.
   path writes full-resolution 10-bit chroma and NVENC encodes HEVC Main 4:4:4 10, so
   [full chroma](/docs/client-settings) costs nothing on an HDR desktop; [PyroWave](/docs/pyrowave)
   does the same there, in 16-bit planes. On **Linux** the 4:4:4 route is 8-bit, so a session that
-  negotiates both resolves back down to SDR — full chroma wins. AV1 never carries 4:4:4 anywhere:
-  Range Extensions are HEVC-only.
+  asks for both keeps HDR and drops to 4:2:0 — HDR wins, since games can only offer HDR on an HDR
+  display. AV1 never carries 4:4:4 anywhere: Range Extensions are HEVC-only.
 - **Vulkan games need the bundled layer.** NVIDIA and AMD Vulkan drivers refuse to advertise any HDR
   colour space for a surface on an indirect (virtual) display, so Vulkan games decide the device
   "does not support HDR" — though the driver happily presents an HDR swapchain there. The host
