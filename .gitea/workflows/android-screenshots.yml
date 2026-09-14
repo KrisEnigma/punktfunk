@@ -37,12 +37,11 @@ jobs:
           path: |
             ~/.gradle/caches
             ~/.gradle/wrapper
-          # gradle-wrapper.properties is in the key on purpose: `~/.gradle/wrapper` caches the
-          # Gradle DISTRIBUTION, so a wrapper bump with no .gradle.kts change would otherwise
-          # restore a key that can never hold the new one. Namespace shared with android.yml —
-          # it is the same content; two keys just stored it twice in the central cache.
-          key: gradle-${{ hashFiles('clients/android/**/*.gradle.kts', 'clients/android/**/gradle.lockfile', 'clients/android/gradle/verification-metadata.xml', 'clients/android/gradle/wrapper/gradle-wrapper.properties') }}
-          restore-keys: gradle-
+          # gradle-wrapper.properties is in the key: `~/.gradle/wrapper` caches the Gradle
+          # distribution. Not android.yml's namespace: that job never resolves the Robolectric
+          # test classpath, so a bad jar cached there would fail verification here and nowhere else.
+          key: gradle-shots-${{ hashFiles('clients/android/**/*.gradle.kts', 'clients/android/**/gradle.lockfile', 'clients/android/gradle/verification-metadata.xml', 'clients/android/gradle/wrapper/gradle-wrapper.properties') }}
+          restore-keys: gradle-shots-
 
       - name: Verify Gradle wrapper
         working-directory: clients/android
