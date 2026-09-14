@@ -12,7 +12,6 @@ use anyhow::{bail, Context, Result};
 use punktfunk_core::input::{InputKind, PRECISE_PX_PER_DETENT, SCROLL_FLAG_PRECISE};
 use std::io::Write;
 use std::os::fd::{AsFd, FromRawFd};
-use std::time::Instant;
 use wayland_client::backend::WaylandError;
 use wayland_client::protocol::{
     wl_output::{self, WlOutput},
@@ -171,7 +170,6 @@ pub struct WlrootsInjector {
     /// time; holding the remainder makes them add up into real clicks instead. Integer, because
     /// a float store drifts — ten 0.1 detents sum to 0.9999999999999999 and never fire.
     wheel_rem: (i32, i32),
-    start: Instant,
 }
 
 fn resolve_target(globals: &Globals) -> (Option<WlOutput>, Option<String>) {
@@ -288,7 +286,6 @@ impl WlrootsInjector {
             _keymap_file: file,
             text: None,
             wheel_rem: (0, 0),
-            start: Instant::now(),
         })
     }
 
@@ -355,8 +352,9 @@ impl WlrootsInjector {
         Ok(())
     }
 
+    /// Wire `time`: `CLOCK_MONOTONIC` ms, wrapping like the compositor's own stamps.
     fn now_ms(&self) -> u32 {
-        self.start.elapsed().as_millis() as u32
+        (crate::monotonic_us() / 1_000) as u32
     }
 
     /// One Unicode scalar on the text device. Controls are dropped; Enter/Backspace/Tab

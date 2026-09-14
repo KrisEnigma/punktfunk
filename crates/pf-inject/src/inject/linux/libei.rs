@@ -30,7 +30,7 @@ use reis::ei;
 use reis::event::{DeviceCapability, EiEvent};
 use std::collections::HashMap;
 use std::os::unix::net::UnixStream;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 
 /// Wire `code` for a horizontal scroll event (same as `gamestream::input`).
@@ -477,12 +477,11 @@ struct DeviceSlot {
     emulating: bool,
 }
 
-/// Bound devices plus the serial/sequence/timebase the EI protocol requires.
+/// Bound devices plus the serial and sequence the EI protocol requires.
 struct EiState {
     devices: Vec<DeviceSlot>,
     last_serial: u32,
     sequence: u32,
-    start: Instant,
     /// inject() count — throttle for diagnostic logging.
     injected: u64,
     /// [`InputKind`]s already logged once (first of each kind).
@@ -561,7 +560,6 @@ impl EiState {
             devices: Vec::new(),
             last_serial: 0,
             sequence: 0,
-            start: Instant::now(),
             injected: 0,
             seen_kinds: 0,
             held_keys: Vec::new(),
@@ -610,10 +608,6 @@ impl EiState {
         for id in touches {
             self.inject(&release(InputKind::TouchUp, id), ctx);
         }
-    }
-
-    fn now_us(&self) -> u64 {
-        self.start.elapsed().as_micros() as u64
     }
 
     fn handle_ei(&mut self, ev: EiEvent, ctx: &ei::Context) {
@@ -992,7 +986,7 @@ impl EiState {
                 InputKind::TouchUp => self.held_touches.retain(|&c| c != ev.code),
                 _ => {}
             }
-            dev.frame(self.last_serial, self.now_us());
+            dev.frame(self.last_serial, crate::monotonic_us());
         }
         if let Err(e) = ctx.flush() {
             // Dead EIS fails flush on every event (mouse-move = 100s/s); same
