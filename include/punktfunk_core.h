@@ -2439,6 +2439,32 @@ PunktfunkStatus punktfunk_connection_set_pad_audio_caps(PunktfunkConnection *c,
 #endif
 
 #if defined(PUNKTFUNK_FEATURE_QUIC)
+// Switch the pads in `mask` (bit = wire pad index) to controller mouse: their buttons and sticks
+// drive the host pointer and a few keys while the host pad sits neutral. `0` returns every pad
+// to passthrough. Session-scoped. `Unsupported` without `PUNKTFUNK_GRANT_POINTER`.
+//
+// # Safety
+// `c` is a valid connection handle. Callable from any thread.
+PunktfunkStatus punktfunk_connection_set_pad_mouse(PunktfunkConnection *c, uint16_t mask);
+#endif
+
+#if defined(PUNKTFUNK_FEATURE_QUIC)
+// Pads in controller mouse now. A removed pad or a lost pointer grant clears its bit.
+//
+// # Safety
+// `c` is a valid connection handle; `mask` is writable (NULL is skipped).
+PunktfunkStatus punktfunk_connection_pad_mouse(const PunktfunkConnection *c, uint16_t *mask);
+#endif
+
+#if defined(PUNKTFUNK_FEATURE_QUIC)
+// Wire pad indices the host holds now, a bit per pad: declared or driven, not yet removed.
+//
+// # Safety
+// `c` is a valid connection handle; `mask` is writable (NULL is skipped).
+PunktfunkStatus punktfunk_connection_live_pads(const PunktfunkConnection *c, uint16_t *mask);
+#endif
+
+#if defined(PUNKTFUNK_FEATURE_QUIC)
 // Pull the next rumble update, waiting up to `timeout_ms`. Amplitudes are
 // 0..0xFFFF (`low`/`high` motors), `(0, 0)` = stop. Same timeout/closed as
 // [`punktfunk_connection_next_audio`]. Drops the v2 self-terminating TTL —

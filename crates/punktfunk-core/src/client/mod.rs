@@ -31,6 +31,7 @@ use std::time::{Duration, Instant};
 
 mod control;
 mod frame_channel;
+mod pad_mouse;
 mod pairing;
 mod planes;
 mod probe;
@@ -194,6 +195,8 @@ pub struct NativeClient {
     /// Per-pad render caps (bit0 haptics, bit1 speaker). OR'd into arrival flags 8/9 toward
     /// a `HOST_CAP_PAD_AUDIO` host only.
     pad_audio_caps: Arc<[AtomicU8; crate::input::MAX_PADS]>,
+    /// Pads translated into pointer and keys ([`NativeClient::set_pad_mouse`]).
+    pad_mouse: Arc<pad_mouse::PadMouseShared>,
     hdr_meta: Mutex<Receiver<HdrMeta>>,
     /// Per-AU capture→send timings. Client always advertises [`quic::VIDEO_CAP_HOST_TIMING`];
     /// an older host never sends any.
@@ -606,6 +609,7 @@ impl NativeClient {
             std::sync::mpsc::sync_channel::<PadAudioFrame>(PAD_AUDIO_QUEUE);
         let pad_audio_caps: Arc<[AtomicU8; crate::input::MAX_PADS]> =
             Arc::new(std::array::from_fn(|_| AtomicU8::new(0)));
+        let pad_mouse = Arc::new(pad_mouse::PadMouseShared::default());
         let (hdr_meta_tx, hdr_meta_rx) = std::sync::mpsc::sync_channel::<HdrMeta>(HDR_META_QUEUE);
         let (host_timing_tx, host_timing_rx) =
             std::sync::mpsc::sync_channel::<crate::quic::HostTiming>(HOST_TIMING_QUEUE);
@@ -666,6 +670,7 @@ impl NativeClient {
         let decode_lat_w = decode_lat.clone();
         let live_bitrate_w = live_bitrate.clone();
         let pad_audio_caps_w = pad_audio_caps.clone();
+        let pad_mouse_w = pad_mouse.clone();
         let access_grants_w = access_grants.clone();
         let access_deadline_w = access_deadline_unix.clone();
         let end_reject_w = end_reject_code.clone();
@@ -718,6 +723,7 @@ impl NativeClient {
                     hidout_tx,
                     pad_audio_tx,
                     pad_audio_caps: pad_audio_caps_w,
+                    pad_mouse: pad_mouse_w,
                     hdr_meta_tx,
                     host_timing_tx,
                     cursor_shape_tx,
@@ -785,6 +791,7 @@ impl NativeClient {
             hidout: Mutex::new(hidout_rx),
             pad_audio: Mutex::new(pad_audio_rx),
             pad_audio_caps,
+            pad_mouse,
             hdr_meta: Mutex::new(hdr_meta_rx),
             host_timing: Mutex::new(host_timing_rx),
             cursor_shape: Mutex::new(cursor_shape_rx),
@@ -1527,8 +1534,36 @@ impl NativeClient {
         }
     }
 
+    /// Switch the pads in `mask` (bit = wire pad index) to controller mouse: their buttons and
+    /// sticks drive the host pointer and a few keys while the host pad sits neutral. The rest
+    /// forward as usual. Session-scoped; a removed pad drops its bit. Needs
+    /// [`GRANT_POINTER`](crate::quic::GRANT_POINTER), and losing it clears the mask.
+    pub fn set_pad_mouse(&self, mask: u16) -> Result<()> {
+        if mask != 0 && self.access_grants() & crate::quic::GRANT_POINTER == 0 {
+            return Err(PunktfunkError::Unsupported(
+                "host did not grant pointer input",
+            ));
+        }
+        self.pad_mouse.request(mask);
+        Ok(())
+    }
+
+    /// Pads the embedder switched to controller mouse and that are still connected.
+    pub fn pad_mouse(&self) -> u16 {
+        self.pad_mouse.active(self.access_grants())
+    }
+
+    /// Wire pad indices the host holds right now: declared or driven, not yet removed.
+    pub fn live_pads(&self) -> u16 {
+        self.pad_mouse.live()
+    }
+
     /// DualSense touchpad/motion (0xCC). Best-effort. No-op unless the host runs DualSense.
+    /// Dropped for a controller-mouse pad, so its gyro cannot aim the neutral host pad.
     pub fn send_rich_input(&self, rich: RichInput) -> Result<()> {
+        if self.pad_mouse() & 1u16.checked_shl(u32::from(rich.pad())).unwrap_or(0) != 0 {
+            return Ok(());
+        }
         self.rich_input_tx
             .send(rich.encode())
             .map_err(|_| PunktfunkError::Closed)

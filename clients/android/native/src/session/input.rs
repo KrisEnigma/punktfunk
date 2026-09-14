@@ -373,6 +373,34 @@ pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativeSendGamepad
     })
 }
 
+/// `NativeBridge.nativeSetPadMouse(handle, mask)` — controller mouse on the wire pads in `mask`
+/// (bit = pad index); `0` returns every pad to passthrough. `false` when the session is gone or the
+/// host did not grant pointer input.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativeSetPadMouse(
+    _env: EnvUnowned,
+    _this: JObject,
+    handle: jlong,
+    mask: jint,
+) -> jboolean {
+    jni_guard(false, || {
+        get_session(handle).is_some_and(|h| h.client.set_pad_mouse(mask as u16).is_ok())
+    })
+}
+
+/// `NativeBridge.nativePadMouse(handle)` — the pads in controller mouse now; `0` once the session is
+/// gone.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativePadMouse(
+    _env: EnvUnowned,
+    _this: JObject,
+    handle: jlong,
+) -> jint {
+    jni_guard(0, || {
+        get_session(handle).map_or(0, |h| jint::from(h.client.pad_mouse()))
+    })
+}
+
 /// `NativeBridge.nativeSendGamepadArrival(handle, pref, pad)` — declare the controller KIND presented
 /// on wire pad index `pad` so the host builds a matching virtual device (mixed types — pad 0 a
 /// DualSense, pad 1 an Xbox pad). `pref`: the `GamepadPref` wire byte (rides `code`). `pad`: wire pad
