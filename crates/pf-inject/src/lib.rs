@@ -756,6 +756,20 @@ mod sendinput;
 #[path = "inject/linux/wlr.rs"]
 mod wlr;
 
+/// `CLOCK_MONOTONIC` in µs: the clock libinput and the compositor stamp input with.
+/// Clients compare our stamps with the compositor's synthesised events; GTK closes a
+/// menu whose popup-grab release looks more than 500 ms after our press.
+#[cfg(target_os = "linux")]
+fn monotonic_us() -> u64 {
+    let mut ts = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: `CLOCK_MONOTONIC` is a valid clock id and `ts` is a live, writable timespec.
+    unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) };
+    ts.tv_sec as u64 * 1_000_000 + ts.tv_nsec as u64 / 1_000
+}
+
 #[cfg(all(test, target_os = "linux"))]
 mod backend_select_tests {
     use super::*;
