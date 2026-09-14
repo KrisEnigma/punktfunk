@@ -70,8 +70,8 @@ follow the picture you see. A size within a few pixels of 1:1, or of an exact 2�
 a pixel or two of bar beats blurring the whole picture. Linux, Windows, Mac, iPhone, iPad, Apple
 TV, Android and the console home. On Android before 10, Crop to fill shows the picture squeezed
 instead: that path has no way to cut the edges off. When you join a display another device sized,
-a Linux host with an AMD or Intel GPU crops and scales the picture for your screen before it
-encodes, so your device decodes only what it shows. Other hosts send the whole picture.
+a Linux host with a hardware encoder crops and scales the picture for your screen before it
+encodes, so your device decodes only what it shows. A Windows host sends the whole picture.
 
 **Video codec** — *default: Automatic.* A soft preference: your choice when the host can produce
 it, else the best codec you both speak, in the order HEVC → AV1 → H.264. **PyroWave** is never

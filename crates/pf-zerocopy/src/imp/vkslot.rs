@@ -29,6 +29,8 @@ const PIPELINE_MODES: u32 = 5;
 
 /// Vendored `cursor_blend.comp` SPIR-V. Rebuild: `glslangValidator -V cursor_blend.comp -o cursor_blend.spv`.
 const CURSOR_SPV: &[u8] = include_bytes!("cursor_blend.spv");
+/// Vendored `reframe_buf.comp` SPIR-V. Rebuild: `glslangValidator -V reframe_buf.comp -o reframe_buf.spv`.
+const REFRAME_SPV: &[u8] = include_bytes!("reframe_buf.spv");
 
 /// NVENC input layout: shader MODE spec-constant and allocation arithmetic.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -61,6 +63,16 @@ impl SlotFormat {
             self,
             SlotFormat::Argb | SlotFormat::X2Rgb10 | SlotFormat::X2Bgr10
         )
+    }
+    /// `reframe_buf.comp` LAYOUT of the first plane: packed 8-bit, the two 10-bit orders, or
+    /// one byte per pixel.
+    fn reframe_layout(self) -> u32 {
+        match self {
+            SlotFormat::Argb => 0,
+            SlotFormat::X2Rgb10 => 1,
+            SlotFormat::X2Bgr10 => 2,
+            SlotFormat::Nv12 | SlotFormat::Yuv444 => 3,
+        }
     }
     fn row_bytes(self, width: u32) -> u64 {
         if self.is_packed32() {
@@ -141,6 +153,100 @@ struct Push {
     oy: i32,
 }
 
+/// 56-byte push-constant block; must match `reframe_buf.comp`'s `Push`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ReframePush {
+    lay: u32,
+    axis: u32,
+    src_off: u32,
+    src_pitch: u32,
+    dst_off: u32,
+    dst_pitch: u32,
+    crop_x: i32,
+    crop_y: i32,
+    crop_w: i32,
+    crop_h: i32,
+    out_w: u32,
+    out_h: u32,
+    step: f32,
+    words: u32,
+}
+
+/// Every dispatch of one reframe, in order: per plane the x pass then the y pass, each with its
+/// group counts. Crop and output halve on NV12's chroma plane (both are even by construction).
+fn reframe_passes(
+    fmt: SlotFormat,
+    src: &VkSlotRef,
+    dst: &VkSlotRef,
+    crop: [u32; 4],
+    out: (u32, u32),
+) -> Vec<(ReframePush, u32, u32)> {
+    let (sp, dp) = (src.pitch as u32, dst.pitch as u32);
+    let (sh, dh) = (src.height, dst.height);
+    let mut passes = Vec::new();
+    let mut plane = |lay: u32, src_off: u32, dst_off: u32, div: u32| {
+        let [x, y, w, h] = crop.map(|v| v / div);
+        let (ow, oh) = (out.0 / div, out.1 / div);
+        let words = match lay {
+            3 => ow.div_ceil(4),
+            4 => ow.div_ceil(2),
+            _ => ow,
+        };
+        let base = ReframePush {
+            lay,
+            axis: 0,
+            src_off,
+            src_pitch: sp,
+            dst_off,
+            dst_pitch: dp,
+            crop_x: x as i32,
+            crop_y: y as i32,
+            crop_w: w as i32,
+            crop_h: h as i32,
+            out_w: ow,
+            out_h: oh,
+            step: w as f32 / ow as f32,
+            words,
+        };
+        passes.push((base, ow.div_ceil(16), h.div_ceil(16)));
+        let ypass = ReframePush {
+            axis: 1,
+            step: h as f32 / oh as f32,
+            ..base
+        };
+        passes.push((ypass, words.div_ceil(16), oh.div_ceil(16)));
+    };
+    match fmt {
+        SlotFormat::Nv12 => {
+            plane(3, 0, 0, 1);
+            plane(4, sp * sh, dp * dh, 2);
+        }
+        SlotFormat::Yuv444 => {
+            for k in 0..3 {
+                plane(3, k * sp * sh, k * dp * dh, 1);
+            }
+        }
+        packed => plane(packed.reframe_layout(), 0, 0, 1),
+    }
+    passes
+}
+
+/// [`VkSlotBlend::reframe`]'s objects, built on first use.
+struct ReframeStage {
+    shader: vk::ShaderModule,
+    desc_layout: vk::DescriptorSetLayout,
+    pipe_layout: vk::PipelineLayout,
+    pipeline: vk::Pipeline,
+    pool: vk::DescriptorPool,
+    /// Float intermediate, `4` floats per texel of the widest plane's x pass.
+    tmp: vk::Buffer,
+    tmp_mem: vk::DeviceMemory,
+    tmp_bytes: u64,
+    /// One set per (staging slot id, NVENC slot id) pair. Freed with the slots.
+    sets: Vec<(usize, usize, vk::DescriptorSet)>,
+}
+
 pub struct VkSlotBlend {
     _entry: ash::Entry,
     instance: ash::Instance,
@@ -163,6 +269,8 @@ pub struct VkSlotBlend {
     slots: Vec<SlotAlloc>,
     /// Stream-ordered blend (`None` = CPU-synced only). See [`Timeline`].
     timeline: Option<Timeline>,
+    /// Crop-and-scale pipeline ([`VkSlotBlend::reframe`]); `None` until a session reframes.
+    reframe: Option<ReframeStage>,
 }
 
 // SAFETY: Vulkan handles + a persistently-mapped pointer, uniquely owned and
@@ -278,6 +386,7 @@ impl VkSlotBlend {
                 cur_map: std::ptr::null_mut(),
                 slots: Vec::new(),
                 timeline: None,
+                reframe: None,
             };
             me.init_objects(qf).inspect_err(|_| {
                 // Drop tears down; null handles from a partial init are no-ops.
@@ -650,6 +759,15 @@ impl VkSlotBlend {
                 let _ = self.device.device_wait_idle();
             }
         }
+        if let Some(stage) = &mut self.reframe {
+            for (_, _, set) in stage.sets.drain(..) {
+                // SAFETY: allocated from `stage.pool` in `reframe_set`, freed once; the queue
+                // is idle (above) and the sets name the slot buffers freed below.
+                unsafe {
+                    let _ = self.device.free_descriptor_sets(stage.pool, &[set]);
+                }
+            }
+        }
         for s in self.slots.drain(..) {
             drop(s.cuda); // CUDA mapping first
                           // SAFETY: uniquely owned by the drained `SlotAlloc`, created in
@@ -981,9 +1099,336 @@ impl VkSlotBlend {
     }
 }
 
+impl VkSlotBlend {
+    /// Scale the `crop` (`x, y, w, h` in source pixels) of staging slot `src` into NVENC slot
+    /// `dst` at `out`, both in layout `fmt`: record, submit, fence-wait. The caller has
+    /// CPU-synced the CUDA copy into `src`; the fence makes the writes visible to the encode.
+    pub fn reframe(
+        &mut self,
+        src: &VkSlotRef,
+        dst: &VkSlotRef,
+        fmt: SlotFormat,
+        crop: [u32; 4],
+        out: (u32, u32),
+    ) -> Result<()> {
+        let passes = reframe_passes(fmt, src, dst, crop, out);
+        let need = passes
+            .iter()
+            .map(|(p, _, _)| u64::from(p.out_w) * p.crop_h as u64 * 16)
+            .max()
+            .unwrap_or(16);
+        self.ensure_reframe(need)?;
+        let set = self.reframe_set(src.id, dst.id)?;
+        let stage = self.reframe.as_ref().expect("ensure_reframe built it");
+        let cmd = self
+            .slots
+            .get(dst.id)
+            .ok_or_else(|| anyhow!("bad slot id {}", dst.id))?
+            .cmd;
+        // SAFETY: single-thread owner. `dst`'s previous submit completed (fence-waited blend
+        // or reframe; reframing sessions never submit ordered). Every info and slice is a
+        // local outliving its synchronous call; `bytes` reborrows a `repr(C)` push block.
+        // Shader reads and writes stay inside the slots by `reframe_passes`' geometry.
+        unsafe {
+            let d = &self.device;
+            d.begin_command_buffer(
+                cmd,
+                &vk::CommandBufferBeginInfo::default()
+                    .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
+            )
+            .context("begin reframe cmd")?;
+            let acquire = [vk::MemoryBarrier::default()
+                .src_access_mask(vk::AccessFlags::MEMORY_WRITE)
+                .dst_access_mask(vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE)];
+            d.cmd_pipeline_barrier(
+                cmd,
+                vk::PipelineStageFlags::TOP_OF_PIPE,
+                vk::PipelineStageFlags::COMPUTE_SHADER,
+                vk::DependencyFlags::empty(),
+                &acquire,
+                &[],
+                &[],
+            );
+            d.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, stage.pipeline);
+            d.cmd_bind_descriptor_sets(
+                cmd,
+                vk::PipelineBindPoint::COMPUTE,
+                stage.pipe_layout,
+                0,
+                &[set],
+                &[],
+            );
+            for (push, gx, gy) in &passes {
+                let bytes = std::slice::from_raw_parts(
+                    (push as *const ReframePush) as *const u8,
+                    std::mem::size_of::<ReframePush>(),
+                );
+                d.cmd_push_constants(
+                    cmd,
+                    stage.pipe_layout,
+                    vk::ShaderStageFlags::COMPUTE,
+                    0,
+                    bytes,
+                );
+                d.cmd_dispatch(cmd, (*gx).max(1), (*gy).max(1), 1);
+                // Each pass reads what the one before wrote. Without a barrier between them
+                // the NVIDIA driver ran the y pass before the x pass it reads.
+                let between = [vk::MemoryBarrier::default()
+                    .src_access_mask(vk::AccessFlags::SHADER_WRITE)
+                    .dst_access_mask(vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE)];
+                d.cmd_pipeline_barrier(
+                    cmd,
+                    vk::PipelineStageFlags::COMPUTE_SHADER,
+                    vk::PipelineStageFlags::COMPUTE_SHADER,
+                    vk::DependencyFlags::empty(),
+                    &between,
+                    &[],
+                    &[],
+                );
+            }
+            let release = [vk::MemoryBarrier::default()
+                .src_access_mask(vk::AccessFlags::SHADER_WRITE)
+                .dst_access_mask(vk::AccessFlags::MEMORY_READ)];
+            d.cmd_pipeline_barrier(
+                cmd,
+                vk::PipelineStageFlags::COMPUTE_SHADER,
+                vk::PipelineStageFlags::BOTTOM_OF_PIPE,
+                vk::DependencyFlags::empty(),
+                &release,
+                &[],
+                &[],
+            );
+            d.end_command_buffer(cmd).context("end reframe cmd")?;
+            let cmds = [cmd];
+            let submit = [vk::SubmitInfo::default().command_buffers(&cmds)];
+            d.queue_submit(self.queue, &submit, self.fence)
+                .context("submit reframe")?;
+            let r = d.wait_for_fences(&[self.fence], true, 1_000_000_000);
+            if r.is_err() {
+                // Same as `blend_ref`: drain before resetting a fence that may still signal.
+                let _ = d.device_wait_idle();
+            }
+            d.reset_fences(&[self.fence]).ok();
+            r.context("reframe fence wait")?;
+        }
+        Ok(())
+    }
+
+    /// Build the reframe pipeline on first use and grow the intermediate to `tmp_bytes`.
+    fn ensure_reframe(&mut self, tmp_bytes: u64) -> Result<()> {
+        if self.reframe.is_none() {
+            let stage = self.build_reframe_stage()?;
+            self.reframe = Some(stage);
+        }
+        let stage = self.reframe.as_mut().expect("built above");
+        if stage.tmp_bytes >= tmp_bytes {
+            return Ok(());
+        }
+        // SAFETY: single-thread owner. The queue is drained before the old intermediate and
+        // the sets naming it are released; the new buffer is bound before any set names it.
+        unsafe {
+            let d = &self.device;
+            let _ = d.device_wait_idle();
+            for (_, _, set) in stage.sets.drain(..) {
+                let _ = d.free_descriptor_sets(stage.pool, &[set]);
+            }
+            d.destroy_buffer(stage.tmp, None);
+            d.free_memory(stage.tmp_mem, None);
+            stage.tmp = vk::Buffer::null();
+            stage.tmp_mem = vk::DeviceMemory::null();
+            stage.tmp_bytes = 0;
+            let tmp = d
+                .create_buffer(
+                    &vk::BufferCreateInfo::default()
+                        .size(tmp_bytes)
+                        .usage(vk::BufferUsageFlags::STORAGE_BUFFER),
+                    None,
+                )
+                .context("create reframe intermediate")?;
+            stage.tmp = tmp;
+            let reqs = d.get_buffer_memory_requirements(tmp);
+            let mem_type = (0..self.mem_props.memory_type_count)
+                .find(|&i| {
+                    reqs.memory_type_bits & (1 << i) != 0
+                        && self.mem_props.memory_types[i as usize]
+                            .property_flags
+                            .contains(vk::MemoryPropertyFlags::DEVICE_LOCAL)
+                })
+                .ok_or_else(|| anyhow!("no device-local memory for the reframe intermediate"))?;
+            stage.tmp_mem = d
+                .allocate_memory(
+                    &vk::MemoryAllocateInfo::default()
+                        .allocation_size(reqs.size)
+                        .memory_type_index(mem_type),
+                    None,
+                )
+                .context("allocate reframe intermediate")?;
+            d.bind_buffer_memory(tmp, stage.tmp_mem, 0)
+                .context("bind reframe intermediate")?;
+            stage.tmp_bytes = tmp_bytes;
+        }
+        Ok(())
+    }
+
+    fn build_reframe_stage(&self) -> Result<ReframeStage> {
+        let mut stage = ReframeStage {
+            shader: vk::ShaderModule::null(),
+            desc_layout: vk::DescriptorSetLayout::null(),
+            pipe_layout: vk::PipelineLayout::null(),
+            pipeline: vk::Pipeline::null(),
+            pool: vk::DescriptorPool::null(),
+            tmp: vk::Buffer::null(),
+            tmp_mem: vk::DeviceMemory::null(),
+            tmp_bytes: 0,
+            sets: Vec::new(),
+        };
+        // SAFETY: ash calls on the live device; create-infos are locals outliving each call.
+        // On any failure every handle made so far is destroyed once (null ones are no-ops).
+        unsafe {
+            let d = &self.device;
+            let built = (|| -> Result<()> {
+                let binding = |b| {
+                    vk::DescriptorSetLayoutBinding::default()
+                        .binding(b)
+                        .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                        .descriptor_count(1)
+                        .stage_flags(vk::ShaderStageFlags::COMPUTE)
+                };
+                let bindings = [binding(0), binding(1), binding(2)];
+                stage.desc_layout = d
+                    .create_descriptor_set_layout(
+                        &vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings),
+                        None,
+                    )
+                    .context("create reframe descriptor layout")?;
+                let pc = [vk::PushConstantRange::default()
+                    .stage_flags(vk::ShaderStageFlags::COMPUTE)
+                    .size(std::mem::size_of::<ReframePush>() as u32)];
+                let dl = [stage.desc_layout];
+                stage.pipe_layout = d
+                    .create_pipeline_layout(
+                        &vk::PipelineLayoutCreateInfo::default()
+                            .set_layouts(&dl)
+                            .push_constant_ranges(&pc),
+                        None,
+                    )
+                    .context("create reframe pipeline layout")?;
+                if REFRAME_SPV.len() % 4 != 0 {
+                    anyhow::bail!("reframe_buf.spv is not word-aligned");
+                }
+                let words: Vec<u32> = REFRAME_SPV
+                    .chunks_exact(4)
+                    .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                    .collect();
+                stage.shader = d
+                    .create_shader_module(&vk::ShaderModuleCreateInfo::default().code(&words), None)
+                    .context("create reframe shader module")?;
+                let info = [vk::ComputePipelineCreateInfo::default()
+                    .stage(
+                        vk::PipelineShaderStageCreateInfo::default()
+                            .stage(vk::ShaderStageFlags::COMPUTE)
+                            .module(stage.shader)
+                            .name(c"main"),
+                    )
+                    .layout(stage.pipe_layout)];
+                stage.pipeline = d
+                    .create_compute_pipelines(vk::PipelineCache::null(), &info, None)
+                    .map_err(|(_, e)| e)
+                    .context("create reframe pipeline")?[0];
+                // 64 sets: far above POOL (8) staging × NVENC pairings. 3 buffers each.
+                let sizes = [vk::DescriptorPoolSize::default()
+                    .ty(vk::DescriptorType::STORAGE_BUFFER)
+                    .descriptor_count(192)];
+                stage.pool = d
+                    .create_descriptor_pool(
+                        &vk::DescriptorPoolCreateInfo::default()
+                            .flags(vk::DescriptorPoolCreateFlags::FREE_DESCRIPTOR_SET)
+                            .max_sets(64)
+                            .pool_sizes(&sizes),
+                        None,
+                    )
+                    .context("create reframe descriptor pool")?;
+                Ok(())
+            })();
+            if let Err(e) = built {
+                d.destroy_pipeline(stage.pipeline, None);
+                d.destroy_shader_module(stage.shader, None);
+                d.destroy_descriptor_pool(stage.pool, None);
+                d.destroy_pipeline_layout(stage.pipe_layout, None);
+                d.destroy_descriptor_set_layout(stage.desc_layout, None);
+                return Err(e);
+            }
+        }
+        Ok(stage)
+    }
+
+    /// The descriptor set binding staging slot `src`, the intermediate and NVENC slot `dst`.
+    fn reframe_set(&mut self, src: usize, dst: usize) -> Result<vk::DescriptorSet> {
+        let (src_buf, dst_buf) = match (self.slots.get(src), self.slots.get(dst)) {
+            (Some(s), Some(d)) => (s.buffer, d.buffer),
+            _ => anyhow::bail!("bad reframe slot ids {src} → {dst}"),
+        };
+        let stage = self.reframe.as_mut().expect("ensure_reframe ran");
+        if let Some(&(_, _, set)) = stage.sets.iter().find(|(s, d, _)| (*s, *d) == (src, dst)) {
+            return Ok(set);
+        }
+        // SAFETY: live device and pool; the buffers are live slot allocations and the
+        // intermediate built by `ensure_reframe`. Infos outlive the synchronous calls.
+        unsafe {
+            let dls = [stage.desc_layout];
+            let set = self
+                .device
+                .allocate_descriptor_sets(
+                    &vk::DescriptorSetAllocateInfo::default()
+                        .descriptor_pool(stage.pool)
+                        .set_layouts(&dls),
+                )
+                .context("allocate reframe descriptor set")?[0];
+            let info = |buffer| {
+                [vk::DescriptorBufferInfo::default()
+                    .buffer(buffer)
+                    .offset(0)
+                    .range(vk::WHOLE_SIZE)]
+            };
+            let (a, b, c) = (info(src_buf), info(stage.tmp), info(dst_buf));
+            fn write<'a>(
+                set: vk::DescriptorSet,
+                binding: u32,
+                info: &'a [vk::DescriptorBufferInfo; 1],
+            ) -> vk::WriteDescriptorSet<'a> {
+                vk::WriteDescriptorSet::default()
+                    .dst_set(set)
+                    .dst_binding(binding)
+                    .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                    .buffer_info(info)
+            }
+            self.device.update_descriptor_sets(
+                &[write(set, 0, &a), write(set, 1, &b), write(set, 2, &c)],
+                &[],
+            );
+            stage.sets.push((src, dst, set));
+            Ok(set)
+        }
+    }
+}
+
 impl Drop for VkSlotBlend {
     fn drop(&mut self) {
         self.free_slots();
+        if let Some(stage) = self.reframe.take() {
+            // SAFETY: built in `ensure_reframe`, uniquely owned, destroyed once before the
+            // device. `free_slots` waited the queue idle and freed the sets.
+            unsafe {
+                let d = &self.device;
+                d.destroy_buffer(stage.tmp, None);
+                d.free_memory(stage.tmp_mem, None);
+                d.destroy_pipeline(stage.pipeline, None);
+                d.destroy_pipeline_layout(stage.pipe_layout, None);
+                d.destroy_descriptor_pool(stage.pool, None);
+                d.destroy_descriptor_set_layout(stage.desc_layout, None);
+                d.destroy_shader_module(stage.shader, None);
+            }
+        }
         if let Some(t) = self.timeline.take() {
             drop(t.cuda); // CUDA import of the semaphore before the Vulkan object
                           // SAFETY: created in `init_timeline`, uniquely owned, destroyed
@@ -1057,6 +1502,186 @@ mod tests {
     fn empty_rect_is_none() {
         assert!(geo(SlotFormat::Argb, 0, 32, 10, 10).is_none());
         assert!(geo(SlotFormat::Nv12, 32, 0, 10, 10).is_none());
+    }
+
+    /// NV12 reframes Y at full size, then UV at half the crop and output, from the plane that
+    /// starts `pitch × height` into each slot.
+    #[test]
+    fn nv12_reframe_halves_the_chroma_plane() {
+        let src = VkSlotRef {
+            ptr: 0,
+            pitch: 2048,
+            height: 1080,
+            id: 0,
+        };
+        let dst = VkSlotRef {
+            ptr: 0,
+            pitch: 1024,
+            height: 720,
+            id: 1,
+        };
+        let passes = reframe_passes(
+            SlotFormat::Nv12,
+            &src,
+            &dst,
+            [240, 0, 1440, 1080],
+            (960, 720),
+        );
+        assert_eq!(passes.len(), 4, "x and y for each of two planes");
+        let (y_x, gx, gy) = passes[0];
+        assert_eq!(
+            (y_x.lay, y_x.axis, y_x.crop_x, y_x.crop_w),
+            (3, 0, 240, 1440)
+        );
+        assert_eq!((y_x.step, gx, gy), (1.5, 60, 68));
+        let (y_y, gx, _) = passes[1];
+        assert_eq!(
+            (y_y.axis, y_y.words, gx),
+            (1, 240, 15),
+            "four luma bytes per word"
+        );
+        let (uv_x, _, _) = passes[2];
+        assert_eq!(
+            (uv_x.lay, uv_x.src_off, uv_x.dst_off),
+            (4, 2048 * 1080, 1024 * 720)
+        );
+        assert_eq!(
+            (uv_x.crop_x, uv_x.crop_w, uv_x.out_w, uv_x.out_h),
+            (120, 720, 480, 360)
+        );
+        assert_eq!(passes[3].0.words, 240, "two chroma pairs per word");
+        assert_eq!(
+            std::mem::size_of::<ReframePush>(),
+            56,
+            "the shader's push block is 56 bytes"
+        );
+    }
+
+    /// Hardware: every slot layout, a 2x reframe of a crop with a different value outside it.
+    /// Both edges of the output must hold the crop's own values. Reads the NVENC slot back
+    /// through CUDA, so it checks the exact bytes NVENC would encode.
+    #[test]
+    #[ignore = "requires an NVIDIA GPU + driver — run on the RTX box (.21)"]
+    fn reframe_keeps_only_the_crop_in_every_layout() {
+        cuda::make_current().expect("shared CUDA context current");
+        let mut vk = VkSlotBlend::new().expect("Vulkan slot device");
+        let (sw, sh, crop, out) = (96u32, 64u32, [16u32, 8, 64, 48], (32u32, 24u32));
+        for fmt in [
+            SlotFormat::Argb,
+            SlotFormat::X2Rgb10,
+            SlotFormat::X2Bgr10,
+            SlotFormat::Nv12,
+            SlotFormat::Yuv444,
+        ] {
+            let src = vk.alloc_slot(fmt, sw, sh).expect("staging slot");
+            let dst = vk.alloc_slot(fmt, out.0, out.1).expect("NVENC slot");
+            // Value at a source pixel in plane units: 40 outside the crop, 90 left, 200 right.
+            let value = |x: u32, y: u32, div: u32| -> u32 {
+                let [cx, cy, cw, ch] = crop.map(|v| v / div);
+                if x < cx || y < cy || x >= cx + cw || y >= cy + ch {
+                    40
+                } else if x < cx + cw / 2 {
+                    90
+                } else {
+                    200
+                }
+            };
+            let rows = fmt.rows(sh) as usize;
+            let mut bytes = vec![0u8; src.pitch * rows];
+            let put = |bytes: &mut Vec<u8>, off: usize, word: u32| {
+                bytes[off..off + 4].copy_from_slice(&word.to_le_bytes());
+            };
+            for y in 0..sh {
+                for x in 0..sw {
+                    let v = value(x, y, 1);
+                    let row = y as usize * src.pitch;
+                    match fmt {
+                        SlotFormat::Argb => put(
+                            &mut bytes,
+                            row + x as usize * 4,
+                            0xFF00_0000 | (v << 16) | ((v / 2) << 8) | (v / 3),
+                        ),
+                        SlotFormat::X2Rgb10 => put(
+                            &mut bytes,
+                            row + x as usize * 4,
+                            0xC000_0000 | ((v * 4) << 20) | ((v * 2) << 10) | v,
+                        ),
+                        SlotFormat::X2Bgr10 => put(
+                            &mut bytes,
+                            row + x as usize * 4,
+                            0xC000_0000 | (v << 20) | ((v * 2) << 10) | (v * 4),
+                        ),
+                        SlotFormat::Nv12 | SlotFormat::Yuv444 => bytes[row + x as usize] = v as u8,
+                    }
+                }
+            }
+            let plane = src.pitch * sh as usize;
+            if fmt == SlotFormat::Nv12 {
+                for y in 0..sh / 2 {
+                    for x in 0..sw / 2 {
+                        let off = plane + y as usize * src.pitch + x as usize * 2;
+                        bytes[off] = value(x, y, 2) as u8;
+                        bytes[off + 1] = 255 - value(x, y, 2) as u8;
+                    }
+                }
+            }
+            if fmt == SlotFormat::Yuv444 {
+                let (y_plane, rest) = bytes.split_at_mut(plane);
+                rest[..plane].copy_from_slice(y_plane);
+                rest[plane..2 * plane].copy_from_slice(y_plane);
+            }
+            cuda::write_plane_from_host(src.ptr, src.pitch, &bytes, src.pitch, rows)
+                .expect("upload the staging slot");
+            vk.reframe(&src, &dst, fmt, crop, out).expect("reframe");
+            let got =
+                cuda::read_plane_to_host(dst.ptr, dst.pitch, dst.pitch, fmt.rows(out.1) as usize)
+                    .expect("read the NVENC slot");
+            let word = |off: usize| u32::from_le_bytes(got[off..off + 4].try_into().unwrap());
+            let near = |got: u32, want: u32, what: &str| {
+                assert!(
+                    got.abs_diff(want) <= 3,
+                    "{fmt:?} {what}: got {got}, want {want}"
+                );
+            };
+            for (x, want) in [(0u32, 90u32), (out.0 - 1, 200)] {
+                for y in [0u32, out.1 - 1] {
+                    let off = y as usize * dst.pitch;
+                    match fmt {
+                        SlotFormat::Argb => {
+                            let w = word(off + x as usize * 4);
+                            near((w >> 16) & 0xFF, want, "red");
+                            near((w >> 8) & 0xFF, want / 2, "green");
+                            near(w & 0xFF, want / 3, "blue");
+                        }
+                        SlotFormat::X2Rgb10 => {
+                            let w = word(off + x as usize * 4);
+                            near((w >> 20) & 0x3FF, want * 4, "red");
+                            near(w & 0x3FF, want, "blue");
+                        }
+                        SlotFormat::X2Bgr10 => {
+                            let w = word(off + x as usize * 4);
+                            near(w & 0x3FF, want * 4, "red");
+                            near((w >> 20) & 0x3FF, want, "blue");
+                        }
+                        SlotFormat::Nv12 | SlotFormat::Yuv444 => {
+                            near(u32::from(got[off + x as usize]), want, "luma");
+                        }
+                    }
+                }
+            }
+            if fmt == SlotFormat::Nv12 {
+                let base = dst.pitch * out.1 as usize;
+                let off =
+                    base + (out.1 as usize / 2 - 1) * dst.pitch + (out.0 as usize / 2 - 1) * 2;
+                near(u32::from(got[base]), 90, "chroma U, left");
+                near(u32::from(got[off + 1]), 55, "chroma V, bottom right");
+            }
+            if fmt == SlotFormat::Yuv444 {
+                let off = 2 * dst.pitch * out.1 as usize + out.0 as usize - 1;
+                near(u32::from(got[off]), 200, "third plane, right");
+            }
+            vk.free_slots();
+        }
     }
 
     /// Clamp to `CURSOR_MAX` so push constants match the staging buffer.

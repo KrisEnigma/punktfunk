@@ -32,7 +32,7 @@ use super::nvenc_core::{
 use super::nvenc_status;
 use super::{max_forced_split_mode, resolve_split_mode};
 use super::{AuChunk, ChromaFormat, Codec, EncodedFrame, Encoder, EncoderCaps};
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{anyhow, bail, ensure, Context, Result};
 use pf_encode_win::rfi::{Wave, WaveMark};
 use pf_frame::{CapturedFrame, FramePayload};
 use pf_zerocopy::cuda::{self, InputSurface};
@@ -534,6 +534,41 @@ enum SlotSurface {
     Vk(VkSlotRef),
 }
 
+/// Area-average a straight-alpha RGBA bitmap down to `tw × th`, weighting colour by alpha so
+/// transparent pixels do not darken the edge. The pointer then keeps its size relative to a
+/// reframed picture.
+fn shrink_rgba(rgba: &[u8], w: u32, h: u32, tw: u32, th: u32) -> Vec<u8> {
+    let (w, h, tw, th) = (w as usize, h as usize, tw as usize, th as usize);
+    let mut out = vec![0u8; tw * th * 4];
+    if rgba.len() < w * h * 4 {
+        return out;
+    }
+    for ty in 0..th {
+        let (y0, y1) = (ty * h / th, ((ty + 1) * h).div_ceil(th).min(h));
+        for tx in 0..tw {
+            let (x0, x1) = (tx * w / tw, ((tx + 1) * w).div_ceil(tw).min(w));
+            let (mut rgb, mut alpha, mut n) = ([0u64; 3], 0u64, 0u64);
+            for y in y0..y1.max(y0 + 1) {
+                for x in x0..x1.max(x0 + 1) {
+                    let p = &rgba[(y * w + x) * 4..(y * w + x) * 4 + 4];
+                    let a = u64::from(p[3]);
+                    for c in 0..3 {
+                        rgb[c] += u64::from(p[c]) * a;
+                    }
+                    alpha += a;
+                    n += 1;
+                }
+            }
+            let o = (ty * tw + tx) * 4;
+            for c in 0..3 {
+                out[o + c] = rgb[c].checked_div(alpha).unwrap_or(0) as u8;
+            }
+            out[o + 3] = (alpha / n) as u8;
+        }
+    }
+    out
+}
+
 fn slot_fmt_of(fmt: nv::NV_ENC_BUFFER_FORMAT) -> SlotFormat {
     match fmt {
         nv::NV_ENC_BUFFER_FORMAT::NV_ENC_BUFFER_FORMAT_YUV444 => SlotFormat::Yuv444,
@@ -594,6 +629,21 @@ impl ChunkState {
             shadow: Vec::new(),
         }
     }
+}
+
+/// The host's crop and scale ([`Encoder::set_input_crop`]): each capture lands in a source-size
+/// staging slot, and [`VkSlotBlend::reframe`] writes the NVENC slot from it.
+struct NvReframe {
+    /// `x, y, w, h` in source pixels.
+    crop: [u32; 4],
+    /// The session's picture size.
+    out: (u32, u32),
+    /// The capture size the staging ring was built for.
+    src: (u32, u32),
+    /// One source-size slot per ring slot, same layout. Freed with the ring.
+    staging: Vec<VkSlotRef>,
+    /// The cursor bitmap scaled by the reframe: `(serial, rgba, w, h)`.
+    cursor: Option<(u64, Vec<u8>, u32, u32)>,
 }
 
 pub struct NvencCudaEncoder {
@@ -670,6 +720,8 @@ pub struct NvencCudaEncoder {
     /// Vulkan SPIR-V cursor blend (`vkslot.rs`). `None` = bring-up failed, ring is plain CUDA,
     /// no cursor. `cursor_tried` is one-shot; `cursor_serial` is the uploaded bitmap.
     vk_blend: Option<VkSlotBlend>,
+    /// Crop and scale ahead of the encode. Needs `vk_blend`.
+    reframe: Option<NvReframe>,
     /// Cursor overlays expected. Off = skip Vulkan bring-up; embedded-pointer sessions never
     /// carry an overlay.
     blend_wanted: bool,
@@ -792,6 +844,7 @@ impl NvencCudaEncoder {
             wave_spoiled: false,
             wave_queued: false,
             vk_blend: None,
+            reframe: None,
             blend_wanted: cursor_blend,
             cursor_tried: false,
             cursor_serial: u64::MAX,
@@ -907,6 +960,9 @@ impl NvencCudaEncoder {
         self.subframe_chunks = false;
         self.chunk = None;
         self.ring.clear(); // CUDA InputSurfaces; Vk slots freed just below
+        if let Some(r) = &mut self.reframe {
+            r.staging.clear();
+        }
         if let Some(vk) = &mut self.vk_blend {
             // Slot memory + CUDA mapping. Device stays up (`cursor_tried` is one-shot).
             vk.free_slots();
@@ -1413,6 +1469,9 @@ impl NvencCudaEncoder {
             let slot_fmt = slot_fmt_of(self.buffer_fmt);
             // Full Vulkan ring, else full CUDA. Never mixed (flickering cursor) or short.
             'ring: for use_vk in [self.vk_blend.is_some(), false] {
+                if !use_vk && self.reframe.is_some() {
+                    bail!("NVENC (Linux): the reframe needs Vulkan input slots");
+                }
                 if !use_vk && self.vk_blend.is_some() {
                     // Wholesale Vulkan retire before the CUDA retry.
                     for s in self.ring.drain(..) {
@@ -1488,6 +1547,14 @@ impl NvencCudaEncoder {
                     });
                 }
                 break 'ring;
+            }
+            if let (Some(r), Some(vk)) = (self.reframe.as_mut(), self.vk_blend.as_mut()) {
+                for _ in 0..POOL {
+                    r.staging.push(
+                        vk.alloc_slot(slot_fmt, r.src.0, r.src.1)
+                            .context("NVENC (Linux): reframe staging slot")?,
+                    );
+                }
             }
 
             self.inited = true;
@@ -1703,9 +1770,19 @@ impl NvencCudaEncoder {
     /// stream (stream-ordered submit — gate in [`Encoder::submit`]).
     fn copy_into_slot(&self, buf: &cuda::DeviceBuffer, slot: usize, sync: bool) -> Result<()> {
         let s = &self.ring[slot].surface;
-        let base = s.ptr();
-        let pitch = s.pitch();
-        let hh = s.height() as u64;
+        self.copy_into(buf, s.ptr(), s.pitch(), s.height() as u64, sync)
+    }
+
+    /// [`copy_into_slot`](Self::copy_into_slot) into any surface of this session's layout:
+    /// planes contiguous under one `pitch`, `hh` luma rows.
+    fn copy_into(
+        &self,
+        buf: &cuda::DeviceBuffer,
+        base: cuda::CUdeviceptr,
+        pitch: usize,
+        hh: u64,
+        sync: bool,
+    ) -> Result<()> {
         match self.buffer_fmt {
             nv::NV_ENC_BUFFER_FORMAT::NV_ENC_BUFFER_FORMAT_YUV444 => {
                 if !buf.yuv444 {
@@ -1821,8 +1898,12 @@ impl NvencCudaEncoder {
         self.maybe_disengage_async();
         // Size or format change (NV12↔YUV444) re-inits.
         let new_fmt = buffer_format(buf, captured.format);
-        let size_changed =
-            self.inited && (self.width != captured.width || self.height != captured.height);
+        let input = (captured.width, captured.height);
+        let size_changed = self.inited
+            && match &self.reframe {
+                Some(r) => r.src != input,
+                None => (self.width, self.height) != input,
+            };
         let fmt_changed = self.inited && self.buffer_fmt != new_fmt;
         if self.inited && (size_changed || fmt_changed) {
             tracing::info!(
@@ -1836,8 +1917,18 @@ impl NvencCudaEncoder {
             unsafe { self.teardown() };
         }
         if !self.inited {
-            self.width = captured.width;
-            self.height = captured.height;
+            (self.width, self.height) = input;
+            if let Some(r) = &mut self.reframe {
+                let [x, y, w, h] = r.crop;
+                ensure!(
+                    x + w <= input.0 && y + h <= input.1,
+                    "NVENC (Linux): a {}x{} capture does not hold the {w}x{h} crop at {x},{y}",
+                    input.0,
+                    input.1
+                );
+                r.src = input;
+                (self.width, self.height) = r.out;
+            }
             self.buffer_fmt = new_fmt;
             // Depth + HDR follow the input, not negotiation — keeps the label and bitstream
             // in step when capture disagrees.
@@ -1891,8 +1982,10 @@ impl NvencCudaEncoder {
         // encode, so the reused slot was fully read and the caller still holds this payload
         // across `poll`. Pipelined / two-thread falls back to a blocking copy so an
         // early-recycled source cannot be read late.
-        let base_ordered =
-            self.stream_ordered && self.async_rt.is_none() && self.pending.is_empty();
+        let base_ordered = self.stream_ordered
+            && self.async_rt.is_none()
+            && self.pending.is_empty()
+            && self.reframe.is_none();
         // Cursor stays stream-ordered when the blend can wait a CUDA-held timeline semaphore.
         // Otherwise the fence/CPU path sits between copy and encode.
         let cursor_ordered = base_ordered
@@ -1902,19 +1995,62 @@ impl NvencCudaEncoder {
         let ordered = base_ordered && (captured.cursor.is_none() || cursor_ordered);
         let t0 = std::time::Instant::now();
 
-        self.copy_into_slot(buf, slot, !ordered)?;
+        match &self.reframe {
+            // A reframe reads the staging slot on the Vulkan queue: the copy must have landed.
+            Some(r) => {
+                let (stage, fmt) = (r.staging[slot], slot_fmt_of(self.buffer_fmt));
+                self.copy_into(buf, stage.ptr, stage.pitch, u64::from(stage.height), true)?;
+                let (crop, out) = (r.crop, r.out);
+                let (vk, SlotSurface::Vk(dst)) = (self.vk_blend.as_mut(), &self.ring[slot].surface)
+                else {
+                    bail!("NVENC (Linux): a reframing session without Vulkan slots");
+                };
+                vk.expect("a Vk ring implies the slot device")
+                    .reframe(&stage, dst, fmt, crop, out)
+                    .context("NVENC (Linux): reframe")?;
+            }
+            None => self.copy_into_slot(buf, slot, !ordered)?,
+        }
         let t_copy = t0.elapsed();
 
         // Blend into this slot's owned surface (cursor rect, never the compositor dmabuf).
         // Ordered: copy/dispatch/encode on-device via timeline. Else CUDA copy then
         // fence-waited dispatch, then encode. Failure drops the cursor, never the frame.
         if let Some(ov) = &captured.cursor {
+            // A reframed picture takes the pointer scaled and moved with it.
+            let (cw, ch, cx, cy) = match &mut self.reframe {
+                Some(r) => {
+                    let [x, y, w, _] = r.crop;
+                    let (ow, oh) = r.out;
+                    let scale = |v: i64, n: u32| (v * i64::from(n)).div_euclid(i64::from(w));
+                    let h = r.crop[3];
+                    let scale_y = |v: i64| (v * i64::from(oh)).div_euclid(i64::from(h));
+                    if r.cursor.as_ref().map(|c| c.0) != Some(ov.serial) {
+                        let tw = (u64::from(ov.w) * u64::from(ow) / u64::from(w)).max(1) as u32;
+                        let th = (u64::from(ov.h) * u64::from(oh) / u64::from(h)).max(1) as u32;
+                        let scaled = shrink_rgba(&ov.rgba, ov.w, ov.h, tw, th);
+                        r.cursor = Some((ov.serial, scaled, tw, th));
+                    }
+                    let (_, _, tw, th) = r.cursor.as_ref().expect("set above");
+                    (
+                        *tw,
+                        *th,
+                        scale(i64::from(ov.x) - i64::from(x), ow) as i32,
+                        scale_y(i64::from(ov.y) - i64::from(y)) as i32,
+                    )
+                }
+                None => (ov.w, ov.h, ov.x, ov.y),
+            };
             if let (Some(vk), SlotSurface::Vk(vref)) =
                 (self.vk_blend.as_mut(), &self.ring[slot].surface)
             {
                 if self.cursor_serial != ov.serial {
                     // Quiesces in-flight ordered blends before touching staging.
-                    vk.upload_cursor(ov.rgba.as_slice(), ov.w, ov.h);
+                    let bitmap = match &self.reframe {
+                        Some(r) => r.cursor.as_ref().map_or(&[][..], |c| c.1.as_slice()),
+                        None => ov.rgba.as_slice(),
+                    };
+                    vk.upload_cursor(bitmap, cw, ch);
                     self.cursor_serial = ov.serial;
                 }
                 // `surfW` = content width. Pixels past content land in cropped padding.
@@ -1923,20 +2059,20 @@ impl NvencCudaEncoder {
                         vref,
                         slot_fmt_of(self.buffer_fmt),
                         self.width,
-                        ov.w,
-                        ov.h,
-                        ov.x,
-                        ov.y,
+                        cw,
+                        ch,
+                        cx,
+                        cy,
                     )
                 } else {
                     vk.blend_ref(
                         vref,
                         slot_fmt_of(self.buffer_fmt),
                         self.width,
-                        ov.w,
-                        ov.h,
-                        ov.x,
-                        ov.y,
+                        cw,
+                        ch,
+                        cx,
+                        cy,
                     )
                 };
                 if let Err(e) = r {
@@ -2202,9 +2338,38 @@ impl Encoder for NvencCudaEncoder {
             intra_refresh: false,
             intra_refresh_recovery: false,
             intra_refresh_period: 0,
-            downscales_input: false,
-            crops_input: false,
+            // `set_input_crop` refuses when the Vulkan slot device will not come up.
+            downscales_input: true,
+            crops_input: true,
         }
+    }
+
+    fn set_input_crop(&mut self, rect: [u32; 4]) -> Result<()> {
+        ensure!(
+            !self.inited,
+            "NVENC (Linux): the reframe is set before the first frame"
+        );
+        let [_, _, w, h] = rect;
+        ensure!(
+            w >= self.width && h >= self.height,
+            "NVENC (Linux): a {w}x{h} crop would upscale into the {}x{} session",
+            self.width,
+            self.height
+        );
+        if self.vk_blend.is_none() {
+            cuda::make_current().context("cuCtxSetCurrent (reframe bring-up)")?;
+            self.vk_blend = Some(VkSlotBlend::new().context("Vulkan slot device for the reframe")?);
+            self.cursor_tried = true;
+        }
+        self.reframe = Some(NvReframe {
+            crop: rect,
+            out: (self.width, self.height),
+            src: (0, 0),
+            staging: Vec::new(),
+            cursor: None,
+        });
+        tracing::info!(crop = ?rect, out = ?(self.width, self.height), "NVENC (Linux): cropping and scaling on the Vulkan slot queue");
+        Ok(())
     }
 
     fn set_hdr_meta(&mut self, meta: Option<pf_frame::HdrMeta>) {
@@ -3046,6 +3211,134 @@ mod tests {
             );
             println!("nvenc_cuda HDR10 {codec:?}: {aus} AUs, ARGB10 in, 10-bit derived");
         }
+    }
+
+    #[test]
+    fn a_shrunk_cursor_keeps_its_colour_at_a_soft_edge() {
+        // 4x2: an opaque red half and a transparent half, halved to 2x1.
+        let mut px = Vec::new();
+        for x in 0..4 {
+            px.extend(if x < 2 {
+                [255, 0, 0, 255]
+            } else {
+                [0, 0, 0, 0]
+            });
+        }
+        let row: Vec<u8> = px.iter().chain(px.iter()).copied().collect();
+        let out = shrink_rgba(&row, 4, 2, 2, 1);
+        assert_eq!(out, vec![255, 0, 0, 255, 0, 0, 0, 0]);
+        // A half-covered block keeps full red at half alpha, not a darkened red.
+        let out = shrink_rgba(&row, 4, 2, 1, 1);
+        assert_eq!(out, vec![255, 0, 0, 127]);
+    }
+
+    /// Hardware: a reframed session encodes the crop at half size. The decoded picture's edges
+    /// hold the crop's own colours, none of the frame around it.
+    #[test]
+    #[ignore = "requires an NVIDIA GPU + driver and ffmpeg — run on the RTX box (.21)"]
+    fn nvenc_cuda_reframe_crops_and_scales() {
+        const SW: u32 = 768;
+        const SH: u32 = 432;
+        const W: u32 = 256;
+        const H: u32 = 144;
+        pf_zerocopy::cuda::make_current().expect("shared CUDA context current");
+        let mut enc = NvencCudaEncoder::open(
+            Codec::H265,
+            PixelFormat::Bgrx,
+            W,
+            H,
+            60,
+            8_000_000,
+            false,
+            8,
+            ChromaFormat::Yuv420,
+            false,
+            4,
+        )
+        .expect("open NVENC CUDA session");
+        assert!(enc.caps().crops_input && enc.caps().downscales_input);
+        enc.set_input_crop([128, 72, 512, 288]).expect("reframe");
+        // BGRX: green rows outside the crop, blue columns beside it, red then white inside.
+        let mut px = vec![0u8; (SW * SH * 4) as usize];
+        for y in 0..SH {
+            for x in 0..SW {
+                let c: [u8; 4] = if !(72..360).contains(&y) {
+                    [40, 200, 40, 255]
+                } else if !(128..640).contains(&x) {
+                    [200, 40, 40, 255]
+                } else if x < 384 {
+                    [40, 40, 200, 255]
+                } else {
+                    [235, 235, 235, 255]
+                };
+                let i = ((y * SW + x) * 4) as usize;
+                px[i..i + 4].copy_from_slice(&c);
+            }
+        }
+        let mut stream = Vec::new();
+        for i in 0..4u32 {
+            let frame = CapturedFrame {
+                provenance: Default::default(),
+                width: SW,
+                height: SH,
+                pts_ns: u64::from(i) * 16_666_667,
+                format: PixelFormat::Bgrx,
+                payload: FramePayload::Cpu(px.clone()),
+                cursor: None,
+            };
+            enc.submit_indexed(&frame, i).expect("submit");
+            while let Some(au) = enc.poll().expect("poll") {
+                stream.extend_from_slice(&au.data);
+            }
+        }
+        enc.flush().expect("flush");
+        while let Some(au) = enc.poll().expect("poll") {
+            stream.extend_from_slice(&au.data);
+        }
+        assert_eq!(
+            (enc.width, enc.height),
+            (W, H),
+            "the session runs at the reframed size"
+        );
+        let path = std::env::temp_dir().join("nvenc-reframe.h265");
+        std::fs::write(&path, &stream).expect("write the stream");
+        let Ok(out) = std::process::Command::new("ffmpeg")
+            .args(["-v", "error", "-i"])
+            .arg(&path)
+            .args(["-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"])
+            .output()
+        else {
+            println!("no ffmpeg — skipping the picture check");
+            return;
+        };
+        assert_eq!(
+            out.stdout.len(),
+            (W * H * 3) as usize,
+            "decoded size: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let at = |x: u32, y: u32| {
+            let i = ((y * W + x) * 3) as usize;
+            [out.stdout[i], out.stdout[i + 1], out.stdout[i + 2]]
+        };
+        let near = |got: [u8; 3], want: [u8; 3], what: &str| {
+            assert!(
+                got.iter().zip(want).all(|(g, w)| g.abs_diff(w) <= 40),
+                "{what}: got {got:?}, want {want:?}"
+            );
+        };
+        near(at(3, H / 2), [200, 40, 40], "left edge is the crop's red");
+        near(
+            at(W - 4, H / 2),
+            [235, 235, 235],
+            "right edge is the crop's white",
+        );
+        near(at(W / 4, 2), [200, 40, 40], "top edge has no green");
+        near(
+            at(W * 3 / 4, H - 3),
+            [235, 235, 235],
+            "bottom edge has no green",
+        );
     }
 
     /// Hardware: cursor blend on a 10-bit packed slot. An 8-bit fallback would tint the
