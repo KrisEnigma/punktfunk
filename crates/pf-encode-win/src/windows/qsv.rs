@@ -1171,11 +1171,13 @@ impl QsvEncoder {
                 }
             }
             if force_ltr.is_none() && (forced || cur_idx % self.ltr_mark_interval == 0) {
-                let slot = self.next_ltr_slot;
+                let trusted: [bool; NUM_LTR_SLOTS] =
+                    std::array::from_fn(|s| self.ltr_slots[s].is_some() && !self.ltr_tainted[s]);
+                let slot = super::rfi::mark_slot(&trusted, self.next_ltr_slot);
                 self.ltr_slots[slot] = Some(cur_idx);
                 // Re-mark replaces LongTermIdx: the tainted frame leaves the DPB.
                 self.ltr_tainted[slot] = false;
-                self.next_ltr_slot = (self.next_ltr_slot + 1) % NUM_LTR_SLOTS;
+                self.next_ltr_slot = (slot + 1) % NUM_LTR_SLOTS;
                 mark_slot = Some(slot);
             }
         }

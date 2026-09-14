@@ -1646,13 +1646,20 @@ impl AmfEncoder {
                 if self.ltr_slots[slot].is_some() {
                     force_slot = Some(slot);
                     recovery_anchor = true;
+                    // LTR_MODE_RESET_UNUSED, the default: referencing one slot discards the rest.
+                    for (s, marked) in self.ltr_slots.iter_mut().enumerate() {
+                        if s != slot {
+                            *marked = None;
+                        }
+                    }
                 }
             }
             // Mark on IDR and every interval, never on the recovery frame (would overwrite the force).
             if force_slot.is_none() && (forced || cur_idx % self.ltr_mark_interval == 0) {
-                let slot = self.next_ltr_slot;
+                let trusted = self.ltr_slots.map(|m| m.is_some());
+                let slot = super::rfi::mark_slot(&trusted, self.next_ltr_slot);
                 self.ltr_slots[slot] = Some(cur_idx);
-                self.next_ltr_slot = (self.next_ltr_slot + 1) % NUM_LTR_SLOTS;
+                self.next_ltr_slot = (slot + 1) % NUM_LTR_SLOTS;
                 mark_slot = Some(slot);
             }
         }
