@@ -14,10 +14,11 @@ accepted.
 Both live in the client apps (Apple, Linux GTK, Windows, Android), not in the host's
 [web console](/docs/web-console).
 
-The controller-driven surfaces — Apple TV, the Android app's console mode and the Steam Deck console
-the Decky plugin launches — *use* the preset a host is bound to and can pin one as its own card,
-but cannot create or edit one; do that on a desktop or phone first. The Decky panel only *shows*
-those pins, nested under their host as one-tap cards.
+The controller-driven surfaces — the Android app's console mode, the Steam Deck console the Decky
+plugin launches and the Apple app's controller screens — *use* the preset a host is bound to and
+can pin one as its own card, but cannot create or edit one; do that in the app's regular interface
+first. On an Apple TV that is **Settings**, from the **Editing** row at the top. The Decky panel
+only *shows* those pins, nested under their host as one-tap cards.
 
 ## What a preset is
 
