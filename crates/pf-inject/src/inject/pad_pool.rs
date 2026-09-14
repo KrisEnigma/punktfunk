@@ -86,31 +86,11 @@ impl PadSlotPool {
 /// create fails and heals on the next claim, when the winner's mailbox shows.
 #[cfg(windows)]
 fn owned_elsewhere(i: u8) -> bool {
+    use crate::gamepad_raii::{created_here, named_section_exists};
     use pf_driver_proto::gamepad::{pad_boot_name, xusb_boot_name};
-    [xusb_boot_name(i), pad_boot_name(i)]
-        .iter()
-        .any(|name| !crate::gamepad_raii::created_here(name) && mailbox_exists(name))
-}
-
-/// `true` if a section by this name exists. Opening is the only way to ask; the
-/// handle is closed immediately and nothing is mapped.
-#[cfg(windows)]
-fn mailbox_exists(name: &str) -> bool {
-    use windows::core::HSTRING;
-    use windows::Win32::Foundation::CloseHandle;
-    use windows::Win32::System::Memory::{OpenFileMappingW, FILE_MAP_READ};
-    let wide = HSTRING::from(name);
-    // SAFETY: `wide` is a live NUL-terminated UTF-16 name for the call. A returned
-    // handle is owned here and closed before this returns; nothing else escapes.
-    unsafe {
-        match OpenFileMappingW(FILE_MAP_READ.0, false, &wide) {
-            Ok(h) if !h.is_invalid() => {
-                let _ = CloseHandle(h);
-                true
-            }
-            _ => false,
-        }
-    }
+    [xusb_boot_name(i), pad_boot_name(i)].iter().any(|name| {
+        !created_here(name) && named_section_exists(&windows::core::HSTRING::from(name))
+    })
 }
 
 /// Other platforms name pads per process, so an index is this host's to take.
@@ -323,13 +303,14 @@ mod tests {
     /// re-plug inside the unplug grace lands on a second slot beside the live pad.
     #[cfg(windows)]
     #[test]
-    #[ignore = "run as SYSTEM: the mailbox DACL admits only SYSTEM and LocalService"]
     fn our_own_mailbox_never_reads_as_owned_elsewhere() {
         use pf_driver_proto::gamepad::pad_boot_name;
         let i = (MAX_PADS - 1) as u8;
         let ours = crate::gamepad_raii::PadChannel::create(pad_boot_name(i), 4096)
             .expect("create a Global\\ mailbox (needs SeCreateGlobalPrivilege)");
-        assert!(mailbox_exists(&pad_boot_name(i)));
+        assert!(crate::gamepad_raii::named_section_exists(
+            &windows::core::HSTRING::from(pad_boot_name(i))
+        ));
         assert!(!owned_elsewhere(i), "our own pad skipped its slot");
         drop(ours);
         // Same name, created outside `PadChannel`: stands in for another host's pad.

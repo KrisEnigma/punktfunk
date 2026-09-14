@@ -241,9 +241,10 @@ fn classify_named_create_failure(name: &HSTRING, e: anyhow::Error) -> anyhow::Er
 }
 
 /// Whether a section with this name exists as seen from this process.
-/// `true` also when the object is present but closed to us (ACCESS_DENIED on open).
-/// Chooses error text only — a squatter can make this say either thing.
-fn named_section_exists(name: &HSTRING) -> bool {
+/// `true` also when the object is present but closed to us (ACCESS_DENIED on open): a
+/// LocalSystem host's mailbox is closed to an Administrator console.
+/// Picks a pad slot or an error text, never trust — a squatter can make this say either.
+pub(crate) fn named_section_exists(name: &HSTRING) -> bool {
     // SAFETY: `name` is a live NUL-terminated UTF-16 string for the duration of the call. Ask for
     // the least access there is (`FILE_MAP_READ`): the handle is closed immediately and never
     // mapped — we want the lookup's verdict, not the object.
