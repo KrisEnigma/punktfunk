@@ -343,6 +343,7 @@ struct ShotLibrarySections: View {
         }
     }
 }
+#endif
 
 /// The details sheet for a played title that is up on the host, marked a favorite.
 struct ShotTitleDetails: View {
@@ -350,10 +351,9 @@ struct ShotTitleDetails: View {
         TitleDetailSheet(
             game: ShotMock.games.first { $0.id == "steam:starfall" } ?? ShotMock.games[0],
             artLoader: ShotPosterArt.source, playLabel: "Resume", isFavorite: true,
-            onPlay: {}, onCopyLink: {})
+            onPlay: {}, onCopyLink: LinkClipboard.isAvailable ? {} : nil)
     }
 }
-#endif
 
 /// The touch grid on the mock catalog with one title up — what the Library tab grows from.
 struct ShotLibraryTouch: View {

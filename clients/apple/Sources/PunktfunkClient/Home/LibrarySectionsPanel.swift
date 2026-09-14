@@ -1,11 +1,10 @@
 // The Library's Customize panel (design/apple-touch-ui-overhaul.md §2.5): every section with a
-// switch, in the order the tab draws them, dragged to reorder. It writes
-// `punktfunk.librarySections`, which the tab reads; a switched-off section stays listed here.
-// A sheet on the iPhone, a plain popover on the Mac, where each row carries a drag grip.
+// switch, in the order the tab draws them. It writes `punktfunk.librarySections`, which the tab
+// reads; a switched-off section stays listed. A sheet on the iPhone and the TV (a TV's rows move
+// from their context menu), a plain popover on the Mac, where each row carries a drag grip.
 
 import PunktfunkKit
 import SwiftUI
-#if os(iOS) || os(macOS)
 
 struct LibrarySectionsPanel: View {
     @AppStorage(DefaultsKey.librarySections) private var storedLayout = ""
@@ -14,8 +13,15 @@ struct LibrarySectionsPanel: View {
     var shotLayout: String?
     #endif
     @Environment(\.dismiss) private var dismiss
-    private let note = "Drag to reorder. A section with nothing to show stays hidden until it has "
-        + "something."
+
+    private var note: String {
+        #if os(tvOS)
+        "Hold a section to move it. A section with nothing to show stays hidden until it has "
+            + "something."
+        #else
+        "Drag to reorder. A section with nothing to show stays hidden until it has something."
+        #endif
+    }
 
     private var layout: LibrarySectionLayout {
         #if DEBUG
@@ -53,14 +59,18 @@ struct LibrarySectionsPanel: View {
                 }
                 Section { restoreButton }
             }
+            #if os(iOS)
             .environment(\.editMode, .constant(.active))
             .navigationBarTitleDisplayMode(.inline)
+            #endif
             .navigationTitle("Customize Library")
+            #if os(iOS)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Done") { dismiss() }
                 }
             }
+            #endif
         }
         #endif
     }
@@ -69,6 +79,14 @@ struct LibrarySectionsPanel: View {
         ForEach(layout.entries) { entry in
             HStack {
                 Toggle(isOn: isOn(entry.section)) {
+                    #if os(tvOS)
+                    // A TV Label sets the name against its icon: one icon column, then the name.
+                    HStack(spacing: 20) {
+                        Image(systemName: entry.section.symbol)
+                            .frame(width: 44)
+                        Text(entry.section.label)
+                    }
+                    #else
                     Label {
                         Text(entry.section.label)
                     } icon: {
@@ -77,6 +95,7 @@ struct LibrarySectionsPanel: View {
                             .frame(width: 18) // one icon width, so the names line up
                             #endif
                     }
+                    #endif
                 }
                 #if os(macOS)
                 Spacer()
@@ -88,6 +107,12 @@ struct LibrarySectionsPanel: View {
             }
             #if os(macOS)
             .listRowInsets(EdgeInsets(top: 3, leading: 0, bottom: 3, trailing: 0))
+            #endif
+            #if os(tvOS)
+            .contextMenu {
+                Button("Move Up", systemImage: "arrow.up") { step(entry.section, by: -1) }
+                Button("Move Down", systemImage: "arrow.down") { step(entry.section, by: 1) }
+            }
             #endif
         }
         .onMove(perform: move)
@@ -115,5 +140,15 @@ struct LibrarySectionsPanel: View {
         next.entries.move(fromOffsets: source, toOffset: destination)
         storedLayout = next.stored
     }
+
+    #if os(tvOS)
+    /// One place up or down: a remote's move, since it cannot drag.
+    private func step(_ section: LibrarySection, by delta: Int) {
+        var next = layout
+        guard let at = next.entries.firstIndex(where: { $0.section == section }),
+              next.entries.indices.contains(at + delta) else { return }
+        next.entries.swapAt(at, at + delta)
+        storedLayout = next.stored
+    }
+    #endif
 }
-#endif
