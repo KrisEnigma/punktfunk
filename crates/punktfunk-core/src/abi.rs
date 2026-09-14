@@ -5240,10 +5240,10 @@ pub struct PunktfunkProbeResult {
     /// Application goodput bytes / access units the host offered.
     pub host_bytes: u64,
     pub host_packets: u32,
-    /// Throughput denominator, ms: client-measured burst receive interval once
-    /// `done`; host send-window duration when fewer than two probe packets arrived.
-    /// Host duration alone overstates throughput — its window closes while the
-    /// bottleneck queue is still draining.
+    /// Throughput denominator, ms: client-measured burst receive interval, live
+    /// while bursting and final once `done`; host send-window duration when fewer
+    /// than two probe packets arrived. Host duration alone overstates throughput —
+    /// its window closes while the bottleneck queue is still draining.
     pub elapsed_ms: u32,
     /// Delivered wire throughput = `recv_bytes * 8 / elapsed_ms` (kilobits/second).
     pub throughput_kbps: u32,
