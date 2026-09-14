@@ -479,8 +479,7 @@ mod live_tests {
             .with_env_filter(tracing_subscriber::EnvFilter::new("info,pf_capture=debug"))
             .with_test_writer()
             .try_init();
-        // `compositor` is unused on Windows: the IddCx driver is the sole backend.
-        let mut vd = crate::vdisplay::open(crate::vdisplay::Compositor::Kwin)
+        let mut vd = crate::vdisplay::open(crate::vdisplay::Compositor::Windows)
             .expect("open the pf-vdisplay backend");
         let vout = vd
             .create(punktfunk_core::Mode {
@@ -630,7 +629,7 @@ mod live_tests {
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(18),
         );
-        let mut vd = crate::vdisplay::open(crate::vdisplay::Compositor::Kwin)
+        let mut vd = crate::vdisplay::open(crate::vdisplay::Compositor::Windows)
             .expect("open the pf-vdisplay backend");
         let vout = vd
             .create(punktfunk_core::Mode {

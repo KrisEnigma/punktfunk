@@ -310,6 +310,9 @@ public final class PunktfunkConnection: @unchecked Sendable {
         case wlroots = 2
         case mutter = 3
         case gamescope = 4
+        case hyprland = 5
+        /// A Windows host's only backend. The host reports it; a client never requests it.
+        case windows = 6
 
         /// Loose name parsing for env/dev hooks ("kde" and "sway" are accepted aliases,
         /// mirroring the host's `CompositorPref::from_name`).
@@ -317,9 +320,11 @@ public final class PunktfunkConnection: @unchecked Sendable {
             switch name.lowercased() {
             case "auto": self = .auto
             case "kwin", "kde": self = .kwin
-            case "wlroots", "sway", "hyprland": self = .wlroots
+            case "wlroots", "sway", "river": self = .wlroots
             case "mutter", "gnome": self = .mutter
             case "gamescope": self = .gamescope
+            case "hyprland": self = .hyprland
+            case "windows": self = .windows
             default: return nil
             }
         }

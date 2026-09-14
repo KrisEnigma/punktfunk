@@ -324,11 +324,12 @@ fn bitrate_rungs(platform: crate::platform::Platform) -> usize {
         .position(|b| *b > ceiling)
         .unwrap_or(BITRATES.len())
 }
-const COMPOSITORS: [(&str, &str); 5] = [
+const COMPOSITORS: [(&str, &str); 6] = [
     ("auto", "Automatic"),
     ("kwin", "KWin"),
-    ("wlroots", "wlroots"),
     ("mutter", "Mutter"),
+    ("hyprland", "Hyprland"),
+    ("wlroots", "wlroots"),
     ("gamescope", "gamescope"),
 ];
 const CODECS: [(&str, &str); 5] = [

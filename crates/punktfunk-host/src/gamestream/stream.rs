@@ -645,10 +645,10 @@ fn open_gs_virtual_source(
         let r = crate::vdisplay::resolve_gamescope_route(c, false);
         (c, r)
     } else {
-        // `vdisplay::open` ignores the compositor on Windows; skip Linux `detect()` which bails.
+        // Windows has one backend; skip Linux `detect()`, which bails there.
         #[cfg(target_os = "windows")]
         {
-            (crate::vdisplay::Compositor::Kwin, None)
+            (crate::vdisplay::Compositor::Windows, None)
         }
         #[cfg(not(target_os = "windows"))]
         {

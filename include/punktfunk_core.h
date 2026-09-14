@@ -113,7 +113,7 @@
 // KWin / KDE Plasma.
 #define PUNKTFUNK_COMPOSITOR_KWIN 1
 
-// wlroots (Sway / Hyprland).
+// wlroots (Sway / River). Older clients sent it for Hyprland too; the host still honors that.
 #define PUNKTFUNK_COMPOSITOR_WLROOTS 2
 
 // Mutter / GNOME.
@@ -121,6 +121,12 @@
 
 // gamescope (spawned nested).
 #define PUNKTFUNK_COMPOSITOR_GAMESCOPE 4
+
+// Hyprland.
+#define PUNKTFUNK_COMPOSITOR_HYPRLAND 5
+
+// A Windows host's virtual display. Only ever resolved, never requested.
+#define PUNKTFUNK_COMPOSITOR_WINDOWS 6
 
 // Gamepad-backend preference for [`punktfunk_connect_ex2`]: which virtual pad
 // the host creates. Precedence: client choice > `PUNKTFUNK_GAMEPAD` env > X-Box 360.
