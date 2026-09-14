@@ -34,9 +34,12 @@ done
 [ -n "$SRC_STAGE" ] || { echo "ERROR: --stage is required" >&2; exit 2; }
 # The layout build-punktfunk-gamescope.sh writes under its --destdir/--prefix.
 BINARY="$SRC_STAGE/usr/bin/punktfunk-gamescope"
+REAPER="$SRC_STAGE/usr/lib/punktfunk/gamescope/gamescopereaper"
 LAYER_SO="$SRC_STAGE/usr/lib/punktfunk/libVkLayer_PUNKTFUNK_gamescope_wsi.so"
 LAYER_JSON="$SRC_STAGE/usr/lib/punktfunk/vulkan/implicit_layer.d/punktfunk_gamescope_wsi.json"
 [ -x "$BINARY" ] || { echo "ERROR: $BINARY is not an executable file" >&2; exit 1; }
+# gamescope starts every session's first child through its reaper.
+[ -x "$REAPER" ] || { echo "ERROR: $REAPER missing from the stage — a session would run nothing" >&2; exit 1; }
 # Hard, not best-effort: a package carrying the compositor without its layer looks perfectly healthy
 # and then silently denies every game an HDR10 swapchain.
 for f in "$LAYER_SO" "$LAYER_JSON"; do
@@ -65,7 +68,8 @@ if [ -z "${VERSION:-}" ]; then
   UPSTREAM="$(printf '%s\n' "$BANNER" | grep -o '[0-9]\+\.[0-9]\+\.[0-9]\+' | head -1)"
   PFHDR="$(printf '%s\n' "$BANNER" | grep -o '+pfhdr[0-9]\+' | head -1 | tr -d '+')"
   [ -n "$UPSTREAM" ] || { echo "ERROR: no X.Y.Z version in banner: $BANNER" >&2; exit 1; }
-  VERSION="${UPSTREAM}.${PFHDR}"
+  # The Debian revision is the PKGBUILD's pkgrel, so a packaging-only change upgrades every channel.
+  VERSION="${UPSTREAM}.${PFHDR}-$(sed -n 's/^pkgrel=//p' packaging/gamescope/PKGBUILD)"
 fi
 
 STAGE="$(mktemp -d)"
@@ -74,6 +78,7 @@ trap 'rm -rf "$STAGE"' EXIT
 # root-only and some tooling refuses it.
 chmod 0755 "$STAGE"
 install -Dm0755 "$BINARY" "$STAGE/usr/bin/punktfunk-gamescope"
+install -Dm0755 "$REAPER" "$STAGE/usr/lib/punktfunk/gamescope/gamescopereaper"
 # /usr/lib/punktfunk, not a multiarch triplet dir: the layer manifest carries that absolute path
 # baked in at build time, so the two have to agree. Nothing links the .so by soname — the Vulkan
 # loader dlopens it by exactly that path — so multiarch has no say here.

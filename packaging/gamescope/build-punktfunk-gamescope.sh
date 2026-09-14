@@ -148,9 +148,12 @@ meson setup "$BUILD" "$SRCDIR" \
 echo "==> building"
 ninja -C "$BUILD" ${JOBS:+-j "$JOBS"}
 
-# Install ONLY the compositor, under our own name. gamescope's `ninja install` would also drop
-# gamescopectl/gamescopereaper/gamescopestream + the WSI layer into the prefix, colliding with the
-# distro's gamescope package — and we need none of them: the host only ever execs the compositor.
+# Our own names only: `ninja install` would put gamescopectl/gamescopereaper/gamescopestream and the
+# WSI layer in the prefix, over the distro's gamescope. gamescope `execvp`s `gamescopereaper` for
+# every child it starts, so ours goes to /usr/lib/punktfunk/gamescope, first on the host's PATH.
+REAPER=$(find "$BUILD" -type f -name gamescopereaper -perm -u+x | head -1)
+[ -n "$REAPER" ] || { echo "the build produced no gamescopereaper, so a session would run nothing" >&2; exit 1; }
+install -Dm755 "$REAPER" "${DESTDIR}${PREFIX}/lib/punktfunk/gamescope/gamescopereaper"
 BIN="$BUILD/src/gamescope"
 [ -x "$BIN" ] || { echo "build produced no $BIN" >&2; exit 1; }
 BANNER="$("$BIN" --version 2>&1)" || {

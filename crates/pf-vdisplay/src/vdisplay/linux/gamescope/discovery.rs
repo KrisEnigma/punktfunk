@@ -404,6 +404,30 @@ pub(crate) fn gamescope_bin() -> &'static str {
     .as_str()
 }
 
+/// Where our packages put `gamescopereaper`, which gamescope `execvp`s for every child it starts.
+/// The distro's gamescope owns `/usr/bin/gamescopereaper`, so ours stays out of `/usr/bin`.
+pub(super) const REAPER_DIR: &str = "/usr/lib/punktfunk/gamescope";
+
+/// `PATH` for a gamescope we start, [`REAPER_DIR`] first; `None` when no package installed it.
+pub(super) fn reaper_path_env() -> Option<String> {
+    if !std::path::Path::new(REAPER_DIR)
+        .join("gamescopereaper")
+        .is_file()
+    {
+        return None;
+    }
+    let path = crate::with_env_lock(|| std::env::var("PATH").ok()).unwrap_or_default();
+    Some(prepend_path_dir(REAPER_DIR, &path))
+}
+
+fn prepend_path_dir(dir: &str, path: &str) -> String {
+    if path.is_empty() {
+        dir.to_owned()
+    } else {
+        format!("{dir}:{path}")
+    }
+}
+
 /// A bare name would look resolved and then fail at spawn.
 fn which_in_path(name: &str) -> Option<String> {
     use std::os::unix::fs::PermissionsExt;
@@ -656,6 +680,12 @@ mod tests {
         assert_eq!(parse_patch_level("3.16.25+pfhdr (gcc)"), 0);
         // The version triple must never be mistaken for the level.
         assert_eq!(parse_patch_level("gamescope version 3.16.25"), 0);
+    }
+
+    #[test]
+    fn reaper_dir_goes_first_on_path() {
+        assert_eq!(prepend_path_dir("/r", "/usr/bin:/bin"), "/r:/usr/bin:/bin");
+        assert_eq!(prepend_path_dir("/r", ""), "/r");
     }
 
     /// The seat key comes off the spawn log gamescope already writes, ANSI colouring and all.
