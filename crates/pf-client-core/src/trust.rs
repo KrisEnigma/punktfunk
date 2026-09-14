@@ -1202,6 +1202,11 @@ pub struct Settings {
     /// Host render/encode at `mode × render_scale`; presenter downscales. `> 1`
     /// supersamples; `< 1` under-renders; `1.0` = native. Clamped even, codec max.
     pub render_scale: f64,
+    /// How a frame whose aspect differs from the window fills it: `"fit"` (default, bars),
+    /// `"crop"` or `"stretch"`. Parsed with `punktfunk_core::video_fit::VideoFit::from_name`;
+    /// unknown reads as fit.
+    #[serde(default = "default_video_fit")]
+    pub video_fit: String,
     pub gamepad: String,
     /// Forward this device's controllers. Default on.
     ///
@@ -1421,6 +1426,10 @@ fn default_auto() -> String {
     "auto".into()
 }
 
+fn default_video_fit() -> String {
+    "fit".into()
+}
+
 fn default_touch_mode() -> String {
     "trackpad".into()
 }
@@ -1516,6 +1525,7 @@ impl Default for Settings {
             refresh_hz: 0,
             bitrate_kbps: 0,
             render_scale: 1.0,
+            video_fit: default_video_fit(),
             gamepad: "auto".into(),
             gamepad_forwarding: true,
             forward_pad: String::new(),
