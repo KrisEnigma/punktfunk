@@ -12,8 +12,7 @@ import SwiftUI
 struct SettingsView: View {
     @Environment(\.dismiss) private var dismiss
     // Which LAYER this surface is editing (SettingsView+Scope): the global defaults, or one
-    // preset's overrides. tvOS keeps defaults-only in v1 — controller-first surfaces honor
-    // presets and render pinned cards, but don't edit them (design §5.4).
+    // preset's overrides. A TV picks it in its Editing pane; the gamepad UI never edits presets.
     @ObservedObject var presets = PresetStore.shared
     @State var scope: SettingsScope = .defaults
     /// The preset editor (create / duplicate / edit), when it is open, and the preset a delete
@@ -119,9 +118,15 @@ struct SettingsView: View {
     @State var customMode = false
     #endif
     #if os(tvOS)
-    /// The category the pane shows. Focus on a sidebar row picks it, as on a tab bar.
-    @State private var tvCategory: SettingsCategory = .general
-    @FocusState private var tvFocusedCategory: SettingsCategory?
+    /// What the TV's pane shows: the Editing row's preset manager, or a category.
+    enum TVPane: Hashable {
+        case editing
+        case category(SettingsCategory)
+    }
+
+    /// Focus on a sidebar row picks what the pane shows, as on a tab bar.
+    @State private var tvPane: TVPane = .category(.general)
+    @FocusState private var tvFocusedPane: TVPane?
     #endif
     /// Steam Controller 2 passthrough (device tier). Every platform shows the row, so the
     /// storage sits outside the per-platform blocks.
@@ -154,9 +159,14 @@ struct SettingsView: View {
         _settingsSelection = State(initialValue: initialCategory)
     }
     #elseif os(tvOS)
-    /// The app opens on General; the screenshot harness opens a specific category.
-    init(initialCategory: SettingsCategory = .general) {
-        _tvCategory = State(initialValue: initialCategory)
+    /// The app opens on General in Default settings; the screenshot harness opens a specific
+    /// pane and layer.
+    init(
+        initialCategory: SettingsCategory = .general, initialScope: SettingsScope = .defaults,
+        startsOnEditing: Bool = false
+    ) {
+        _tvPane = State(initialValue: startsOnEditing ? .editing : .category(initialCategory))
+        _scope = State(initialValue: initialScope)
     }
     #endif
 
@@ -398,76 +408,178 @@ struct SettingsView: View {
     // MARK: - tvOS: a sidebar of categories
 
     #if os(tvOS)
-    /// The categories beside the chosen one's rows, the focused row's caption in a band under
-    /// them (design/apple-tvos-ui-overhaul.md §2.2). Two focus sections side by side: focus on a
-    /// category picks it, as on a tab bar, and a swipe right enters its rows.
+    /// The Editing row and the categories beside the chosen pane, the focused row's caption in a
+    /// band under it (design/apple-tvos-ui-overhaul.md §2.2). Two focus sections side by side:
+    /// focus on a sidebar row picks the pane, as on a tab bar, and a swipe right enters it.
     private var tvBody: some View {
-        HStack(alignment: .top, spacing: 48) {
-            tvSidebar
-                .frame(width: 460)
+        presetPrompts(
+            HStack(alignment: .top, spacing: 48) {
+                tvSidebar
+                    .frame(width: 460)
+                    .focusSection()
+                VStack(spacing: 0) {
+                    tvPaneContent
+                    SettingsCaptionBand()
+                }
+                .frame(maxWidth: .infinity)
                 .focusSection()
-            VStack(spacing: 0) {
-                tvDetail
-                SettingsCaptionBand()
             }
-            .frame(maxWidth: .infinity)
-            .focusSection()
-        }
-        .padding(.horizontal, 60)
-        .navigationTitle("Settings")
-        .onChange(of: tvFocusedCategory) { _, category in
-            if let category { tvCategory = category }
-        }
-        .onAppear {
-            gamepads.refresh()
-            gamepads.startDiscovery()
-        }
-        .onDisappear { gamepads.stopDiscovery() }
+            .padding(.horizontal, 60))
+            .navigationTitle("Settings")
+            .onChange(of: tvFocusedPane) { _, pane in
+                if let pane { tvPane = pane }
+            }
+            .onAppear {
+                gamepads.refresh()
+                gamepads.startDiscovery()
+            }
+            .onDisappear { gamepads.stopDiscovery() }
     }
 
     private var tvSidebar: some View {
         VStack(alignment: .leading, spacing: 12) {
+            // The layer every category below edits, never off screen while you edit it.
+            Button {
+                tvPane = .editing
+            } label: {
+                HStack(spacing: 14) {
+                    scopeDot
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Editing")
+                            .font(.geist(20, relativeTo: .caption))
+                            .foregroundStyle(.secondary)
+                        Text(scopeName)
+                            .lineLimit(1)
+                    }
+                    Spacer(minLength: 16)
+                    if tvPane == .editing {
+                        Image(systemName: "chevron.forward")
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+            .focused($tvFocusedPane, equals: .editing)
+            .padding(.bottom, 12)
             ForEach(SettingsCategory.allCases) { category in
                 Button {
-                    tvCategory = category
+                    tvPane = .category(category)
                 } label: {
                     HStack {
                         Label(category.title, systemImage: category.symbol)
                         Spacer(minLength: 16)
-                        if category == tvCategory {
+                        if tvPane == .category(category) {
                             Image(systemName: "chevron.forward")
                                 .foregroundStyle(.secondary)
                         }
                     }
                 }
-                .focused($tvFocusedCategory, equals: category)
+                .focused($tvFocusedPane, equals: .category(category))
             }
             Spacer(minLength: 0)
         }
     }
 
-    @ViewBuilder private var tvDetail: some View {
-        switch tvCategory {
-        case .general:
+    @ViewBuilder private var tvPaneContent: some View {
+        switch tvPane {
+        case .editing:
+            tvPresetManager
+        case .category(.general):
             Form {
                 sessionSection
                 overlaySection
                 librarySection
             }
-        case .display:
+        case .category(.display):
             Form {
                 resolutionSection
                 qualitySection
                 presentationSection
                 hostOutputSection
             }
-        case .audio:
+        case .category(.audio):
             Form { audioSection }
-        case .controllers:
+        case .category(.controllers):
             Form { controllersSection }
-        case .about:
+        case .category(.about):
             AboutView()
         }
+    }
+
+    /// The Editing pane: which layer the categories edit, and the edited preset's own acts as
+    /// rows — the iPhone's scope menu, without a menu inside a menu.
+    private var tvPresetManager: some View {
+        Form {
+            Section {
+                tvLayerRow(.defaults, name: "Default settings", color: nil, detail: nil)
+                ForEach(presets.presets) { preset in
+                    tvLayerRow(
+                        .preset(preset.id), name: preset.name, color: preset.accentColor,
+                        detail: tvUsage(of: preset))
+                }
+                Button {
+                    presetDraft = .create()
+                } label: {
+                    Label("New Preset…", systemImage: "plus")
+                }
+            } header: {
+                Text("Editing")
+            } footer: {
+                Text(scopeCaption)
+            }
+            if let active = activePreset {
+                Section(active.name) {
+                    Button {
+                        presetDraft = .edit(active)
+                    } label: {
+                        Label("Name and Color…", systemImage: "pencil")
+                    }
+                    Button {
+                        presetDraft = .duplicate(
+                            active, name: Self.copyName(of: active.name, in: presets))
+                    } label: {
+                        Label("Duplicate…", systemImage: "plus.square.on.square")
+                    }
+                    Button(role: .destructive) {
+                        presetPendingDelete = active
+                    } label: {
+                        Label("Delete…", systemImage: "trash")
+                    }
+                }
+            }
+        }
+    }
+
+    private func tvLayerRow(
+        _ layer: SettingsScope, name: String, color: Color?, detail: String?
+    ) -> some View {
+        Button {
+            scope = layer
+        } label: {
+            HStack(spacing: 16) {
+                if let color {
+                    Circle().fill(color).frame(width: 18, height: 18)
+                } else {
+                    Image(systemName: "gearshape")
+                }
+                Text(name)
+                Spacer(minLength: 16)
+                if let detail {
+                    Text(detail).foregroundStyle(.secondary)
+                }
+                if scope == layer {
+                    Image(systemName: "checkmark")
+                }
+            }
+        }
+    }
+
+    /// What a delete would change, said before anyone asks: bound hosts and pinned cards.
+    private func tvUsage(of preset: StreamPreset) -> String {
+        let (bound, pinned) = presets.usage(of: preset.id)
+        var parts: [String] = []
+        if bound > 0 { parts.append(bound == 1 ? "1 host" : "\(bound) hosts") }
+        if pinned > 0 { parts.append(pinned == 1 ? "1 card" : "\(pinned) cards") }
+        return parts.isEmpty ? "Not used" : parts.joined(separator: " · ")
     }
     #endif
 }

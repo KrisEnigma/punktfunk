@@ -58,8 +58,14 @@ extension SettingsView {
         assert(field.map { OverlayField.isModelled($0) } ?? true,
                "described(field:) got \(field ?? "") — not a field SettingsOverlay models")
         #if os(tvOS)
-        // A TV row carries no caption of its own: the pane shows the focused row's in one band.
-        return content().focusedValue(\.settingsCaption, caption)
+        // A TV row carries no caption of its own: the pane shows the focused row's in one band,
+        // and an overridden row wears a dot and resets from its context menu.
+        let overridden = field.map(isOverridden) ?? false
+        return content()
+            .modifier(TVOverrideMark(overridden: overridden) {
+                if let field { resetOverride(field) }
+            })
+            .focusedValue(\.settingsCaption, SettingsCaption(text: caption, overridden: overridden))
         #else
         return VStack(alignment: .leading, spacing: 5) {
             content()
@@ -257,13 +263,19 @@ extension SettingsView {
 }
 
 #if os(tvOS)
-/// The focused settings row's caption, published by `described` for the band under the rows.
+/// The focused settings row's caption and whether the edited preset overrides it, published by
+/// `described` for the band under the rows.
+struct SettingsCaption: Equatable {
+    let text: String
+    let overridden: Bool
+}
+
 struct SettingsCaptionKey: FocusedValueKey {
-    typealias Value = String
+    typealias Value = SettingsCaption
 }
 
 extension FocusedValues {
-    var settingsCaption: String? {
+    var settingsCaption: SettingsCaption? {
         get { self[SettingsCaptionKey.self] }
         set { self[SettingsCaptionKey.self] = newValue }
     }
@@ -275,13 +287,46 @@ struct SettingsCaptionBand: View {
     @FocusedValue(\.settingsCaption) private var caption
 
     var body: some View {
-        Text(caption ?? "")
-            .font(.geist(24, relativeTo: .caption))
-            .foregroundStyle(.secondary)
-            .lineLimit(3, reservesSpace: true)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.vertical, 24)
-            .animation(.easeOut(duration: 0.15), value: caption)
+        VStack(alignment: .leading, spacing: 10) {
+            if caption?.overridden == true {
+                Label("Overrides Default settings — hold to reset", systemImage: "circle.fill")
+                    .foregroundStyle(Color.brand)
+            }
+            Text(caption?.text ?? "")
+                .foregroundStyle(.secondary)
+                .lineLimit(3, reservesSpace: true)
+        }
+        .font(.geist(24, relativeTo: .caption))
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.vertical, 24)
+        .animation(.easeOut(duration: 0.15), value: caption)
+    }
+}
+
+/// An overridden row's dot, in the row's leading padding, and the long-press reset.
+struct TVOverrideMark: ViewModifier {
+    let overridden: Bool
+    let reset: () -> Void
+
+    @ViewBuilder func body(content: Content) -> some View {
+        if overridden {
+            content
+                .overlay(alignment: .leading) {
+                    // In the platter's padding, left of the text (the row's frame starts at
+                    // the text); past the platter the list clips it.
+                    Circle()
+                        .fill(Color.brand)
+                        .frame(width: 10, height: 10)
+                        .offset(x: -15)
+                        .accessibilityHidden(true)
+                }
+                .contextMenu {
+                    Button("Reset to Default settings", systemImage: "arrow.uturn.backward",
+                           action: reset)
+                }
+        } else {
+            content
+        }
     }
 }
 #endif
