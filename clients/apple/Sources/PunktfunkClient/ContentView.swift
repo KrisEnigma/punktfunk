@@ -130,12 +130,14 @@ struct ContentView: View {
     /// with ⌃⌥⇧O or the Stream menu; a pad opens it with `Select+A` on all three (§2.5, §2.6).
     @StateObject private var ring = RingState()
 
-    /// The ring this platform draws. macOS takes the DESKTOP default (end stream, disconnect,
-    /// statistics, microphone — no soft keyboard, no on-screen pad), the touch clients the touch
-    /// one; a configured blob overrides both.
+    /// The ring this platform draws. macOS takes the DESKTOP default (no soft keyboard, no
+    /// on-screen pad), tvOS the TV one (no touch, keyboard or microphone slot), iOS the touch
+    /// one; a configured blob overrides each.
     private var ringConfig: OverlayConfig {
         #if os(macOS)
         OverlayConfig.parse(SessionSettings.current.overlayActions, platform: .desktop)
+        #elseif os(tvOS)
+        OverlayConfig.parse(SessionSettings.current.overlayActions, platform: .tv)
         #else
         OverlayConfig.parse(SessionSettings.current.overlayActions)
         #endif

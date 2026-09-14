@@ -175,9 +175,10 @@ public struct PadConfig: Equatable, Sendable {
     }
 }
 
-/// Which platform default ring applies: iOS and iPadOS are `touch`; macOS is `desktop`.
+/// Which platform default ring applies: iOS and iPadOS are `touch`, macOS is `desktop`, and
+/// tvOS is `tv`, which leaves out the touch, keyboard and microphone slots a TV cannot run.
 public enum RingPlatform: Sendable {
-    case touch, desktop
+    case touch, desktop, tv
 }
 
 public struct OverlayConfig: Equatable, Sendable {
@@ -199,12 +200,38 @@ public struct OverlayConfig: Equatable, Sendable {
         shortcuts.first { $0.id == id }
     }
 
+    /// Add or replace a shortcut. A new one takes the first empty slot, as the editors promise.
+    public mutating func saveShortcut(_ sc: OverlayShortcut) {
+        if let i = shortcuts.firstIndex(where: { $0.id == sc.id }) {
+            shortcuts[i] = sc
+        } else {
+            shortcuts.append(sc)
+            if let k = ring.firstIndex(where: { $0 == nil }) { ring[k] = .shortcut(sc.id) }
+        }
+    }
+
+    /// Remove a shortcut, emptying every slot that sent it: `parse` would, on the next read.
+    public mutating func removeShortcut(_ id: String) {
+        shortcuts.removeAll { $0.id == id }
+        ring = ring.map { slot in
+            if case .shortcut(let sid) = slot, sid == id { return nil }
+            return slot
+        }
+    }
+
+    /// The id a new shortcut takes: one past the highest `s<n>` in use.
+    public var nextShortcutID: String {
+        "s\((shortcuts.compactMap { Int($0.id.dropFirst()) }.max() ?? 0) + 1)"
+    }
+
     public static func platformDefault(_ platform: RingPlatform = .touch) -> OverlayConfig {
         switch platform {
         case .touch:
             return OverlayConfig(ring: [.endStream, .keyboard, .touchMode, .stats, .mic, .pad])
         case .desktop:
             return OverlayConfig(ring: [.endStream, .disconnectLinger, .touchMode, .stats, .mic, .sendText])
+        case .tv:
+            return OverlayConfig(ring: [.endStream, .disconnectLinger, .stats, .guide, .qam, nil])
         }
     }
 

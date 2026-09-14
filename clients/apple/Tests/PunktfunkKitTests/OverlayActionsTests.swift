@@ -103,3 +103,25 @@ final class OverlayActionsTests: XCTestCase {
         }
     }
 }
+
+extension OverlayActionsTests {
+    func testTvDefaultRingOffersOnlyWhatATvCanRun() {
+        let tv = OverlayConfig.platformDefault(.tv)
+        XCTAssertEqual(tv.ring, [.endStream, .disconnectLinger, .stats, .guide, .qam, nil])
+        XCTAssertEqual(OverlayConfig.parse("", platform: .tv), tv)
+        XCTAssertEqual(OverlayConfig.parse(tv.toJSON(), platform: .tv), tv)
+    }
+
+    func testANewShortcutTakesTheFirstEmptySlotAndRemovalEmptiesIt() {
+        var cfg = OverlayConfig.platformDefault(.tv)
+        cfg.saveShortcut(OverlayShortcut(id: cfg.nextShortcutID, keys: ["ctrl", "escape"]))
+        XCTAssertEqual(cfg.ring[5], .shortcut("s1"))
+        XCTAssertEqual(cfg.nextShortcutID, "s2")
+        cfg.saveShortcut(OverlayShortcut(id: "s1", label: "Menu", keys: ["escape"]))
+        XCTAssertEqual(cfg.shortcuts.count, 1, "saving an existing id replaces it")
+        XCTAssertEqual(cfg.shortcut("s1")?.label, "Menu")
+        cfg.removeShortcut("s1")
+        XCTAssertTrue(cfg.shortcuts.isEmpty)
+        XCTAssertNil(cfg.ring[5], "the slot that sent it is empty")
+    }
+}

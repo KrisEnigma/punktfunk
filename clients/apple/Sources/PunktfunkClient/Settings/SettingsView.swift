@@ -500,6 +500,17 @@ struct SettingsView: View {
             Form { audioSection }
         case .category(.controllers):
             Form { controllersSection }
+        case .category(.quickActions):
+            TVQuickActionsEditor(
+                blob: scoped(SettingsFields.overlayActions),
+                overridden: isOverridden("overlay_actions")
+            ) {
+                if inPresetScope {
+                    resetOverride("overlay_actions")
+                } else {
+                    scoped(SettingsFields.overlayActions).wrappedValue = ""
+                }
+            }
         case .category(.about):
             AboutView()
         }

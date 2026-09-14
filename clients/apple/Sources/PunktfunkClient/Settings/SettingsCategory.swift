@@ -15,7 +15,11 @@ enum SettingsCategory: String, CaseIterable, Identifiable {
     #if os(iOS)
     case input
     #endif
-    case audio, controllers, about
+    case audio, controllers
+    #if os(tvOS)
+    case quickActions
+    #endif
+    case about
 
     var id: Self { self }
 
@@ -28,6 +32,9 @@ enum SettingsCategory: String, CaseIterable, Identifiable {
         #endif
         case .audio: return "Audio"
         case .controllers: return "Controllers"
+        #if os(tvOS)
+        case .quickActions: return "Quick Actions"
+        #endif
         case .about: return "About"
         }
     }
@@ -41,6 +48,9 @@ enum SettingsCategory: String, CaseIterable, Identifiable {
         #endif
         case .audio: return "speaker.wave.2"
         case .controllers: return "gamecontroller"
+        #if os(tvOS)
+        case .quickActions: return "dial.medium"
+        #endif
         case .about: return "info.circle"
         }
     }

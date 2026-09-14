@@ -177,7 +177,7 @@ struct RingEditing {
 }
 
 /// One button as the ring draws it: glyph or keycap chip, its state, and why it is dimmed.
-private struct SlotSpec {
+struct SlotSpec {
     var id: String
     var label: String
     var icon: String? = nil
@@ -202,7 +202,7 @@ private let noTouchScreenReason = "A Mac has no touch screen"
 /// Why the two system-button slots are dimmed: they ride the wire pad, like the virtual one.
 private let padOffReason = "Controller input is not forwarded this session"
 
-private func spec(_ slot: SlotId, _ cfg: OverlayConfig, _ a: RingActions) -> SlotSpec {
+func spec(_ slot: SlotId, _ cfg: OverlayConfig, _ a: RingActions) -> SlotSpec {
     switch slot {
     case .endStream:
         return SlotSpec(id: "end_stream", label: "End stream", icon: "xmark", armed: true)
