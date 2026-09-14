@@ -161,6 +161,9 @@ pub(super) struct StreamState {
     pub(super) client_hdr: Option<pf_frame::HdrMeta>,
     /// Admitted by `mode_conflict: join`. A rebuild's new display asks to share again.
     pub(super) join_live: bool,
+    /// The live encoder's framing: forwarded cursor positions map through it, and so does
+    /// the input thread's absolute input. Written on every encoder open.
+    pub(super) frame_map: super::super::input::FrameMap,
     pub(super) bringup: Arc<crate::bringup::Trace>,
     pub(super) resize_ms: Arc<AtomicU32>,
     pub(super) stats: Arc<StatsRecorder>,
@@ -217,6 +220,7 @@ impl StreamState {
     /// Swap the built pipeline in and forget every owed AU. The caller retires the old lease,
     /// re-arms the IDR clock, and re-reads `enc_src` as its path requires.
     pub(super) fn adopt_pipeline(&mut self, p: Pipeline) {
+        self.adopt_reframe(p.reframe);
         self.capturer = p.capturer;
         self.enc = p.enc;
         self.frame = p.frame;
@@ -226,6 +230,10 @@ impl StreamState {
         self.inflight.clear();
         self.last_au_at = std::time::Instant::now();
         self.encoder_resets = 0;
+    }
+
+    pub(super) fn adopt_reframe(&self, reframe: punktfunk_core::video_fit::Reframe) {
+        *self.frame_map.lock().unwrap_or_else(|e| e.into_inner()) = reframe;
     }
 
     /// Lease drop looks like a disconnect to keep-alive; retire or linger accumulates.
@@ -286,6 +294,7 @@ impl StreamState {
         if ctx.codec == crate::encode::Codec::PyroWave {
             plan.wire_chunk = Some(ctx.session.shard_payload());
         }
+        plan.reframe_to = ctx.reframe_to;
         tracing::info!(?plan, "resolved session plan");
         let SessionContext {
             session,
@@ -335,6 +344,8 @@ impl StreamState {
             launch_target,
             client_hdr,
             join_live,
+            reframe_to: _,
+            frame_map,
             bringup,
             resize_ms,
             wire_sock,
@@ -481,7 +492,9 @@ impl StreamState {
             node_id: cur_node_id,
             display_gen: cur_display_gen,
             bitrate_kbps: built_bitrate,
+            reframe,
         } = pipe;
+        *frame_map.lock().unwrap_or_else(|e| e.into_inner()) = reframe;
         let enc_src = (frame.format, frame.width, frame.height);
         #[cfg(target_os = "linux")]
         let no_overlay_means_off_output = settle_portal_cursor(&*vd, &mut metadata_composite);
@@ -782,6 +795,7 @@ impl StreamState {
             launch,
             client_hdr,
             join_live,
+            frame_map,
             bringup,
             resize_ms,
             stats,

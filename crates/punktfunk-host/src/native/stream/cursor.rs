@@ -123,8 +123,10 @@ impl StreamState {
             }
             if client_draws {
                 let live = self.capturer.cursor();
+                let reframe = *self.frame_map.lock().unwrap_or_else(|e| e.into_inner());
                 fwd.tick(
                     live.as_ref().or(self.frame.cursor.as_ref()),
+                    &reframe,
                     &self.conn,
                     &self.cursor_shape_tx,
                 );

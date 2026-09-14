@@ -200,6 +200,9 @@ pub struct EncoderCaps {
     /// (the native VAAPI VideoProc pass). The host opens a mirrored head at the
     /// client's size only when this is set; every other backend gets the head's own.
     pub downscales_input: bool,
+    /// [`set_input_crop`](Encoder::set_input_crop) is honoured: one rectangle of each
+    /// picture is encoded, scaled when [`downscales_input`](Self::downscales_input) also holds.
+    pub crops_input: bool,
 }
 
 /// Hardware encoder. One per session, on the encode thread.
@@ -350,6 +353,9 @@ pub trait Encoder: Send {
     /// (torn frames, not UB — it fails silently). Called once after the
     /// capturer is known. Default: no-op (copying or synchronous backends).
     fn set_input_ring_depth(&mut self, _depth: usize) {}
+    /// Encode only `rect` (`x, y, width, height` in source pixels) of every submitted picture.
+    /// Call before the first submit. Ignored unless [`EncoderCaps::crops_input`].
+    fn set_input_crop(&mut self, _rect: [u32; 4]) {}
     /// Signal end-of-stream. After this, drain remaining AUs with
     /// [`poll`](Self::poll) until `None` — NVENC buffers frames internally
     /// even at `delay=0`.

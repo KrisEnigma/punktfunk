@@ -35,6 +35,8 @@ pub const VA_PROC_COLOR_STANDARD_EXPLICIT: u32 = 13;
 /// `VAProcColorProperties::color_range`.
 pub const VA_SOURCE_RANGE_REDUCED: u8 = 1;
 pub const VA_SOURCE_RANGE_FULL: u8 = 2;
+/// `filter_flags`: the driver's best scaler (iHD's polyphase AVS) instead of its default.
+pub const VA_FILTER_SCALING_HQ: u32 = 0x0000_0200;
 
 /// libva fourccs name byte order; DRM fourccs name the bit layout of a
 /// little-endian word. `XR24` (`DRM_FORMAT_XRGB8888`) is B, G, R, X in memory,

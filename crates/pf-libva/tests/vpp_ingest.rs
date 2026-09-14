@@ -226,6 +226,48 @@ fn a_larger_source_is_scaled_into_the_picture() {
     vpp.destroy(&display);
 }
 
+/// A joiner's crop: the red and white middle of a source with blue edges, scaled to half,
+/// comes out with no blue at either edge. The cut-off columns never reach the picture.
+#[test]
+#[ignore = "needs a VAAPI device"]
+fn a_cropped_source_keeps_only_its_rectangle() {
+    let display = display();
+    let mut vpp = Vpp::new(&display, W, H).expect("VideoProc");
+    let (sw, sh) = (W * 4, H * 2);
+    let src = display
+        .create_surface(VA_RT_FORMAT_RGB32, Some(VA_FOURCC_BGRA), sw, sh)
+        .expect("a BGRA surface");
+    let dst = display
+        .create_surface(VA_RT_FORMAT_YUV420, Some(VA_FOURCC_NV12), W, H)
+        .expect("an NV12 surface");
+    let (blue, red, white) = ([255, 0, 0, 255], [0, 0, 255, 255], [255, 255, 255, 255]);
+    let mut picture = Vec::with_capacity((sw * sh * 4) as usize);
+    for _ in 0..sh {
+        for band in [blue, red, white, blue] {
+            picture.extend(band.repeat(W as usize));
+        }
+    }
+    display
+        .write_packed(src, &picture, sw as usize * 4)
+        .expect("upload the banded picture");
+    vpp.crop = Some([W, 0, W * 2, sh]);
+    vpp.convert(&display, src, (sw, sh), true, false, dst)
+        .expect("crop, scale and convert");
+    near(
+        yuv_at(&display, dst, 4, H as usize / 2),
+        (63, 102, 240),
+        "left edge, red",
+    );
+    near(
+        yuv_at(&display, dst, W as usize - 4, H as usize / 2),
+        (235, 128, 128),
+        "right edge, white",
+    );
+    display.destroy_surface(src);
+    display.destroy_surface(dst);
+    vpp.destroy(&display);
+}
+
 /// Ten bits: BT.2020 limited range puts red at Y 294 / Cb 387 / Cr 960. BT.709
 /// coefficients in a stream tagged BT.2020 would show as Y 250 — a picture that
 /// decodes fine and is the wrong red.

@@ -13,6 +13,8 @@ pub(in crate::native) struct Pipeline {
     pub(super) node_id: u32,
     pub(super) display_gen: Option<u64>,
     pub(super) bitrate_kbps: u32,
+    /// What the encoder takes of each captured picture.
+    pub(super) reframe: punktfunk_core::video_fit::Reframe,
 }
 
 /// Display + pipeline built on the prep thread while Start RTT and hole-punch are in flight.
@@ -267,9 +269,9 @@ pub(super) fn pacing_hz(session_hz: u32, achieved_hz: u32) -> u32 {
     achieved_hz.min(session_hz).max(1)
 }
 
-/// Open the session's encoder for `frame` — at the client's `negotiated` size when a larger
-/// head is mirrored (`session_plan::open_encoder_fitted`) — with the plan's chunking and the
-/// capturer's ring depth applied, and return the size it opened at. `bitrate_bps` is asked
+/// Open the session's encoder for `frame` — framed for a joiner, or at the client's `negotiated`
+/// size when a larger head is mirrored (`session_plan::open_encoder_fitted`) — with the plan's
+/// chunking and the capturer's ring depth applied, and return the framing it encodes. `bitrate_bps` is asked
 /// for that size. An IDD-push source gets the driver's encoder instead, its wire-index domain
 /// continuing at `wire_seq_base` (the loop's `au_seq`).
 #[allow(clippy::too_many_arguments)]
@@ -282,7 +284,10 @@ pub(super) fn open_session_encoder(
     bitrate_bps: impl Fn(u32, u32) -> u64,
     bit_depth: u8,
     wire_seq_base: u32,
-) -> Result<(Box<dyn crate::encode::Encoder>, (u32, u32))> {
+) -> Result<(
+    Box<dyn crate::encode::Encoder>,
+    punktfunk_core::video_fit::Reframe,
+)> {
     if plan.capture == crate::session_plan::CaptureBackend::IddPush {
         return crate::windows::idd::open_driver_encoder(
             plan,
@@ -293,10 +298,18 @@ pub(super) fn open_session_encoder(
             bit_depth,
             wire_seq_base,
         )
-        .map(|e| (e, (frame.width, frame.height)));
+        .map(|e| {
+            (
+                e,
+                punktfunk_core::video_fit::Reframe::full((frame.width, frame.height)),
+            )
+        });
     }
-    let (mut enc, size) =
-        crate::session_plan::open_encoder_fitted(frame, negotiated, |width, height| {
+    let (mut enc, framed) = crate::session_plan::open_encoder_fitted(
+        frame,
+        negotiated,
+        plan.reframe_to,
+        |width, height| {
             crate::encode::open_video(
                 plan.codec,
                 frame.format,
@@ -310,12 +323,13 @@ pub(super) fn open_session_encoder(
                 plan.cursor_blend,
                 plan.max_slices,
             )
-        })?;
+        },
+    )?;
     if let Some(c) = plan.wire_chunk {
         enc.set_wire_chunking(c);
     }
     enc.set_input_ring_depth(capturer.pipeline_depth().max(1));
-    Ok((enc, size))
+    Ok((enc, framed))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -422,7 +436,7 @@ pub(super) fn build_pipeline(
             bitrate_kbps
         }
     };
-    let (enc, encoded) = open_session_encoder(
+    let (enc, reframe) = open_session_encoder(
         &plan,
         &*capturer,
         &frame,
@@ -433,6 +447,7 @@ pub(super) fn build_pipeline(
         wire_seq_base,
     )
     .context("open video encoder")?;
+    let encoded = reframe.out;
     let re = kbps_for(encoded.0, encoded.1);
     if re != bitrate_kbps {
         tracing::info!(
@@ -465,6 +480,7 @@ pub(super) fn build_pipeline(
         node_id,
         display_gen: pool_gen,
         bitrate_kbps,
+        reframe,
     })
 }
 

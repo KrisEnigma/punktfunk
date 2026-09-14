@@ -17,7 +17,7 @@ use punktfunk_core::quic::{
 /// Owned by the encode loop — the thread that binds frames.
 pub(super) struct CursorForwarder {
     sent_serial: Option<u64>,
-    /// Hotspot in frame px. Survives hide so a hidden tick still names
+    /// Hotspot in encoded-frame px. Survives hide so a hidden tick still names
     /// the last visible point.
     last_pos: (i32, i32),
 }
@@ -33,10 +33,12 @@ impl CursorForwarder {
     /// Send `0xD0` every encode tick (lossy, latest-wins; no refresh timer).
     /// Visible → `CURSOR_VISIBLE`; hidden-but-known (app grabbed the pointer)
     /// → `CURSOR_RELATIVE_HINT`; `None` (no overlay ever) → 0. Do not hint
-    /// off a cold start — only off an observed hide.
+    /// off a cold start — only off an observed hide. The overlay is in capture pixels;
+    /// `reframe` moves it into the picture the client decodes.
     pub(super) fn tick(
         &mut self,
         cursor: Option<&pf_frame::CursorOverlay>,
+        reframe: &punktfunk_core::video_fit::Reframe,
         conn: &super::link::SessionLink,
         shape_tx: &tokio::sync::watch::Sender<Option<CursorShape>>,
     ) {
@@ -50,7 +52,7 @@ impl CursorForwarder {
                         self.sent_serial = Some(ov.serial);
                     }
                 }
-                self.last_pos = (ov.x + ov.hot_x as i32, ov.y + ov.hot_y as i32);
+                self.last_pos = reframe.to_frame(ov.x + ov.hot_x as i32, ov.y + ov.hot_y as i32);
                 CURSOR_VISIBLE
             }
             Some(_) => CURSOR_RELATIVE_HINT,

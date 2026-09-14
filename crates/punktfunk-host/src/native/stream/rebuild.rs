@@ -485,7 +485,10 @@ impl StreamState {
             )
         });
         let new_enc = match opened {
-            Ok((e, _)) => e,
+            Ok((e, reframe)) => {
+                self.adopt_reframe(reframe);
+                e
+            }
             Err(e) => {
                 self.encoder_resets += 1;
                 if self.encoder_resets > MAX_ENCODER_RESETS {
