@@ -117,6 +117,9 @@ class LibraryCache(private val directory: File) {
             g.role?.let { put("role", it) }
             g.icon?.let { put("icon", it) }
             g.platform?.let { put("platform", it) }
+            g.developer?.let { put("developer", it) }
+            g.releaseYear?.let { put("release_year", it) }
+            if (g.genres.isNotEmpty()) put("genres", JSONArray(g.genres))
         }
 
     private fun decode(o: JSONObject): GameEntry {
@@ -133,6 +136,11 @@ class LibraryCache(private val directory: File) {
             role = nullable(o, "role"),
             icon = nullable(o, "icon"),
             platform = nullable(o, "platform"),
+            developer = nullable(o, "developer"),
+            releaseYear = o.optInt("release_year").takeIf { it > 0 },
+            genres = o.optJSONArray("genres")
+                ?.let { a -> List(a.length()) { a.optString(it) }.filter { it.isNotBlank() } }
+                ?: emptyList(),
         )
     }
 
