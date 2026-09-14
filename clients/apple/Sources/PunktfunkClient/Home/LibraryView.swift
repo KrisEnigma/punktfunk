@@ -233,7 +233,12 @@ struct LibraryView: View {
             #if os(iOS) || os(macOS)
             .modifier(TitleSearch(active: inTab, text: $search))
             #endif
+            #if os(tvOS)
+            // A TV's sheet is a narrow card; the details want the screen.
+            .fullScreenCover(item: $detailGame, onDismiss: launchPendingTitle) { detailSheet($0) }
+            #else
             .sheet(item: $detailGame, onDismiss: launchPendingTitle) { detailSheet($0) }
+            #endif
             // Before the first frame: a shelf seen this run opens on its titles, any other one on
             // the (held back) spinner rather than a flash of the empty state.
             .onAppear {
@@ -801,7 +806,8 @@ struct LibraryView: View {
                 launchAfterDetails = game.id
                 detailGame = nil
             },
-            onCopyLink: LinkClipboard.isAvailable ? { copyLink(game) } : nil)
+            onCopyLink: LinkClipboard.isAvailable ? { copyLink(game) } : nil,
+            host: host)
             #if os(iOS)
             .presentationDetents([.medium, .large])
             #elseif os(macOS)
