@@ -233,7 +233,7 @@ enum ShotScenes {
         scenes.append(ShotScene(name: "23b-tv-quick-actions-back", orientation: .natural, colorScheme: .dark) {
             AnyView(ShotTVTabs(tab: .settings, category: .quickActions, pushPop: true))
         })
-        // The host page as the TV pushes it, and its speed test waiting for Start.
+        // The host page as the TV pushes it, its speed test waiting for Start, its Connection fields.
         scenes.append(ShotScene(name: "24-tv-host-page", orientation: .natural, colorScheme: .dark) {
             AnyView(NavigationStack {
                 HostSectionsView(
@@ -244,6 +244,13 @@ enum ShotScenes {
             AnyView(NavigationStack {
                 HostSectionsView(
                     hostID: ShotMock.battlestationID, store: ShotMock.pageStore, section: .speedTest,
+                    handOff: { _ in })
+            })
+        })
+        scenes.append(ShotScene(name: "24c-tv-host-connection", orientation: .natural, colorScheme: .dark) {
+            AnyView(NavigationStack {
+                HostSectionsView(
+                    hostID: ShotMock.battlestationID, store: ShotMock.pageStore, section: .connection,
                     handOff: { _ in })
             })
         })
@@ -272,9 +279,6 @@ enum ShotScenes {
             AnyView(ShotTVCustomizeMoved())
         })
         #endif
-        scenes.append(ShotScene(name: "10-edithost", orientation: .natural, colorScheme: .dark) {
-            AnyView(ShotEditHost())
-        })
         return scenes
     }
 }
@@ -819,25 +823,6 @@ private struct ShotControllers: View {
     ]
 }
 #endif
-
-// MARK: - Edit host (add/edit sheet with the Wake-on-LAN MAC field)
-
-private struct ShotEditHost: View {
-    var body: some View {
-        ZStack {
-            ShotHome().blur(radius: 24).overlay(Color.black.opacity(0.45))
-            AddHostSheet(
-                existing: StoredHost(
-                    name: "Battlestation", address: "192.168.1.20", port: 9777,
-                    pinnedSHA256: ShotMock.fingerprint, macAddresses: ["a4:b1:c2:d3:e4:f5"]),
-                onSave: { _ in })
-                #if os(macOS)
-                .clipShape(RoundedRectangle(cornerRadius: 12))
-                .shadow(radius: 40, y: 16)
-                #endif
-        }
-    }
-}
 
 // MARK: - Settings
 

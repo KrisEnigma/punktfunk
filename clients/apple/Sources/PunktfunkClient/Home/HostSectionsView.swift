@@ -28,7 +28,6 @@ struct HostSectionsView: View {
     @ObservedObject private var hostPower = HostPowerStore.shared
     @Environment(\.dismiss) private var dismiss
     @State private var section: HostSection
-    @State private var editTarget: StoredHost?
     @State private var confirmPower: PendingHostAction?
     /// The last send-logs or power outcome, for its alert.
     @State private var outcome: (title: String, message: String)?
@@ -72,9 +71,6 @@ struct HostSectionsView: View {
                     #endif
             }
             #endif
-        }
-        .sheet(item: $editTarget) { host in
-            AddHostSheet(existing: host, onSave: { store.update($0) })
         }
         .alert(
             confirmPower.map { "\($0.action.label)?" } ?? "",
@@ -153,7 +149,6 @@ struct HostSectionsView: View {
             surface: HostActionSurface(
                 connect: { handOff(.connect(host.id, $0)) },
                 pair: { handOff(.pair(host.id)) },
-                edit: { editTarget = host },
                 browse: { _ in handOff(.browse(host.id)) },
                 speedTest: { section = .speedTest },
                 sendLogs: {

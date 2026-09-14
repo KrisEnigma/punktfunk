@@ -42,10 +42,6 @@ struct HomeView: View {
     /// Explicit Wake-on-LAN of an offline host — fires the packet and waits for it to come online
     /// (the "Waking…" overlay), without connecting. Routed through ContentView's HostWaker.
     let wake: (StoredHost) -> Void
-    /// Game-library browser (default ON; the Settings toggle opts out) — the host-card
-    /// "Browse Library…" action.
-    /// The host being edited (name / address / port / Wake-on-LAN MAC) — drives the edit sheet.
-    @State private var editTarget: StoredHost?
     #if os(macOS)
     @Environment(\.openWindow) private var openWindow
     #else
@@ -208,12 +204,6 @@ struct HomeView: View {
             .navigationDestination(item: $pairingTarget) { host in
                 PairSheet(host: host) { fingerprint in onPaired(host, fingerprint) }
             }
-            .navigationDestination(item: $editTarget) { host in
-                AddHostSheet(
-                    existing: host,
-                    suggestedMacs: discovery.hosts.first { host.matches($0) }?.macAddresses ?? [],
-                    onSave: { store.update($0) })
-            }
             #endif
             #if !os(tvOS)
             .toolbar {
@@ -301,13 +291,6 @@ struct HomeView: View {
         .sheet(isPresented: $showAddHost) {
             AddHostSheet { store.add($0) }
         }
-        .sheet(item: $editTarget) { host in
-            // Prefill the MAC from the live advert when the host hasn't stored one yet.
-            AddHostSheet(
-                existing: host,
-                suggestedMacs: discovery.hosts.first { host.matches($0) }?.macAddresses ?? [],
-                onSave: { store.update($0) })
-        }
         #if os(iOS)
         // SettingsView owns its own NavigationSplitView (sidebar + detail) and Done button, so it
         // is presented directly — wrapping it in a NavigationStack here would nest a split view in
@@ -385,7 +368,6 @@ struct HomeView: View {
             surface: HostActionSurface(
                 connect: { connect(host, $0) },
                 pair: { if !model.isBusy { pairingTarget = host } },
-                edit: { editTarget = host },
                 browse: { libraryTarget = LibraryTarget(host: host, preset: $0) },
                 speedTest: { if !model.isBusy { speedTestTarget = host } },
                 sendLogs: { Task { sendLogsResult = await SendLogs.toHost(host) } },
