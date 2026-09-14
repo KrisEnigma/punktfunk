@@ -378,14 +378,12 @@ mod session_main {
         let want_444 = settings.enable_444
             && pf_client_core::video::hevc_444_hardware_decodable(vulkan.as_ref());
         if settings.enable_444 && !want_444 {
-            // Loud, because the user turned a switch on and is not getting it. The
-            // alternative is what this replaces: the host grants 4:4:4, the decode ladder
-            // has no rung that can take it, and the session drops HEVC entirely.
+            // Loud, because the user turned a switch on and HEVC will not carry it. Asking
+            // anyway loses the whole codec: the decode ladder has no 4:4:4 HEVC rung.
             tracing::warn!(
                 "Full chroma (4:4:4) requested but this device has no 4:4:4 HEVC decode — \
-                 asking for 4:2:0 instead. Advertising it would cost the whole codec: 4:4:4 \
-                 is granted on HEVC only, and there is no software HEVC decoder to fall back \
-                 to (PyroWave carries 4:4:4 on any GPU, if the link can take it)."
+                 HEVC sessions ask for 4:2:0 instead. PyroWave still asks for 4:4:4: it \
+                 decodes full chroma on any GPU."
             );
         }
         // Computed before the struct literal below moves `vulkan`. Advertising HDR invites a
@@ -442,6 +440,7 @@ mod session_main {
                 settings.ten_bit_sdr,
                 want_444,
             ),
+            want_444: settings.enable_444,
             // The panel's HDR volume reaches the host's virtual-display EDID so host apps
             // tone-map to the real glass. Windows only: DXGI reads the `--window-pos`
             // monitor (advanced-color outputs), gated on the HDR setting because an

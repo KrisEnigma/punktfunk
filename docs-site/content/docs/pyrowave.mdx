@@ -44,8 +44,9 @@ Frame rate scales the rate linearly, [4:4:4](#444-and-hdr) multiplies it by ~1.6
 
 <BitrateCalculator />
 
-Gigabit Ethernet tops out around 940 Mbps of payload, so 4K60 wants 2.5GbE and the big
-4:4:4 / HDR / high-refresh modes want 5GbE or 10GbE. **Do not run this over Wi-Fi** — that's
+Packet framing and FEC add ~15 % on top of these rates, and Gigabit Ethernet tops out around
+940 Mbps of payload, so 4K60 wants 2.5GbE even at 4:2:0 and the big 4:4:4 / HDR / high-refresh
+modes want 5GbE or 10GbE. **Do not run this over Wi-Fi** — that's
 what HEVC/AV1 are for.
 
 ## 4:4:4 and HDR
@@ -70,8 +71,8 @@ HEVC/AV1; nothing PyroWave-specific to turn on beyond picking the codec.
   or 4:4:4, SDR or HDR — with no extra setup.
 
 At the top end this gets demanding: 4:4:4 + HDR at a super-ultrawide 5120×1440@240 pins around
-5.3 Gbps, which is more than a 5GbE link carries. On a link that can't keep up, either set an
-explicit lower bitrate on the client or cap the host's Automatic pin with
+5.3 Gbps, which is more than a 5GbE link carries. A client bitrate does not lower it: PyroWave
+ignores it. On a link that can't keep up, lower the mode or cap the host's pin with
 [`PUNKTFUNK_PYROWAVE_MAX_MBPS`](/docs/configuration) — otherwise the overshoot just becomes
 dropped packets.
 
@@ -99,8 +100,8 @@ dropped packets.
      and presents through its own swapchain rather than through the hardware video decoder, so
      the low-latency and presentation settings that tune MediaCodec do not apply to it.
 3. Leave the bitrate on Automatic: a PyroWave session pins itself to the ~1.6 bpp rate for
-   your mode (≈200 Mbps at 1080p60; ~2.6 bpp for 4:4:4, +15 % for HDR). An explicit bitrate is honored if you set one, but the
-   adaptive-bitrate controller stays off either way — this codec has no useful low-rate
+   your mode (≈200 Mbps at 1080p60; ~2.6 bpp for 4:4:4, +15 % for HDR). A client bitrate is
+   ignored, and the adaptive-bitrate controller stays off — this codec has no useful low-rate
    regime, so under sustained loss the right move is switching back to HEVC, not degrading.
    The pin follows the resolution: a mid-stream resize (e.g. Match window) re-pins the rate
    for the new mode, so resizing a window down also cuts the bandwidth.

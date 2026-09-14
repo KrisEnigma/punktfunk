@@ -18,13 +18,18 @@ const RES_PRESETS: Preset[] = [
 
 const FPS_PRESETS = [30, 60, 90, 120, 144, 240]
 
-// Practical payload ceilings (a bit under line rate — headers, FEC, framing).
+// Practical payload ceilings, a bit under line rate.
 const LINKS = [
   { label: 'Gigabit', mbps: 940 },
   { label: '2.5 GbE', mbps: 2350 },
   { label: '5 GbE', mbps: 4700 },
   { label: '10 GbE', mbps: 9400 },
 ]
+
+// On top of the pin: a 64-byte seal per 1408-byte shard (~4.5 %) and the 10 % FEC a session
+// starts at. Past ~90 % of a link, packets drop and FEC climbs to cover them.
+const WIRE_FACTOR = 1.15
+const LINK_HEADROOM = 0.9
 
 const MIN_MBPS = 0.5
 const MAX_MBPS = 8000
@@ -122,7 +127,9 @@ export default function BitrateCalculator() {
   const gbps = mbps / 1000
   const bpp = w > 0 && h > 0 && fps > 0 ? (mbps * 1e6) / (w * h * fps) : 0
   const frameKB = fps > 0 ? (mbps * 1e6) / 8 / fps / 1024 : 0
-  const needed = LINKS.find((l) => l.mbps >= mbps)
+  const wireMbps = mbps * WIRE_FACTOR
+  const fitsLink = (l: { mbps: number }) => wireMbps <= l.mbps * LINK_HEADROOM
+  const needed = LINKS.find(fitsLink)
 
   const big =
     mbps >= 1000 ? `${gbps.toFixed(2)} Gbps` : `${Math.round(mbps)} Mbps`
@@ -258,7 +265,7 @@ export default function BitrateCalculator() {
 
       <div style={{ marginTop: '0.9rem', display: 'grid', gap: '0.4rem' }}>
         {LINKS.map((l) => {
-          const fits = l.mbps >= mbps
+          const fits = fitsLink(l)
           return (
             <div
               key={l.label}
@@ -285,7 +292,7 @@ export default function BitrateCalculator() {
               >
                 <div
                   style={{
-                    width: `${Math.min(100, (mbps / l.mbps) * 100)}%`,
+                    width: `${Math.min(100, (wireMbps / l.mbps) * 100)}%`,
                     height: '100%',
                     background: fits
                       ? 'var(--color-fd-primary, #6c5bf3)'
@@ -303,7 +310,7 @@ export default function BitrateCalculator() {
                     : '#e5484d',
                 }}
               >
-                {Math.round((mbps / l.mbps) * 100)}%
+                {Math.round((wireMbps / l.mbps) * 100)}%
               </span>
             </div>
           )
@@ -318,8 +325,9 @@ export default function BitrateCalculator() {
           color: 'var(--color-fd-muted-foreground, #6b7280)',
         }}
       >
-        Estimate of the Automatic bitrate a PyroWave session pins for this mode. Link bars use a
-        practical payload ceiling (below line rate). The pin is capped at 8 Gbps; on a constrained
+        Estimate of the Automatic bitrate a PyroWave session pins for this mode. Link bars add ~15 %
+        for packet framing and FEC against a practical payload ceiling, and a link fits only with
+        10 % to spare. The pin is capped at 8 Gbps; on a constrained
         link a host can cap it lower with <code>PUNKTFUNK_PYROWAVE_MAX_MBPS</code>.
       </p>
     </div>

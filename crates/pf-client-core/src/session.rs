@@ -47,6 +47,9 @@ pub struct SessionParams {
     /// Advertised `quic::VIDEO_CAP_*` bits. Default is 10-bit + HDR; `0` when the user
     /// turned HDR off. The host still gates the upgrade behind `PUNKTFUNK_10BIT`.
     pub video_caps: u8,
+    /// The Full chroma switch as set. `video_caps` holds 4:4:4 only when HEVC 4:4:4
+    /// decodes here; a PyroWave session asks on this alone, as it decodes 4:4:4 on any GPU.
+    pub want_444: bool,
     /// This panel's HDR volume, riding `Hello::display_hdr` into the host EDID so apps
     /// tone-map here. `None` = unknown/SDR. `PUNKTFUNK_CLIENT_PEAK_NITS` synthesizes a
     /// BT.2020 volume at that peak.
@@ -474,6 +477,7 @@ struct ConnectPlan {
     pad_audio_on: bool,
     advertised_codecs: u8,
     bitrate_kbps: u32,
+    video_caps: u8,
 }
 
 fn connect_plan(params: &SessionParams) -> ConnectPlan {
@@ -504,13 +508,14 @@ fn connect_plan(params: &SessionParams) -> ConnectPlan {
         // promise what this build cannot keep.
         &params.decoder,
     ) & !params.exclude_codecs;
+    // Gated on the codec actually being advertised, so a failed probe or a retry that
+    // dropped it falls back to H.26x with the user's rate and the HEVC-gated caps.
+    let pyrowave = preferred == punktfunk_core::quic::CODEC_PYROWAVE
+        && advertised_codecs & punktfunk_core::quic::CODEC_PYROWAVE != 0;
     // PyroWave is always Automatic bitrate: a fixed kbps is ill-defined for the
     // all-intra codec (bpp is the operating point) and used to bypass the host
-    // ceiling. Send 0; the stored preset value is untouched. Gated on the codec
-    // actually being advertised, so a failed probe falls back to H.26x with the user's rate.
-    let bitrate_kbps = if preferred == punktfunk_core::quic::CODEC_PYROWAVE
-        && advertised_codecs & punktfunk_core::quic::CODEC_PYROWAVE != 0
-    {
+    // ceiling. Send 0; the stored preset value is untouched.
+    let bitrate_kbps = if pyrowave {
         if params.bitrate_kbps != 0 {
             tracing::info!(
                 stored_kbps = params.bitrate_kbps,
@@ -520,6 +525,13 @@ fn connect_plan(params: &SessionParams) -> ConnectPlan {
         0
     } else {
         params.bitrate_kbps
+    };
+    // PyroWave decodes 4:4:4 on any GPU, so it asks on the switch alone. The host pins
+    // its rate from the chroma it grants.
+    let video_caps = if pyrowave && params.want_444 {
+        params.video_caps | punktfunk_core::quic::VIDEO_CAP_444
+    } else {
+        params.video_caps
     };
     if params.exclude_codecs != 0 {
         tracing::info!(
@@ -534,6 +546,7 @@ fn connect_plan(params: &SessionParams) -> ConnectPlan {
         pad_audio_on,
         advertised_codecs,
         bitrate_kbps,
+        video_caps,
     }
 }
 
@@ -714,6 +727,7 @@ fn pump(
         pad_audio_on,
         advertised_codecs,
         bitrate_kbps,
+        video_caps,
     } = connect_plan(&params);
     // Lossless opt-in, filtered by what this box can play. `CLIENT_CAP_AUDIO_HIRES`
     // means capable *and* the user turned it on — advertising without being able to
@@ -747,7 +761,7 @@ fn pump(
         params.compositor,
         params.gamepad,
         bitrate_kbps,
-        params.video_caps,
+        video_caps,
         params.audio_channels,
         audio_rate_hz,
         audio_bits,
