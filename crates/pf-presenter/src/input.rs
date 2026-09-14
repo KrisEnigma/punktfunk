@@ -37,7 +37,9 @@ impl Act {
                 a.y,
                 ((a.w & 0xffff) << 16) | (a.h & 0xffff),
             )),
-            Act::Scroll { axis, delta } => Some((InputKind::MouseScroll, axis, delta, 0, 0)),
+            Act::Scroll { axis, delta } => {
+                Some((InputKind::MouseScroll, axis, delta, 0, SCROLL_FLAG_PRECISE))
+            }
             Act::Button { .. }
             | Act::CycleStats
             | Act::Dial { .. }

@@ -35,8 +35,10 @@ final class TouchMouseTests: XCTestCase {
         // second tap into a drag.
         XCTAssertGreaterThan(TouchMouse.Tuning.tapDragWindow, 0.1)
         XCTAssertLessThan(TouchMouse.Tuning.tapDragWindow, 0.5)
-        // A wheel notch per ~10 pt of two-finger pan (the indirect-trackpad path's feel).
-        XCTAssertGreaterThan(TouchMouse.Tuning.scrollNotchPt, 0)
+        // Two-finger pan scrolls at the indirect trackpad's precise scale.
+        XCTAssertEqual(TouchMouse.Tuning.scrollUnitsPerPt, 12)
+        // The tap slop sits inside the dial slop: a tap's jitter is still undecided.
+        XCTAssertLessThan(TouchMouse.Tuning.tapSlop, TouchMouse.Tuning.dialSlop)
     }
 }
 #endif
