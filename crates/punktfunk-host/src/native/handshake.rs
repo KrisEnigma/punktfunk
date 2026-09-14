@@ -424,7 +424,8 @@ pub(super) async fn negotiate(
         .context("client-requested mode")?;
     crate::encode::validate_refresh(hello.mode.refresh_hz).context("client-requested mode")?;
 
-    let (mut compositor, mut gamescope_route) = negotiate_compositor(source, &hello).await?;
+    let (mut compositor, mut gamescope_route) =
+        negotiate_compositor(source, &hello, conn.peer_fingerprint()).await?;
     // A joiner streams the owner's display, so it runs on the owner's compositor and route.
     if let Some(d) = joined
         .as_ref()
@@ -751,6 +752,7 @@ pub(super) async fn negotiate(
 async fn negotiate_compositor(
     source: Punktfunk1Source,
     hello: &Hello,
+    client: Option<[u8; 32]>,
 ) -> Result<(
     Option<crate::vdisplay::Compositor>,
     Option<crate::vdisplay::GamescopeRoute>,
@@ -767,7 +769,8 @@ async fn negotiate_compositor(
                 .launch
                 .as_deref()
                 .is_some_and(crate::library::launch_is_resolvable);
-            let dedicated = crate::vdisplay::wants_dedicated_game_session(has_resolvable_launch);
+            let dedicated =
+                crate::vdisplay::wants_dedicated_game_session(has_resolvable_launch, client);
             Some(
                 tokio::task::spawn_blocking(move || resolve_compositor(pref, dedicated))
                     .await
