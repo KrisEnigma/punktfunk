@@ -106,10 +106,10 @@ const NO_VIDEO_RETRY: std::time::Duration = punktfunk_core::client::NO_VIDEO_RET
 /// recovery gap can't flood the control stream.
 pub(super) struct Backstops {
     last_kf_req: Option<Instant>,
-    /// When the decoder last handed us a frame, and how many AUs it had been fed by then. Seeded
-    /// at start so a decoder that never produces a first frame — the missed opening IDR — is
-    /// caught by the same window.
-    last_output: Instant,
+    /// Start of the no-output window: the latest pass that produced a frame or owed none, and
+    /// the fed count at that pass. The window opens at the first unanswered AU, so a still
+    /// host never counts against the decoder.
+    owed_since: Instant,
     fed_at_output: u64,
     started: Instant,
     last_no_video_req: Option<Instant>,
@@ -120,7 +120,7 @@ impl Backstops {
         let now = Instant::now();
         Backstops {
             last_kf_req: None,
-            last_output: now,
+            owed_since: now,
             fed_at_output: 0,
             started: now,
             last_no_video_req: None,
@@ -147,21 +147,9 @@ impl Backstops {
         // reached it, or its reference chain is gone. Ask for a fresh one and arm the freeze, so
         // the concealment it may start emitting on the way back is withheld until a clean
         // re-anchor (`gate.poll` keeps re-asking on the deadline until one arrives).
-        let starved = !had_output
-            && fed > self.fed_at_output
-            && now.duration_since(self.last_output) >= NO_OUTPUT_PATIENCE;
-        if had_output {
-            self.last_output = now;
-            self.fed_at_output = fed;
-        } else if starved {
-            log::warn!(
-                "decode: no output for {} ms with {} AU(s) fed — requesting a re-anchor keyframe",
-                now.duration_since(self.last_output).as_millis(),
-                fed - self.fed_at_output
-            );
+        let starved = self.starved(fed, had_output, now);
+        if starved {
             gate.arm(now);
-            self.last_output = now; // one request per patience window, not per iteration
-            self.fed_at_output = fed;
         }
         // Nothing has EVER arrived: not an idle stream but a session that never got a picture —
         // the `starved` test cannot see it, because it needs `fed` to have moved.
@@ -188,6 +176,29 @@ impl Backstops {
             self.last_kf_req = Some(now);
             let _ = client.request_keyframe();
         }
+    }
+
+    /// The fed-but-silent test: an AU has gone unanswered for [`NO_OUTPUT_PATIENCE`]. Trips at
+    /// most once per window, and logs when it does.
+    fn starved(&mut self, fed: u64, had_output: bool, now: Instant) -> bool {
+        // Owing nothing restarts the window, so the first AU after a still stretch gets the full
+        // patience instead of tripping on the pause before it.
+        if had_output || fed == self.fed_at_output {
+            self.owed_since = now;
+            self.fed_at_output = fed;
+            return false;
+        }
+        if now.duration_since(self.owed_since) < NO_OUTPUT_PATIENCE {
+            return false;
+        }
+        log::warn!(
+            "decode: no output for {} ms with {} AU(s) fed — requesting a re-anchor keyframe",
+            now.duration_since(self.owed_since).as_millis(),
+            fed - self.fed_at_output
+        );
+        self.owed_since = now; // one request per patience window, not per iteration
+        self.fed_at_output = fed;
+        true
     }
 }
 
@@ -249,4 +260,32 @@ pub fn run(
         return;
     }
     run_async(client, window, shutdown, stats, opts);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Backstops, NO_OUTPUT_PATIENCE};
+    use std::time::{Duration, Instant};
+
+    /// A still host sends one frame after seconds of nothing. That frame must reach the screen:
+    /// tripping on it arms the freeze and holds the very picture that carries the change.
+    #[test]
+    fn an_au_after_a_still_host_gets_the_full_patience() {
+        let mut b = Backstops::new();
+        let t0 = Instant::now();
+        assert!(!b.starved(1, true, t0));
+        assert!(!b.starved(1, false, t0 + Duration::from_secs(2)));
+        let fed_at = t0 + Duration::from_millis(2005);
+        assert!(!b.starved(2, false, fed_at));
+        assert!(!b.starved(2, true, fed_at + Duration::from_millis(8)));
+        // A decoder that really goes silent still trips, once, after the patience.
+        let silent = fed_at + Duration::from_millis(20);
+        assert!(!b.starved(3, false, silent));
+        assert!(b.starved(4, false, silent + NO_OUTPUT_PATIENCE));
+        assert!(!b.starved(
+            5,
+            false,
+            silent + NO_OUTPUT_PATIENCE + Duration::from_millis(5)
+        ));
+    }
 }
