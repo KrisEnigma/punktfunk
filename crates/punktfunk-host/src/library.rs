@@ -85,7 +85,11 @@ pub struct GameMeta {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub publisher: Option<String>,
     /// Year of first release — the granularity metadata sources agree on.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "lenient_uint",
+        skip_serializing_if = "Option::is_none"
+    )]
     #[schema(example = 2001)]
     pub release_year: Option<u16>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -94,8 +98,23 @@ pub struct GameMeta {
     pub tags: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub region: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "lenient_uint",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub players: Option<u8>,
+}
+
+/// A number that does not fit the field (`players: 300`, `2001.5`, a string) reads as absent.
+/// Display metadata must not refuse a whole reconcile.
+fn lenient_uint<'de, D, T>(d: D) -> std::result::Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: TryFrom<u64>,
+{
+    let v = Option::<serde_json::Value>::deserialize(d)?;
+    Ok(v.and_then(|v| v.as_u64()).and_then(|n| T::try_from(n).ok()))
 }
 
 /// Presentation hint: ordinary title vs the launcher itself (Steam Big Picture,
@@ -275,6 +294,17 @@ fn collect_games() -> Vec<GameEntry> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn out_of_range_meta_numbers_read_as_absent() {
+        let m: GameMeta =
+            serde_json::from_str(r#"{"release_year":2001.5,"players":300,"publisher":"A"}"#)
+                .unwrap();
+        assert_eq!((m.release_year, m.players), (None, None));
+        assert_eq!(m.publisher.as_deref(), Some("A"));
+        let m: GameMeta = serde_json::from_str(r#"{"release_year":2001,"players":4}"#).unwrap();
+        assert_eq!((m.release_year, m.players), (Some(2001), Some(4)));
+    }
 
     fn entry(id: &str, title: &str) -> GameEntry {
         GameEntry {
