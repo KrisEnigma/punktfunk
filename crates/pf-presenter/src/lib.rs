@@ -2,7 +2,7 @@
 //! pump. Captures input on the `ui_stream` state machine and prints the unified
 //! stats window on stdout. No UI toolkit in the crate graph.
 //!
-//! Three frame paths, all letterboxed: software (`CpuPlanarFrame` — I420 planes
+//! Three frame paths, all placed by `video_fit`: software (`CpuPlanarFrame` — I420 planes
 //! staged into three R8 images, then the same CICP-driven CSC pass as hardware),
 //! Vulkan Video (the decoder's VkImage on this device), and on Linux VAAPI
 //! (NV12 dmabuf imported per-plane — `dmabuf.rs`). Missing import extensions,
@@ -38,6 +38,8 @@ pub mod overlay;
 mod present_pace;
 #[cfg(any(target_os = "linux", windows))]
 mod run;
+#[cfg(any(target_os = "linux", windows))]
+pub mod scale;
 // Pure gesture logic with no SDL or Vulkan dependency: built (and tested) on every platform.
 pub mod touch;
 #[cfg(any(target_os = "linux", windows))]

@@ -216,6 +216,7 @@ pub fn run(target: Option<&str>) -> u8 {
         match_window: crate::session_main::match_window(&settings_at_start, true),
         render_scale: settings_at_start.render_scale,
         render_scale_max_dim: punktfunk_core::render_scale::max_dimension(&settings_at_start.codec),
+        video_fit: punktfunk_core::video_fit::VideoFit::from_name(&settings_at_start.video_fit),
     };
 
     let result =

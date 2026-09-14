@@ -1,5 +1,5 @@
 //! Swapchain presenter: every decode lane writes one device-local RGBA image, then a
-//! letterboxed `vkCmdBlitImage` composite.
+//! `vkCmdBlitImage` composite placed by `punktfunk_core::video_fit`.
 //!
 //! CPU frames stage tightly-packed I420 into three R8 images (`CpuPlanes`) and share
 //! the planar CSC pass (`csc.rs`, `csc_rows`) with PyroWave. Linux dmabuf imports NV12
@@ -119,7 +119,7 @@ struct CpuPlanes {
 }
 
 /// Device-local RGBA the size of the decoded stream; every lane's CSC target before the
-/// letterboxed blit.
+/// placed blit.
 struct VideoImage {
     image: vk::Image,
     memory: vk::DeviceMemory,
@@ -164,6 +164,9 @@ pub struct Presenter {
     /// Shared device handles for the Vulkan Video decode lane. `None` if the stack cannot.
     video_export: Option<pf_client_core::video::VulkanDecodeDevice>,
     overlay_pipe: OverlayPipe,
+    /// Filtered video scale into the swapchain; its output pass shares the overlay's
+    /// framebuffers. Rebuilt with the overlay pipe on an HDR flip.
+    scale: crate::scale::ScalePass,
     /// In-flight hardware frame; released after the next fence wait.
     retired_hw: Option<Retired>,
     /// D3D11 lane: the slot last composited and its picture size, which `Redraw` blits
@@ -219,6 +222,9 @@ pub struct Presenter {
     next_present_id: u64,
     /// Last successful id-carrying present, awaiting [`Presenter::note_presented`].
     last_presented: Option<(vk::SwapchainKHR, u64)>,
+    video_fit: punktfunk_core::video_fit::VideoFit,
+    /// Extent, frame size and draw path of the last logged placement.
+    placement_logged: Option<(vk::Extent2D, u32, u32, &'static str)>,
 }
 
 impl Presenter {
@@ -420,6 +426,7 @@ impl Drop for Presenter {
                 p.destroy(&self.device);
             }
             self.overlay_pipe.destroy(&self.device);
+            self.scale.destroy(&self.device);
             for s in self.render_sems.drain(..) {
                 self.device.destroy_semaphore(s, None);
             }

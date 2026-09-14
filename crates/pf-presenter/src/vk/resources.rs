@@ -174,7 +174,7 @@ impl Presenter {
                 self.device.free_memory(v.memory, None);
             }
         }
-        // COLOR_ATTACHMENT is the CSC render target; harmless where hw is absent.
+        // COLOR_ATTACHMENT is the CSC render target; SAMPLED feeds the scale pass.
         // SAFETY: `device` is live; create-info is a local that outlives the call.
         let image = unsafe {
             self.device.create_image(
@@ -193,7 +193,8 @@ impl Presenter {
                     .usage(
                         vk::ImageUsageFlags::TRANSFER_DST
                             | vk::ImageUsageFlags::TRANSFER_SRC
-                            | vk::ImageUsageFlags::COLOR_ATTACHMENT,
+                            | vk::ImageUsageFlags::COLOR_ATTACHMENT
+                            | vk::ImageUsageFlags::SAMPLED,
                     )
                     .initial_layout(vk::ImageLayout::UNDEFINED),
                 None,

@@ -1117,6 +1117,7 @@ mod session_main {
             match_window: match_window(&settings, spec.is_none()),
             render_scale: settings.render_scale,
             render_scale_max_dim: punktfunk_core::render_scale::max_dimension(&settings.codec),
+            video_fit: punktfunk_core::video_fit::VideoFit::from_name(&settings.video_fit),
         };
 
         let outcome =

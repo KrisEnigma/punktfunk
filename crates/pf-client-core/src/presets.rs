@@ -42,6 +42,8 @@ pub struct SettingsOverlay {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub render_scale: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub video_fit: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub codec: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hdr_enabled: Option<bool>,
@@ -120,6 +122,9 @@ impl SettingsOverlay {
         }
         if let Some(v) = self.render_scale {
             s.render_scale = v;
+        }
+        if let Some(v) = &self.video_fit {
+            s.video_fit = v.clone();
         }
         if let Some(v) = &self.codec {
             s.codec = v.clone();
@@ -222,6 +227,9 @@ impl SettingsOverlay {
         if after.render_scale != before.render_scale {
             self.render_scale = Some(after.render_scale);
         }
+        if after.video_fit != before.video_fit {
+            self.video_fit = Some(after.video_fit.clone());
+        }
         if after.codec != before.codec {
             self.codec = Some(after.codec.clone());
         }
@@ -314,6 +322,7 @@ impl SettingsOverlay {
             "match_window" => self.match_window = None,
             "bitrate_kbps" => self.bitrate_kbps = None,
             "render_scale" => self.render_scale = None,
+            "video_fit" => self.video_fit = None,
             "codec" => self.codec = None,
             "hdr_enabled" => self.hdr_enabled = None,
             "enable_444" => self.enable_444 = None,
@@ -755,6 +764,29 @@ mod tests {
             o.apply(&base).audio_format,
             crate::audio_format::AUDIO_FORMAT_OPUS
         );
+    }
+
+    #[test]
+    fn video_fit_is_a_first_class_override() {
+        let base = Settings::default();
+        assert_eq!(base.video_fit, "fit", "bars by default");
+        let old_store: Settings = serde_json::from_str("{}").unwrap();
+        assert_eq!(old_store.video_fit, "fit");
+
+        let mut o = SettingsOverlay::default();
+        let before = o.apply(&base);
+        let mut after = before.clone();
+        after.video_fit = "crop".into();
+        o.absorb(&before, &after);
+        assert_eq!(o.video_fit.as_deref(), Some("crop"));
+        assert_eq!(o.apply(&base).video_fit, "crop");
+        assert!(o.extra.is_empty());
+        let text = serde_json::to_string(&o).unwrap();
+        assert!(text.contains("\"video_fit\":\"crop\""), "{text}");
+
+        assert!(o.clear("video_fit"));
+        assert!(o.is_empty());
+        assert_eq!(o.apply(&base).video_fit, "fit");
     }
 
     #[test]

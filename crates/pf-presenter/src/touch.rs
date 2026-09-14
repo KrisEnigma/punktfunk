@@ -53,8 +53,8 @@ const ACCEL_MAX: f32 = 3.0;
 const BTN_LEFT: u32 = 1;
 const BTN_RIGHT: u32 = 3;
 
-/// Letterbox mapping: host pixels plus content size. `pointer` absolute moves carry
-/// this; it matches the `MouseMoveAbs` packing the host rescales into its output.
+/// A frame pixel plus the frame size, the `MouseMoveAbs` packing the host rescales
+/// into its output. `pointer` absolute moves carry this.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Abs {
     pub x: i32,

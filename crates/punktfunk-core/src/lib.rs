@@ -60,6 +60,9 @@ pub mod stats;
 #[cfg(feature = "tls")]
 pub mod tls;
 pub mod transport;
+// Placement every client twins by hand; the C header stays out of it.
+/// cbindgen:ignore
+pub mod video_fit;
 pub mod wol;
 
 pub use config::{CompositorPref, Config, FecConfig, FecScheme, Mode, ProtocolPhase, Role};

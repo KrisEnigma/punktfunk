@@ -185,6 +185,14 @@ mod index {
             .unwrap_or(0) as u32
     }
 
+    pub fn video_fit(s: &Settings) -> u32 {
+        // Unknown values (a newer client's mode) read as Fit, as the presenter does.
+        VIDEO_FITS
+            .iter()
+            .position(|&v| v == s.video_fit)
+            .unwrap_or(0) as u32
+    }
+
     pub fn present_priority(s: &Settings) -> u32 {
         // Unknown values (a newer client's intent) read as the default, exactly as
         // `PresentPriority::resolve` treats them.
@@ -641,6 +649,9 @@ fn commit_preset(active: &StreamPreset, touched: &Touched, values: &Settings) {
     if touched.has("render_scale") {
         o.render_scale = Some(values.render_scale);
     }
+    if touched.has("video_fit") {
+        o.video_fit = Some(values.video_fit.clone());
+    }
     if touched.has("bitrate_kbps") {
         o.bitrate_kbps = Some(values.bitrate_kbps);
     }
@@ -785,6 +796,14 @@ const TOUCH_MODE_CAPTIONS: &[&str] = &[
     "Drives the cursor like a laptop trackpad — tap to click",
     "The cursor jumps to your finger — a tap clicks there",
     "Real multi-touch reaches the host — for touch-native apps",
+];
+/// `video_fit` values + labels + one-line captions, index-aligned.
+const VIDEO_FITS: &[&str] = &["fit", "crop", "stretch"];
+const VIDEO_FIT_LABELS: &[&str] = &["Fit", "Crop to fill", "Stretch to fill"];
+const VIDEO_FIT_CAPTIONS: &[&str] = &[
+    "The whole picture, with black bars when shapes differ",
+    "No bars — the picture's edges are cut off",
+    "No bars — the picture is stretched to the window",
 ];
 /// Presentation-intent values (persisted under the `present_priority` key the Apple and
 /// Android clients share) + labels + dynamic captions. Captions stay ONE line, like the
@@ -1414,6 +1433,22 @@ pub fn show_scoped(
     // The intent pair the Apple and Android clients already carry. The buffer row only
     // means anything under Smoothness, so it hides itself the rest of the time rather
     // than sitting there inert.
+    let fit_row = ChoiceRow::new(
+        &dialog,
+        inline,
+        "Picture fit",
+        VIDEO_FIT_CAPTIONS[0],
+        VIDEO_FIT_LABELS,
+    );
+    {
+        let w = fit_row.widget().clone();
+        fit_row.connect_changed(move |i| {
+            set_row_subtitle(
+                &w,
+                VIDEO_FIT_CAPTIONS[(i as usize).min(VIDEO_FITS.len() - 1)],
+            );
+        });
+    }
     let present_row = ChoiceRow::new(
         &dialog,
         inline,
@@ -1858,6 +1893,9 @@ pub fn show_scoped(
         let codec_i = index::codec(s);
         codec_row.set_selected(codec_i);
         set_row_subtitle(codec_row.widget(), codec_caption(codec_i));
+        let fit_i = index::video_fit(s);
+        fit_row.set_selected(fit_i);
+        set_row_subtitle(fit_row.widget(), VIDEO_FIT_CAPTIONS[fit_i as usize]);
         let present_i = index::present_priority(s);
         present_row.set_selected(present_i);
         set_row_subtitle(
@@ -2026,6 +2064,12 @@ pub fn show_scoped(
             index::render_scale
         );
         choice!(codec_row, "codec", o.codec.is_some(), index::codec);
+        choice!(
+            fit_row,
+            "video_fit",
+            o.video_fit.is_some(),
+            index::video_fit
+        );
         choice!(
             compositor_row,
             "compositor",
@@ -2245,6 +2289,7 @@ pub fn show_scoped(
         quality_group.add(r.widget());
     }
     let presentation_group = group("Presentation", "");
+    presentation_group.add(fit_row.widget());
     presentation_group.add(present_row.widget());
     presentation_group.add(buffer_row.widget());
     presentation_group.add(&vsync_row);
@@ -2494,6 +2539,10 @@ pub fn show_scoped(
             .0
             .to_string();
             s.codec = CODECS[(codec_row.selected() as usize).min(CODECS.len() - 1)].to_string();
+            let fit_i = (fit_row.selected() as usize).min(VIDEO_FITS.len() - 1);
+            if VIDEO_FITS.contains(&s.video_fit.as_str()) || fit_i as u32 != index::video_fit(s) {
+                s.video_fit = VIDEO_FITS[fit_i].to_string();
+            }
             s.present_priority = PRESENT_PRIORITIES
                 [(present_row.selected() as usize).min(PRESENT_PRIORITIES.len() - 1)]
             .to_string();

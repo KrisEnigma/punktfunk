@@ -33,6 +33,8 @@ pub enum RowId {
     Resolution,
     Refresh,
     RenderScale,
+    /// `trust::Settings::video_fit`: bars, crop or stretch when the stream's shape differs.
+    VideoFit,
     Bitrate,
     Compositor,
     Codec,
@@ -187,6 +189,7 @@ const TABS: [(&str, &[RowId]); 7] = [
             RowId::Resolution,
             RowId::Refresh,
             RowId::RenderScale,
+            RowId::VideoFit,
             RowId::Bitrate,
             RowId::Compositor,
         ],
@@ -292,6 +295,7 @@ const RESOLUTIONS: [(u32, u32); 6] = [
 const REFRESH: [u32; 8] = [0, 30, 60, 90, 120, 144, 165, 240];
 /// Render-scale multipliers; `1.0` = Native.
 use punktfunk_core::render_scale::PRESETS as RENDER_SCALES;
+use punktfunk_core::video_fit::VideoFit;
 /// Left/right rungs in kbps. Denser below ~20 Mbps; ceiling 2 Gbps. Off-ladder
 /// values go through the Y field rather than a longer ladder.
 const BITRATES: [u32; 30] = [
@@ -368,6 +372,11 @@ const DECODERS: [(&str, &str); 4] = [
 ];
 const AUDIO: [(u8, &str); 3] = [(2, "Stereo"), (6, "5.1"), (8, "7.1")];
 /// Shared `present_priority` key — one preset reads the same on every client.
+const VIDEO_FITS: [(&str, &str); 3] = [
+    ("fit", "Fit"),
+    ("crop", "Crop to fill"),
+    ("stretch", "Stretch to fill"),
+];
 const PRESENT_PRIORITIES: [(&str, &str); 2] =
     [("latency", "Lowest latency"), ("smooth", "Smoothness")];
 /// Depth in frames. `0` = Automatic, which resolves to 2.
@@ -961,6 +970,8 @@ pub fn row_on(id: RowId, platform: crate::platform::Platform) -> bool {
         RowId::ReduceUiResolution => &[Android],
         // A MediaCodec decoder flag; nothing else has the knob.
         RowId::LowLatency => &[Android],
+        // Only the desktop presenter places the picture through `video_fit` so far.
+        RowId::VideoFit => &[Desktop],
         // Offered wherever there is a second UI to fall back to: Android's touch home,
         // webOS's cursor shell. `row_applies` still needs `fallback_ui` from the host.
         RowId::GamepadUi | RowId::GamepadUiMode => &[Android, WebOS],
@@ -1118,6 +1129,11 @@ pub fn row_spec(id: RowId, ctx: &Ctx, presets: &[(String, String)]) -> RowSpec {
             } else {
                 format!("{}×", s.render_scale)
             },
+        ),
+        RowId::VideoFit => (
+            None,
+            "Picture fit",
+            label_for(&VIDEO_FITS, VideoFit::from_name(&s.video_fit).name()).into(),
         ),
         RowId::Bitrate => (
             None,
@@ -1367,6 +1383,10 @@ pub fn detail(id: RowId, ctx: &Ctx) -> &'static str {
         RowId::RenderScale => {
             "The host renders larger or smaller than the stream mode and this window \
              resamples — above 1× supersamples, below saves bandwidth."
+        }
+        RowId::VideoFit => {
+            "When the stream's shape differs from this window. Fit shows the whole picture \
+             with black bars, Crop to fill cuts the edges off, Stretch to fill distorts it."
         }
         RowId::Bitrate if ctx.settings.codec == "pyrowave" => {
             "PyroWave sets its own rate from the stream mode (all-intra) — a fixed bitrate \
@@ -1678,6 +1698,13 @@ pub fn adjust(id: RowId, delta: i32, wrap: bool, ctx: &mut Ctx) -> bool {
             let cur = RENDER_SCALES.iter().position(|v| *v == s.render_scale);
             step_option(cur, RENDER_SCALES.len(), delta, wrap)
                 .map(|i| s.render_scale = RENDER_SCALES[i])
+        }
+        RowId::VideoFit => {
+            let cur = VIDEO_FITS
+                .iter()
+                .position(|(v, _)| *v == VideoFit::from_name(&s.video_fit).name());
+            step_option(cur, VIDEO_FITS.len(), delta, wrap)
+                .map(|i| s.video_fit = VIDEO_FITS[i].0.to_string())
         }
         RowId::Bitrate => {
             // Inert under PyroWave (host pins the rate; see `row_spec`).
@@ -2794,6 +2821,8 @@ pub(crate) mod tests {
         assert_eq!(
             off_android,
             vec![
+                // The Android stream screen does not place through `video_fit` yet.
+                RowId::VideoFit,
                 RowId::Decoder,
                 RowId::Chroma444,
                 // TenBitSdr is NOT here: MediaCodec decodes Main10 from the SPS and the depth
@@ -2927,7 +2956,7 @@ pub(crate) mod tests {
                 seen.push(*id);
             }
         }
-        assert_eq!(seen.len(), 53, "{seen:?}");
+        assert_eq!(seen.len(), 54, "{seen:?}");
         assert!(seen.contains(&RowId::StartIn));
         assert!(seen.contains(&RowId::AdvancedStats));
         assert!(seen.contains(&RowId::FollowOsTheme));
