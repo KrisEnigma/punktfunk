@@ -207,6 +207,16 @@ enum ShotScenes {
         scenes.append(ShotScene(name: "21b-tv-settings-display", orientation: .natural, colorScheme: .dark) {
             AnyView(ShotTVTabs(tab: .settings, category: .display))
         })
+        // A focused row with its caption, About with the app's icon, and Audio's footer.
+        scenes.append(ShotScene(name: "21c-tv-settings-row-focus", orientation: .natural, colorScheme: .dark) {
+            AnyView(ShotTVSettingsRowFocus())
+        })
+        scenes.append(ShotScene(name: "21d-tv-settings-about", orientation: .natural, colorScheme: .dark) {
+            AnyView(ShotTVTabs(tab: .settings, category: .about))
+        })
+        scenes.append(ShotScene(name: "21e-tv-settings-audio", orientation: .natural, colorScheme: .dark) {
+            AnyView(ShotTVTabs(tab: .settings, category: .audio))
+        })
         // Presets on the TV: the Editing pane, and Display edited in the "4K HDR" preset.
         scenes.append(ShotScene(name: "22-tv-presets", orientation: .natural, colorScheme: .dark) {
             AnyView(ShotTVTabs(tab: .settings, scope: .preset(ShotMock.hdrPresetID), editing: true))
@@ -458,7 +468,7 @@ private struct ShotTVTabs: View {
     var body: some View {
         TabView(selection: .constant(tab)) {
             ShotHome()
-                .tabItem { Label("Hosts", systemImage: "desktopcomputer") }
+                .tabItem { TouchTab.hostsLabel }
                 .tag(TouchTab.hosts)
             ShotLibraryFilter()
                 .tabItem { Label("Library", systemImage: "square.grid.2x2") }
@@ -470,6 +480,21 @@ private struct ShotTVTabs: View {
             .tag(TouchTab.settings)
         }
         .onAppear { ShotMock.installPresets() }
+    }
+}
+
+/// Settings with focus on the pane's first row, for its lift and caption. No tab bar: a TV's
+/// focus starts on the tab bar.
+private struct ShotTVSettingsRowFocus: View {
+    var body: some View {
+        NavigationStack { settings }
+            .onAppear { ShotMock.installPresets() }
+    }
+
+    private var settings: SettingsView {
+        var view = SettingsView()
+        view.shotFocusesPane = true
+        return view
     }
 }
 #endif

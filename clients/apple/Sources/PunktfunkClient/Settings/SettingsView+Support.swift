@@ -58,14 +58,14 @@ extension SettingsView {
         assert(field.map { OverlayField.isModelled($0) } ?? true,
                "described(field:) got \(field ?? "") — not a field SettingsOverlay models")
         #if os(tvOS)
-        // A TV row carries no caption of its own: the pane shows the focused row's in one band,
+        // A TV row carries no caption of its own: its focus names the one the pane's band shows,
         // and an overridden row wears a dot and resets from its context menu.
         let overridden = field.map(isOverridden) ?? false
         return content()
             .modifier(TVOverrideMark(overridden: overridden) {
                 if let field { resetOverride(field) }
             })
-            .focusedValue(\.settingsCaption, SettingsCaption(text: caption, overridden: overridden))
+            .focused($tvCaption, equals: SettingsCaption(text: caption, overridden: overridden))
         #else
         return VStack(alignment: .leading, spacing: 5) {
             content()
@@ -262,29 +262,30 @@ extension SettingsView {
     #endif
 }
 
+extension View {
+    /// A settings footer: caption-sized in hand; near body size and brighter on a TV, where 12 pt
+    /// can't be read from the couch.
+    func settingsFooter() -> some View {
+        #if os(tvOS)
+        font(.geist(26, relativeTo: .body)).foregroundStyle(Color.primary.opacity(0.7))
+        #else
+        font(.geist(12, relativeTo: .caption)).foregroundStyle(.secondary)
+        #endif
+    }
+}
+
 #if os(tvOS)
-/// The focused settings row's caption and whether the edited preset overrides it, published by
-/// `described` for the band under the rows.
-struct SettingsCaption: Equatable {
+/// A settings row's caption and whether the edited preset overrides it: the value a row's focus
+/// binds in `described`, for the band under the rows.
+struct SettingsCaption: Hashable {
     let text: String
     let overridden: Bool
-}
-
-struct SettingsCaptionKey: FocusedValueKey {
-    typealias Value = SettingsCaption
-}
-
-extension FocusedValues {
-    var settingsCaption: SettingsCaption? {
-        get { self[SettingsCaptionKey.self] }
-        set { self[SettingsCaptionKey.self] = newValue }
-    }
 }
 
 /// The caption of whichever row has focus, in one place under the rows: per-row text does not
 /// scale to 10-foot type, and a caption per cluster can't be matched to its row.
 struct SettingsCaptionBand: View {
-    @FocusedValue(\.settingsCaption) private var caption
+    let caption: SettingsCaption?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -293,12 +294,13 @@ struct SettingsCaptionBand: View {
                     .foregroundStyle(Color.brand)
             }
             Text(caption?.text ?? "")
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Color.primary.opacity(0.8))
                 .lineLimit(3, reservesSpace: true)
         }
-        .font(.geist(24, relativeTo: .caption))
+        // Near body size and near white, to read from the couch.
+        .font(.geist(28, relativeTo: .body))
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.vertical, 24)
+        .padding(.vertical, 20)
         .animation(.easeOut(duration: 0.15), value: caption)
     }
 }
@@ -327,6 +329,61 @@ struct TVOverrideMark: ViewModifier {
         } else {
             content
         }
+    }
+}
+
+/// A TV sidebar row: bare until focused, when it lifts on a white platter as a system row does.
+/// The chosen row keeps a faint platter, so the open pane stays marked while focus is in it.
+struct TVSidebarRowStyle: ButtonStyle {
+    let chosen: Bool
+
+    func makeBody(configuration: Configuration) -> some View {
+        Row(label: configuration.label, pressed: configuration.isPressed, chosen: chosen)
+    }
+
+    private struct Row: View {
+        let label: ButtonStyleConfiguration.Label
+        let pressed: Bool
+        let chosen: Bool
+        @Environment(\.isFocused) private var focused
+
+        var body: some View {
+            label
+                .padding(.horizontal, 24)
+                .padding(.vertical, 10)
+                .frame(maxWidth: .infinity, minHeight: 66, alignment: .leading)
+                .foregroundStyle(focused ? Color.black : Color.primary)
+                .background(
+                    focused ? Color.white : Color.primary.opacity(chosen ? 0.1 : 0),
+                    in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                .scaleEffect(focused ? 1.04 : 1)
+                .shadow(color: .black.opacity(focused ? 0.35 : 0), radius: 16, y: 8)
+                .opacity(pressed ? 0.85 : 1)
+                .animation(.easeOut(duration: 0.15), value: focused)
+        }
+    }
+}
+
+extension View {
+    /// The card a TV sidebar's rows sit on, so they read as navigation beside the fields.
+    func tvSidebarCard() -> some View {
+        padding(12)
+            .background(
+                Color.primary.opacity(0.07),
+                in: RoundedRectangle(cornerRadius: 28, style: .continuous))
+    }
+
+    /// Lets a focused row lift and cast its shadow past a pane's sides, where its list would clip
+    /// it. The top and bottom still clip, so rows scroll under the edges.
+    func tvPaneRoom() -> some View {
+        scrollClipDisabled().clipShape(TVPaneClip())
+    }
+}
+
+/// A pane's bounds, widened by the room a focused row's lift and shadow take.
+private struct TVPaneClip: Shape {
+    func path(in rect: CGRect) -> Path {
+        Path(rect.insetBy(dx: -40, dy: 0))
     }
 }
 #endif

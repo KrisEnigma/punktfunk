@@ -127,6 +127,8 @@ struct SettingsView: View {
     /// Focus on a sidebar row picks what the pane shows, as on a tab bar.
     @State private var tvPane: TVPane = .category(.general)
     @FocusState private var tvFocusedPane: TVPane?
+    /// The focused row's caption: each row binds it in `described`, and the band shows it.
+    @FocusState var tvCaption: SettingsCaption?
     #endif
     /// Steam Controller 2 passthrough (device tier). Every platform shows the row, so the
     /// storage sits outside the per-platform blocks.
@@ -159,6 +161,11 @@ struct SettingsView: View {
         _settingsSelection = State(initialValue: initialCategory)
     }
     #elseif os(tvOS)
+    #if DEBUG
+    /// Shot harness: the sidebar sits out focus, so focus starts on the pane's first row.
+    var shotFocusesPane = false
+    #endif
+
     /// The app opens on General in Default settings; the screenshot harness opens a specific
     /// pane and layer.
     init(
@@ -417,15 +424,20 @@ struct SettingsView: View {
                 tvSidebar
                     .frame(width: 460)
                     .focusSection()
+                    #if DEBUG
+                    .disabled(shotFocusesPane)
+                    #endif
                 VStack(spacing: 0) {
                     tvPaneContent
-                    SettingsCaptionBand()
+                        .tvPaneRoom()
+                    SettingsCaptionBand(caption: tvCaption)
                 }
                 .frame(maxWidth: .infinity)
                 .focusSection()
             }
             .padding(.horizontal, 60))
-            .navigationTitle("Settings")
+            // The tab bar names the place, so the root carries no bar.
+            .toolbar(.hidden, for: .navigationBar)
             // Focus enters on the chosen pane, so coming back finds the category left open.
             .defaultFocus($tvFocusedPane, tvPane)
             .onChange(of: tvFocusedPane) { _, pane in
@@ -439,44 +451,49 @@ struct SettingsView: View {
     }
 
     private var tvSidebar: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            // The layer every category below edits, never off screen while you edit it.
-            Button {
-                tvPane = .editing
-            } label: {
-                HStack(spacing: 14) {
-                    scopeDot
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Editing")
-                            .font(.geist(20, relativeTo: .caption))
-                            .foregroundStyle(.secondary)
-                        Text(scopeName)
-                            .lineLimit(1)
-                    }
-                    Spacer(minLength: 16)
-                    if tvPane == .editing {
-                        Image(systemName: "chevron.forward")
-                            .foregroundStyle(.secondary)
-                    }
-                }
-            }
-            .focused($tvFocusedPane, equals: .editing)
-            .padding(.bottom, 12)
-            ForEach(SettingsCategory.allCases) { category in
+        VStack(alignment: .leading, spacing: 0) {
+            VStack(alignment: .leading, spacing: 8) {
+                // The layer every category below edits, never off screen while you edit it.
                 Button {
-                    tvPane = .category(category)
+                    tvPane = .editing
                 } label: {
-                    HStack {
-                        Label(category.title, systemImage: category.symbol)
+                    HStack(spacing: 14) {
+                        scopeDot
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Editing")
+                                .font(.geist(20, relativeTo: .caption))
+                                .foregroundStyle(.secondary)
+                            Text(scopeName)
+                                .lineLimit(1)
+                        }
                         Spacer(minLength: 16)
-                        if tvPane == .category(category) {
+                        if tvPane == .editing {
                             Image(systemName: "chevron.forward")
                                 .foregroundStyle(.secondary)
                         }
                     }
                 }
-                .focused($tvFocusedPane, equals: .category(category))
+                .buttonStyle(TVSidebarRowStyle(chosen: tvPane == .editing))
+                .focused($tvFocusedPane, equals: .editing)
+                .padding(.bottom, 12)
+                ForEach(SettingsCategory.allCases) { category in
+                    Button {
+                        tvPane = .category(category)
+                    } label: {
+                        HStack {
+                            Label(category.title, systemImage: category.symbol)
+                            Spacer(minLength: 16)
+                            if tvPane == .category(category) {
+                                Image(systemName: "chevron.forward")
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                    .buttonStyle(TVSidebarRowStyle(chosen: tvPane == .category(category)))
+                    .focused($tvFocusedPane, equals: .category(category))
+                }
             }
+            .tvSidebarCard()
             Spacer(minLength: 0)
         }
     }

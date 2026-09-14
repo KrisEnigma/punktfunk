@@ -195,27 +195,32 @@ extension HostSectionsView {
     /// On a TV the sections are a sidebar that focus picks, beside the chosen one, as in Settings.
     var tvContent: some View {
         HStack(alignment: .top, spacing: 48) {
-            VStack(alignment: .leading, spacing: 12) {
-                ForEach(HostSection.allCases) { item in
-                    Button {
-                        section = item
-                    } label: {
-                        HStack {
-                            Label(item.title, systemImage: item.symbol)
-                            Spacer(minLength: 16)
-                            if item == section {
-                                Image(systemName: "chevron.forward")
-                                    .foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 0) {
+                VStack(alignment: .leading, spacing: 8) {
+                    ForEach(HostSection.allCases) { item in
+                        Button {
+                            section = item
+                        } label: {
+                            HStack {
+                                Label(item.title, systemImage: item.symbol)
+                                Spacer(minLength: 16)
+                                if item == section {
+                                    Image(systemName: "chevron.forward")
+                                        .foregroundStyle(.secondary)
+                                }
                             }
                         }
+                        .buttonStyle(TVSidebarRowStyle(chosen: item == section))
+                        .focused($focusedSection, equals: item)
                     }
-                    .focused($focusedSection, equals: item)
                 }
+                .tvSidebarCard()
                 Spacer(minLength: 0)
             }
             .frame(width: 460)
             .focusSection()
             sectionPane
+                .tvPaneRoom()
                 .frame(maxWidth: .infinity)
                 .focusSection()
         }
