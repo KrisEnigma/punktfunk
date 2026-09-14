@@ -17,6 +17,20 @@ enum TouchTab: Hashable {
     case settings
     #endif
 }
+
+#if os(tvOS)
+extension TouchTab {
+    /// The Hosts tab's label. Its symbol draws in one layer: in its preferred two, the focused
+    /// tab's white pill left it white.
+    static var hostsLabel: some View {
+        Label {
+            Text("Hosts")
+        } icon: {
+            Image(systemName: "desktopcomputer").symbolRenderingMode(.monochrome)
+        }
+    }
+}
+#endif
 #endif
 
 struct LibraryTabView: View {
@@ -115,6 +129,10 @@ private struct ShelfFilter: View {
             // The row is rebuilt with each shelf, so bring the current chip back into view.
             .onAppear { proxy.scrollTo(current) }
         }
+        #if os(tvOS)
+        // A full-width target, so a move down from the tab bar's row lands on a chip.
+        .focusSection()
+        #endif
     }
 
     #if os(tvOS)

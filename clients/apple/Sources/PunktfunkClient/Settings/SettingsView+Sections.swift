@@ -454,8 +454,7 @@ extension SettingsView {
         } footer: {
             // The one form-level note (deliberately not repeated on every row above).
             Text("Display changes apply from the next session.")
-                .font(.geist(12, relativeTo: .caption))
-                .foregroundStyle(.secondary)
+                .settingsFooter()
         }
     }
 
@@ -866,8 +865,7 @@ extension SettingsView {
             // doc comment: the picker must never read as a promise of the resolved format.
             Text("Applies from the next session. Lossless falls back to Standard if the host or "
                 + "this device's output declines it.")
-                .font(.geist(12, relativeTo: .caption))
-                .foregroundStyle(.secondary)
+                .settingsFooter()
         }
     }
 
@@ -1039,8 +1037,7 @@ extension SettingsView {
             Text("Controllers")
         } footer: {
             Text("Applies from the next session.")
-                .font(.geist(12, relativeTo: .caption))
-                .foregroundStyle(.secondary)
+                .settingsFooter()
         }
     }
 }

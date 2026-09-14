@@ -100,6 +100,8 @@ struct LibraryView: View {
     /// Shot harness: a section layout and favorites that never touch the device's own.
     var shotLayout: String?
     var shotFavorites: [String]?
+    /// Shot harness: opens Customize.
+    var shotCustomize = false
     #endif
     /// The same, for this view's own navigation title (the sheet/cover presentations).
     @State private var collectionLabel: String?
@@ -177,16 +179,22 @@ struct LibraryView: View {
     @Environment(\.gamepadHostedInShell) private var hostedInShell
     #endif
 
+    /// The TV's Library tab: its tab bar names the place and holds the shelf's actions.
+    private var tvTab: Bool {
+        #if os(tvOS)
+        inTab
+        #else
+        false
+        #endif
+    }
+
     var body: some View {
         content
-            // In the tab the host filter names the shelf, so the title names the place.
-            .navigationTitle(inTab ? "Library" : "\(shelfTitle) — Library")
+            // In the tab the host filter names the shelf, so the title names the place; a TV's
+            // tab bar already does.
+            .modifier(LibraryTitle(title: tvTab ? nil : inTab ? "Library" : "\(shelfTitle) — Library"))
             #if os(iOS)
             .modifier(LibraryTitleMode(inTab: inTab))
-            #endif
-            #if os(tvOS)
-            // The tab bar names the place and the host row holds the actions: no bar in the tab.
-            .toolbar(inTab ? .hidden : .automatic, for: .navigationBar)
             #endif
             .toolbar {
                 #if os(macOS)
@@ -196,11 +204,13 @@ struct LibraryView: View {
                     reloadButton
                 }
                 #else
-                ToolbarItem(placement: .primaryAction) { reloadButton }
-                // The console presentation carries its own sort/view bar; the plain grid gets a
-                // menu in the bar it already has.
-                if !gamepadUIActive {
-                    ToolbarItem(placement: .primaryAction) { sortMenu }
+                if !tvTab {
+                    ToolbarItem(placement: .primaryAction) { reloadButton }
+                    // The console presentation carries its own sort/view bar; the plain grid
+                    // gets a menu in the bar it already has.
+                    if !gamepadUIActive {
+                        ToolbarItem(placement: .primaryAction) { sortMenu }
+                    }
                 }
                 #if os(iOS)
                 if inTab {
@@ -223,7 +233,12 @@ struct LibraryView: View {
             #if os(iOS) || os(macOS)
             .modifier(TitleSearch(active: inTab, text: $search))
             #endif
+            #if os(tvOS)
+            // A TV's sheet is a narrow card; the details want the screen.
+            .fullScreenCover(item: $detailGame, onDismiss: launchPendingTitle) { detailSheet($0) }
+            #else
             .sheet(item: $detailGame, onDismiss: launchPendingTitle) { detailSheet($0) }
+            #endif
             // Before the first frame: a shelf seen this run opens on its titles, any other one on
             // the (held back) spinner rather than a flash of the empty state.
             .onAppear {
@@ -269,6 +284,14 @@ struct LibraryView: View {
             // system's own (dark, on an Apple TV) chrome over a light field. Off when the gamepad
             // UI isn't drawing — the plain grid belongs to the system background.
             .gamepadPaletteInk(gamepadUIActive)
+            #endif
+            #if os(tvOS)
+            // Above the palette ink, which pins a colour scheme: pinned above a List, it kept a
+            // focused row's text white on the row's white platter.
+            .sheet(isPresented: $showCustomize) { LibrarySectionsPanel() }
+            #endif
+            #if DEBUG && os(tvOS)
+            .onAppear { if shotCustomize { showCustomize = true } }
             #endif
     }
 
@@ -483,14 +506,9 @@ struct LibraryView: View {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 26) {
                         #if os(tvOS)
-                        HStack(spacing: 24) {
-                            tabHeader
-                            Spacer(minLength: 0)
-                            tvActions
-                        }
-                        #else
-                        tabHeader
+                        tvActions
                         #endif
+                        tabHeader
                         staleNote
                         ForEach(sectionLayout.visible) { section in
                             tabSection(section, groups: groups, proxy: proxy)
@@ -569,7 +587,16 @@ struct LibraryView: View {
                 .padding(.horizontal)
                 .padding(.vertical, Self.rowLift)
             }
+            #if os(tvOS)
+            // A focused card's shadow reaches past the row; clipped, it ended in a hard edge.
+            .scrollClipDisabled()
+            #endif
         }
+        #if os(tvOS)
+        // A full-width target: a move down from anywhere, the actions at the right included,
+        // lands in the row even where its tiles don't reach.
+        .focusSection()
+        #endif
     }
 
     /// Loading, error or empty, in place of the shelf's sections. Desktops still show above it.
@@ -597,15 +624,18 @@ struct LibraryView: View {
     }
 
     /// A row's poster width: the grid's column minimum, so a row's posters match the grid's. On a
-    /// TV the posters also need room around them for the focused one to grow into.
+    /// TV a row's cards are larger than the grid's, with room around them for the focused one.
     #if os(tvOS)
-    private var rowTileWidth: CGFloat { 220 }
+    private var rowTileWidth: CGFloat { 280 }
     private static let rowSpacing: CGFloat = 40
     private static let rowLift: CGFloat = 20
+    /// The grid's gap both ways: a row's, which leaves a focused card room to grow.
+    private static let gridSpacing: CGFloat = rowSpacing
     #else
     private var rowTileWidth: CGFloat { 132 }
     private static let rowSpacing: CGFloat = 14
     private static let rowLift: CGFloat = 0
+    private static let gridSpacing: CGFloat = 18
     #endif
 
     /// The shelf the search leaves, launchers included, in the host's order.
@@ -663,23 +693,22 @@ struct LibraryView: View {
             LibrarySectionsPanel().frame(width: 320, height: 250)
         }
         #endif
-        #if os(tvOS)
-        .sheet(isPresented: $showCustomize) { LibrarySectionsPanel() }
-        #endif
     }
 
     #if os(tvOS)
-    /// Sort, Customize and Reload as round buttons at the end of the host row: the TV's tab has
-    /// no bar to hold them.
+    /// Sort, Customize and Reload over the shelf, named: the TV's tab has no navigation bar, and
+    /// focus doesn't cross from the tab bar to its row's end. A full-width target, so a move down
+    /// from the tab bar lands here.
     private var tvActions: some View {
         HStack(spacing: 24) {
             if !gamepadUIActive { sortMenu }
             customizeButton
             reloadButton
         }
-        .labelStyle(.iconOnly)
-        .buttonBorderShape(.circle)
-        .padding(.trailing)
+        .padding(.horizontal)
+        .padding(.vertical, 12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .focusSection()
     }
     #endif
 
@@ -706,7 +735,7 @@ struct LibraryView: View {
     #endif
 
     private func tiles(_ entries: [GameEntry]) -> some View {
-        LazyVGrid(columns: columns, spacing: 18) {
+        LazyVGrid(columns: columns, spacing: Self.gridSpacing) {
             ForEach(entries) { game in
                 tile(game, caption: sortCaption(game))
             }
@@ -719,7 +748,13 @@ struct LibraryView: View {
         Group {
             if let launch = launchAndRemember {
                 Button { launch(game.id) } label: { card(game, caption: caption) }
+                    // A TV's plain style draws a platter round the label, a second card round the
+                    // card; this one lifts the card itself.
+                    #if os(tvOS)
+                    .buttonStyle(TVCardButtonStyle())
+                    #else
                     .buttonStyle(.plain)
+                    #endif
             } else {
                 card(game, caption: caption)
             }
@@ -731,7 +766,7 @@ struct LibraryView: View {
     private func card(_ game: GameEntry, caption: String?) -> GameCard {
         GameCard(
             game: game, artLoader: artLoader, selected: isKeyCursor(game),
-            isRunning: running[game.id] != nil, caption: caption)
+            isRunning: running[game.id] != nil, caption: caption, host: host)
     }
 
     /// A title's own acts, one level below a host card's (design §2.5): Play / Resume leads,
@@ -771,7 +806,8 @@ struct LibraryView: View {
                 launchAfterDetails = game.id
                 detailGame = nil
             },
-            onCopyLink: LinkClipboard.isAvailable ? { copyLink(game) } : nil)
+            onCopyLink: LinkClipboard.isAvailable ? { copyLink(game) } : nil,
+            host: host)
             #if os(iOS)
             .presentationDetents([.medium, .large])
             #elseif os(macOS)
@@ -838,7 +874,7 @@ struct LibraryView: View {
         let minW: CGFloat = 130
         #endif
         // Top-aligned like the shelves: a two-line title must not lift its poster above the row.
-        return [GridItem(.adaptive(minimum: minW), spacing: 18, alignment: .top)]
+        return [GridItem(.adaptive(minimum: minW), spacing: Self.gridSpacing, alignment: .top)]
     }
 
     private func errorState(_ text: String) -> some View {
@@ -1217,41 +1253,61 @@ struct GameCard: View {
     var isRunning = false
     /// A line under the title for what the current sort or section is about.
     var caption: String? = nil
+    /// The host the title is on, named under the title with its OS mark.
+    var host: StoredHost? = nil
 
     #if os(tvOS)
+    @Environment(\.isFocused) private var focused
     private static let titleSize: CGFloat = 22
     private static let captionSize: CGFloat = 19
+    /// The card's inset round the cover, and the cover's corners: the card's less that inset, so
+    /// the two curves run parallel.
+    private static let cardPadding: CGFloat = 12
+    private static let cardRadius: CGFloat = 22
+    private static let coverRadius: CGFloat = cardRadius - cardPadding
     #else
     private static let titleSize: CGFloat = 12
     private static let captionSize: CGFloat = 11
+    private static let coverRadius: CGFloat = 10
     #endif
 
     var body: some View {
+        #if os(tvOS)
+        // One card, the cover inset on it and the title under it. Focused, it turns white as a
+        // system row does, and lifts (`TVCardButtonStyle`).
+        VStack(alignment: .leading, spacing: 12) {
+            poster
+            VStack(alignment: .leading, spacing: 4) {
+                Text(game.title)
+                    .font(.geist(Self.titleSize, .semibold, relativeTo: .caption))
+                    .lineLimit(2, reservesSpace: true)
+                hostLine
+                if let caption {
+                    Text(caption)
+                        .font(.geist(Self.captionSize, relativeTo: .caption2))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1, reservesSpace: true)
+                }
+            }
+            .foregroundStyle(focused ? Color.black : Color.primary)
+            .padding(.horizontal, 8)
+            .padding(.bottom, 4)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(Self.cardPadding)
+        .background(
+            focused ? Color.white : Color.primary.opacity(0.1),
+            in: RoundedRectangle(cornerRadius: Self.cardRadius, style: .continuous))
+        .contentShape(RoundedRectangle(cornerRadius: Self.cardRadius, style: .continuous))
+        #else
         VStack(alignment: .leading, spacing: 6) {
-            PosterImage(
-                candidates: game.art.posterCandidates, title: game.title, loader: artLoader,
-                icon: game.iconToken, frameID: game.id)
-                .aspectRatio(2.0 / 3.0, contentMode: .fit)
-                .frame(maxWidth: .infinity)
-                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                .overlay {
-                    if selected {
-                        RoundedRectangle(cornerRadius: 10, style: .continuous)
-                            .strokeBorder(.tint, lineWidth: 3)
-                    }
-                }
-                .overlay(alignment: .topLeading) {
-                    StoreBadge(label: game.storeLabel, isLauncher: game.isLauncher)
-                }
-                // Opposite corner from the store badge so the two never collide on a narrow tile.
-                .overlay(alignment: .topTrailing) {
-                    if isRunning { RunningBadge(compact: true) }
-                }
+            poster
             Text(game.title)
                 .font(.geist(Self.titleSize, relativeTo: .caption))
                 // Two lines held for every title, so every tile in a row stands the same height.
                 .lineLimit(2, reservesSpace: true)
                 .foregroundStyle(.secondary)
+            hostLine
             if let caption {
                 Text(caption)
                     .font(.geist(Self.captionSize, relativeTo: .caption2))
@@ -1259,8 +1315,84 @@ struct GameCard: View {
                     .lineLimit(1, reservesSpace: true)
             }
         }
+        #endif
+    }
+
+    /// The host the title is on: its OS mark and name.
+    @ViewBuilder private var hostLine: some View {
+        if let host {
+            HStack(spacing: 6) {
+                if let mark = osIconImage(for: host.osChain) {
+                    mark.resizable().scaledToFit()
+                        .frame(width: Self.captionSize, height: Self.captionSize)
+                }
+                Text(host.displayName)
+                    .lineLimit(1)
+            }
+            .font(.geist(Self.captionSize, relativeTo: .caption2))
+            .foregroundStyle(.secondary)
+        }
+    }
+
+    private var poster: some View {
+        PosterImage(
+            candidates: game.art.posterCandidates, title: game.title, loader: artLoader,
+            icon: game.iconToken, frameID: game.id)
+            .aspectRatio(2.0 / 3.0, contentMode: .fit)
+            .frame(maxWidth: .infinity)
+            .clipShape(RoundedRectangle(cornerRadius: Self.coverRadius, style: .continuous))
+            .overlay {
+                if selected {
+                    RoundedRectangle(cornerRadius: Self.coverRadius, style: .continuous)
+                        .strokeBorder(.tint, lineWidth: 3)
+                }
+            }
+            .overlay(alignment: .topLeading) {
+                StoreBadge(label: game.storeLabel, isLauncher: game.isLauncher)
+            }
+            // Opposite corner from the store badge so the two never collide on a narrow tile.
+            .overlay(alignment: .topTrailing) {
+                if isRunning { RunningBadge(compact: true) }
+            }
     }
 }
+
+/// The navigation title, or none.
+private struct LibraryTitle: ViewModifier {
+    let title: String?
+
+    func body(content: Content) -> some View {
+        if let title {
+            content.navigationTitle(title)
+        } else {
+            content
+        }
+    }
+}
+
+#if os(tvOS)
+/// A TV cover card's button: the card lifts under focus, with no platter round it. The card
+/// brightens its own fill (`GameCard`).
+struct TVCardButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        Lift(label: configuration.label, pressed: configuration.isPressed)
+    }
+
+    private struct Lift: View {
+        let label: ButtonStyleConfiguration.Label
+        let pressed: Bool
+        @Environment(\.isFocused) private var focused
+
+        var body: some View {
+            label
+                .scaleEffect(focused ? 1.08 : 1)
+                .shadow(color: .black.opacity(focused ? 0.45 : 0), radius: 14, y: 8)
+                .opacity(pressed ? 0.85 : 1)
+                .animation(.easeOut(duration: 0.18), value: focused)
+        }
+    }
+}
+#endif
 
 #if os(iOS) || os(macOS)
 /// The Library tab's and the Mac shelf's title search. The other presentations have none.

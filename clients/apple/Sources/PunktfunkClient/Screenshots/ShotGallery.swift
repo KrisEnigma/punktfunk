@@ -201,7 +201,7 @@ extension ShotMock {
     ) -> HostActions {
         let paired = host.pinnedSHA256 != nil
         return HostActions(
-            connect: {}, pair: {}, edit: {}, forget: {}, remove: {},
+            connect: {}, pair: {}, forget: {}, remove: {},
             browseLibrary: paired ? {} : nil, speedTest: paired ? {} : nil,
             sendLogs: paired ? {} : nil,
             wake: pinned == nil && !online && !host.wakeMacs.isEmpty ? {} : nil,
@@ -351,7 +351,8 @@ struct ShotTitleDetails: View {
         TitleDetailSheet(
             game: ShotMock.games.first { $0.id == "steam:starfall" } ?? ShotMock.games[0],
             artLoader: ShotPosterArt.source, playLabel: "Resume", isFavorite: true,
-            onPlay: {}, onCopyLink: LinkClipboard.isAvailable ? {} : nil)
+            onPlay: {}, onCopyLink: LinkClipboard.isAvailable ? {} : nil,
+            host: ShotMock.pageStore.hosts[0])
     }
 }
 

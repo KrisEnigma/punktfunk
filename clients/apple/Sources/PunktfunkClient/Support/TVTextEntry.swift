@@ -99,6 +99,8 @@ struct TVSelectionList<Tag: Hashable>: View {
     var body: some View {
         ScrollView {
             VStack(spacing: 16) {
+                TVScreenTitle(title)
+                    .padding(.bottom, 20)
                 ForEach(options, id: \.tag) { option in
                     Button {
                         selection = option.tag
@@ -118,7 +120,21 @@ struct TVSelectionList<Tag: Hashable>: View {
             .frame(maxWidth: .infinity)
             .padding(60)
         }
-        .navigationTitle(title)
+    }
+}
+
+/// A pushed TV screen's title as the first thing in its scrolling content, so it scrolls away: a
+/// navigation title stays put while the content scrolls under it.
+struct TVScreenTitle: View {
+    let text: String
+
+    init(_ text: String) { self.text = text }
+
+    var body: some View {
+        Text(text)
+            .font(.geist(48, .bold, relativeTo: .title))
+            .frame(maxWidth: .infinity)
+            .accessibilityAddTraits(.isHeader)
     }
 }
 
@@ -139,6 +155,8 @@ struct TVSelectionRow<Tag: Hashable>: View {
                     .foregroundStyle(.secondary)
             }
         }
+        // The value sits flush right, as a Toggle's does; the chevron pushed it in.
+        .navigationLinkIndicatorVisibility(.hidden)
     }
 }
 #endif

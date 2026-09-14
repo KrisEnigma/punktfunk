@@ -1,7 +1,6 @@
-// Add / edit a host: name (optional) + address + port + Wake-on-LAN MAC → a card in the grid.
-// The MAC prefills from what we already know — the host's stored MAC, or the live mDNS advert's if
-// it hasn't been learned yet — so it's usually already correct; type/paste it for a host we've
-// never seen advertise. The first actual connection still runs the trust-on-first-use prompt.
+// Add a host: name (optional) + address + port + Wake-on-LAN MAC → a card in the grid. A blank
+// MAC is learned from the host's advert; the host page edits a saved host in place. The first
+// actual connection still runs the trust-on-first-use prompt.
 
 import PunktfunkKit
 import SwiftUI
@@ -9,32 +8,17 @@ import SwiftUI
 struct AddHostSheet: View {
     @Environment(\.dismiss) private var dismiss
 
-    /// nil = add a new host; non-nil = edit this one (fields prefilled, identity/pin preserved).
-    let existing: StoredHost?
-    /// MAC(s) to offer when the host has none stored yet — the live advert's, so the field is
-    /// prefilled the moment the host is on the network, even before a connect has learned it.
-    let suggestedMacs: [String]
     let onSave: (StoredHost) -> Void
 
-    @State private var name: String
-    @State private var address: String
-    @State private var port: Int
-    @State private var mac: String
-    #if !os(tvOS)
-    /// This host's DEFAULT settings preset — what a plain click/tap uses. Empty = Default
-    /// settings (design/client-settings-profiles.md §5.2). Changing it here is the only way the
-    /// default moves; "Connect with ▸" is deliberately a one-off.
-    @State private var presetID: String
-    /// Presets pinned as their own cards for this host (§5.2a) — presentation only, and
-    /// independent of the default above.
-    @State private var pinnedIDs: Set<String>
-    @ObservedObject private var presets = PresetStore.shared
-    #endif
+    @State private var name = ""
+    @State private var address = ""
+    @State private var port = 9777
+    @State private var mac = ""
     #if !os(tvOS)
     /// Share the clipboard with this host (design clipboard-and-file-transfer.md §5.3). Off by
     /// default; honored only when the host advertises the capability at connect. Absent on tvOS,
     /// which has no pasteboard to share.
-    @State private var clipboardSync: Bool
+    @State private var clipboardSync = false
     #endif
     #if os(tvOS)
     private enum EditField: String, Identifiable {
@@ -59,8 +43,6 @@ struct AddHostSheet: View {
         #endif
     }
 
-    private var isEditing: Bool { existing != nil }
-    private var actionTitle: String { isEditing ? "Save" : "Add Host" }
     /// One rule for every host form (see `HostFormDraft`): a blank port means the default, an
     /// out-of-range one is refused rather than silently clamped, and a pasted `address:port` is
     /// split rather than stored whole.
@@ -68,24 +50,6 @@ struct AddHostSheet: View {
         HostFormDraft(name: name, address: address, port: String(port))
     }
     private var canSave: Bool { draft.canSave }
-
-    init(existing: StoredHost? = nil, suggestedMacs: [String] = [], onSave: @escaping (StoredHost) -> Void) {
-        self.existing = existing
-        self.suggestedMacs = suggestedMacs
-        self.onSave = onSave
-        _name = State(initialValue: existing?.name ?? "")
-        _address = State(initialValue: existing?.address ?? "")
-        _port = State(initialValue: Int(existing?.port ?? 9777))
-        let stored = existing?.macAddresses ?? []
-        _mac = State(initialValue: (stored.isEmpty ? suggestedMacs : stored).joined(separator: ", "))
-        #if !os(tvOS)
-        _clipboardSync = State(initialValue: existing?.clipboardSync ?? false)
-        #endif
-        #if !os(tvOS)
-        _presetID = State(initialValue: existing?.presetID ?? "")
-        _pinnedIDs = State(initialValue: Set(existing?.pinnedPresetIDs ?? []))
-        #endif
-    }
 
     var body: some View {
         #if os(tvOS)
@@ -100,13 +64,13 @@ struct AddHostSheet: View {
                 placeholder: "For Wake-on-LAN, optional") { editingField = .mac }
             HStack(spacing: 32) {
                 Button("Cancel", role: .cancel) { dismiss() }
-                Button(actionTitle) { save() }.disabled(!canSave)
+                Button("Add Host") { save() }.disabled(!canSave)
             }
             .padding(.top, 12)
         }
         .frame(maxWidth: 1000)
         .padding(60)
-        .navigationTitle(isEditing ? "Edit Host" : "Add Host")
+        .navigationTitle("Add Host")
         .fullScreenCover(item: $editingField) { field in
             switch field {
             case .name:
@@ -153,15 +117,13 @@ struct AddHostSheet: View {
                 #if !os(tvOS)
                 Toggle("Share clipboard with this host", isOn: $clipboardSync)
                 #endif
-                presetRows
             }
             #if !os(tvOS)
             .formStyle(.grouped)
             #endif
             #if os(iOS)
-            // As before: the sheet is sized to its content, so there is nothing to scroll. Only
-            // the edit sheet's preset rows can outgrow that, and only they turn it back on.
-            .scrollDisabled(!showsPresetRows)
+            // The sheet is sized to its content, so there is nothing to scroll.
+            .scrollDisabled(true)
             #endif
             #if os(macOS)
             // macOS ONLY: the grouped form's default system text is oversized next to the app's
@@ -176,7 +138,7 @@ struct AddHostSheet: View {
                 Button("Cancel", role: .cancel) { dismiss() }
                     .keyboardShortcut(.cancelAction)
                 Spacer()
-                Button(actionTitle) { save() }
+                Button("Add Host") { save() }
                     .glassProminentButtonStyle()
                     .keyboardShortcut(.defaultAction)
                     .disabled(!canSave)
@@ -184,7 +146,7 @@ struct AddHostSheet: View {
             .padding(16)
             #else
             Button { save() } label: {
-                Text(actionTitle).frame(maxWidth: .infinity)
+                Text("Add Host").frame(maxWidth: .infinity)
             }
                 .glassProminentButtonStyle()
                 .controlSize(.large)
@@ -194,8 +156,8 @@ struct AddHostSheet: View {
             #endif
         }
         #if os(iOS)
-        // Sized to its content (see `sheetHeight`).
-        .presentationDetents([.height(sheetHeight)])
+        // Sized to its content: four fields, the clipboard toggle and the action row.
+        .presentationDetents([.height(392 + 44)])
         .presentationDragIndicator(.visible)
         #endif
         #if os(macOS)
@@ -205,102 +167,14 @@ struct AddHostSheet: View {
         #endif
     }
 
-    #if os(iOS)
-    /// Four fields, the clipboard toggle, and the action row. The edit sheet's preset rows are
-    /// the only thing that can outgrow it, and they say by how much; a single fixed number is what
-    /// clipped them.
-    private var sheetHeight: CGFloat {
-        var height: CGFloat = 392 + 44 // the fields and action row, plus the clipboard toggle
-        if showsPresetRows {
-            height += 116 // the Preset picker and its footnote
-            height += 96 + CGFloat(presets.presets.count) * 44 // the pins, their header + footer
-        }
-        return height
-    }
-    #endif
-
-    /// Whether this sheet shows the per-host preset rows at all.
-    ///
-    /// Only when EDITING, and only once presets exist. Adding a host is about reaching it — the
-    /// address, and whether we can wake it; which settings it streams with is a decision for the
-    /// host you already have, and stacking it onto the add flow made the first thing a new user
-    /// sees a longer form than the one they came for. Editing is one context-menu item away.
-    private var showsPresetRows: Bool {
-        #if os(tvOS)
-        return false
-        #else
-        return isEditing && !presets.presets.isEmpty
-        #endif
-    }
-
-    /// The per-host preset rows: which preset this host uses by default, and which extra ones
-    /// get their own card in the grid.
-    ///
-    /// Two plain sections, no disclosure. A collapsed group had to animate its own height AND the
-    /// sheet's, and got both wrong; with a preset or three these are a couple of rows, and rows
-    /// that are simply there can't be clipped or fail to expand.
-    @ViewBuilder private var presetRows: some View {
-        #if !os(tvOS)
-        if showsPresetRows {
-            Section {
-                Picker("Preset", selection: $presetID) {
-                    Text("Default settings").tag("")
-                    ForEach(presets.presets) { preset in
-                        Text(preset.name).tag(preset.id)
-                    }
-                    // A binding whose preset was deleted resolves as Default settings anyway;
-                    // saying so beats an empty picker, and saving cleans the field up.
-                    if !presetID.isEmpty, presets.preset(id: presetID) == nil {
-                        Text("Default settings (preset deleted)").tag(presetID)
-                    }
-                }
-            } footer: {
-                Text("The settings a plain tap on this host streams with.")
-                    .font(.geist(12, relativeTo: .caption))
-                    .foregroundStyle(.secondary)
-            }
-            Section {
-                ForEach(presets.presets) { preset in
-                    Toggle(preset.name, isOn: Binding(
-                        get: { pinnedIDs.contains(preset.id) },
-                        set: { on in
-                            if on {
-                                pinnedIDs.insert(preset.id)
-                            } else {
-                                pinnedIDs.remove(preset.id)
-                            }
-                        }))
-                }
-            } header: {
-                Text("Pinned cards")
-            } footer: {
-                Text("A pinned preset gets its own card next to this host — one tap, no menu.")
-                    .font(.geist(12, relativeTo: .caption))
-                    .foregroundStyle(.secondary)
-            }
-        }
-        #endif
-    }
-
     private func save() {
-        var host = existing ?? StoredHost(name: "", address: "")
+        var host = StoredHost(name: "", address: "")
         draft.apply(to: &host)
         host.macAddresses = Self.parseMacs(mac)
         #if !os(tvOS)
         // nil when off: the key stays absent from the saved JSON (forward-compat, and "never
         // opted in" and "opted out" read the same — off).
         host.clipboardSync = clipboardSync ? true : nil
-        #endif
-        #if !os(tvOS)
-        // nil rather than "" for the same forward-compat reason, and a dangling binding is
-        // cleaned up on this save (§6) instead of lingering as a stale id forever.
-        host.presetID = presets.preset(id: presetID) == nil ? nil : presetID
-        // Keep the stored ORDER (it is card order) and drop what this sheet unpinned; anything
-        // newly ticked goes on the end.
-        let kept = (host.pinnedPresetIDs ?? []).filter { pinnedIDs.contains($0) }
-        let added = pinnedIDs.filter { !kept.contains($0) }.sorted()
-        let pins = kept + added
-        host.pinnedPresetIDs = pins.isEmpty ? nil : pins
         #endif
         onSave(host)
         dismiss()

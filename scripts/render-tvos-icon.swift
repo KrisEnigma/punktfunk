@@ -131,6 +131,15 @@ for (stack, sizes) in [
     }
 }
 
+// About's `AboutAppIcon`, beside the brand assets, is the small stack flattened: the icon the
+// Home screen shows at rest, so the two can't drift apart.
+for (suffix, w, h) in [("@1x", 400, 240), ("@2x", 800, 480)] {
+    write(png(w, h) { ctx in
+        gradient(ctx, h)
+        for (_, art) in layers.reversed() { place(ctx, art, w, h, fraction: 0.92) }
+    }, "../AboutAppIcon.imageset/about-icon\(suffix).png")
+}
+
 // Top shelf images are flat, so they take the whole mark with its refraction between groups.
 let mark = matte([0, 1, 2])
 for (path, w, h) in [

@@ -112,7 +112,10 @@ struct HostDetailView: View {
         #if os(macOS)
         .formStyle(.grouped)
         #endif
+        // A TV shows this only inside its page of sections, which names the host over its sidebar.
+        #if !os(tvOS)
         .navigationTitle(pageTitle(host))
+        #endif
         #if os(iOS)
         .navigationBarTitleDisplayMode(.inline)
         #endif
@@ -120,6 +123,7 @@ struct HostDetailView: View {
 
     private func shows(_ section: HostSection) -> Bool { only == nil || only == section }
 
+    #if !os(tvOS)
     /// The host's name, except in the iPad's sheet of sections: its sidebar names the host, so the
     /// pane names its section.
     private func pageTitle(_ host: StoredHost) -> String {
@@ -128,6 +132,7 @@ struct HostDetailView: View {
         #endif
         return host.displayName
     }
+    #endif
 
     private func header(_ host: StoredHost, _ status: HostStatus) -> some View {
         let m = CardMetrics.current
@@ -136,9 +141,12 @@ struct HostDetailView: View {
                 monogram(host.displayName), osChain: host.osChain, m: m, connecting: false,
                 filled: host.pinnedSHA256 != nil)
             VStack(alignment: .leading, spacing: 4) {
-                Text(host.displayName)
-                    .font(.geist(m.name + 2, .bold, relativeTo: .title3))
-                    .lineLimit(2)
+                // A page of sections names the host in its sidebar, window title or TV heading.
+                if only == nil {
+                    Text(host.displayName)
+                        .font(.geist(m.name + 2, .bold, relativeTo: .title3))
+                        .lineLimit(2)
+                }
                 HostStatusLine(status: status, size: m.meta)
             }
         }
@@ -185,18 +193,22 @@ struct HostDetailView: View {
         }
     }
 
+    /// How to reach the host, edited in place. The speed test's button is the iPhone's: a page of
+    /// sections has a Speed Test section instead.
     private func connectionSection(_ host: StoredHost, _ a: HostActions) -> some View {
         Section {
-            LabeledContent("Address", value: "\(host.address):\(String(host.port))")
+            HostConnectionFields(host: host) { store.update($0) }
             LabeledContent("Management port", value: String(host.effectiveMgmtPort))
-            LabeledContent(
-                "Wake-on-LAN",
-                value: host.wakeMacs.isEmpty ? "Not learned yet" : host.wakeMacs.joined(separator: ", "))
             #if !os(tvOS)
-            LabeledContent("Clipboard", value: host.clipboardSync == true ? "Shared" : "Off")
+            Toggle("Share clipboard with this host", isOn: Binding(
+                get: { host.clipboardSync == true },
+                set: { on in
+                    var shared = host
+                    shared.clipboardSync = on ? true : nil // nil keeps the key out of the JSON
+                    store.update(shared)
+                }))
             #endif
-            Button("Edit…", systemImage: "pencil", action: a.edit)
-            if let speedTest = a.speedTest {
+            if only == nil, let speedTest = a.speedTest {
                 Button("Test Network Speed…", systemImage: "speedometer", action: speedTest)
             }
             if let copyLink = a.copyLink {
@@ -205,7 +217,7 @@ struct HostDetailView: View {
         } header: {
             Text("Connection")
         } footer: {
-            if host.pinnedSHA256 == nil {
+            if only == nil, host.pinnedSHA256 == nil {
                 Text("Pair first to test the network speed.")
             }
         }
@@ -269,5 +281,135 @@ struct HostDetailView: View {
                     .foregroundStyle(.secondary)
             }
         }
+    }
+}
+
+/// The Connection section's fields under the host form's rules: a field saves when focus leaves it
+/// or on Return, a TV row when its keyboard closes. What the rules refuse snaps back to the record.
+private struct HostConnectionFields: View {
+    let host: StoredHost
+    let onSave: (StoredHost) -> Void
+    @State private var name: String
+    @State private var address: String
+    @State private var port: String
+    @State private var macs: String
+    #if os(tvOS)
+    @State private var editing: Field?
+    #else
+    @FocusState private var focused: Field?
+    #endif
+
+    private enum Field: String, Identifiable {
+        case name, address, port, macs
+
+        var id: Self { self }
+
+        #if os(tvOS)
+        /// The TV keyboard's prompt.
+        var prompt: String {
+            switch self {
+            case .name: "Name (optional, e.g. Living Room)"
+            case .address: "IP or hostname"
+            case .port: "Port"
+            case .macs: "MAC address(es), comma-separated — aa:bb:cc:dd:ee:ff"
+            }
+        }
+        #endif
+    }
+
+    init(host: StoredHost, onSave: @escaping (StoredHost) -> Void) {
+        self.host = host
+        self.onSave = onSave
+        _name = State(initialValue: host.name)
+        _address = State(initialValue: host.address)
+        _port = State(initialValue: String(host.port))
+        _macs = State(initialValue: host.wakeMacs.joined(separator: ", "))
+    }
+
+    var body: some View {
+        #if os(tvOS)
+        TVFieldRow(label: "Name", value: name, placeholder: "Optional") { editing = .name }
+            .fullScreenCover(item: $editing) { field in
+                TVTextEntry(
+                    title: field.prompt, text: text(field),
+                    keyboardType: field == .port ? .numberPad : .default
+                ) { value in
+                    set(field, value)
+                    editing = nil
+                    save()
+                }
+            }
+            .onChange(of: host) { _, saved in if editing == nil { load(saved) } }
+        TVFieldRow(label: "Address", value: address, placeholder: "") { editing = .address }
+        TVFieldRow(label: "Port", value: port, placeholder: "") { editing = .port }
+        TVFieldRow(label: "Wake-on-LAN", value: macs, placeholder: "Not learned yet") {
+            editing = .macs
+        }
+        #else
+        row("Name", .name, $name, prompt: "Optional")
+            .onChange(of: host) { _, saved in if focused == nil { load(saved) } }
+            .onChange(of: focused) { save() }
+        row("Address", .address, $address, prompt: "IP or hostname")
+        row("Port", .port, $port, prompt: String(HostFormDraft.defaultPort))
+        row("Wake-on-LAN", .macs, $macs, prompt: "Not learned yet")
+        #endif
+    }
+
+    #if os(tvOS)
+    private func text(_ field: Field) -> String {
+        switch field {
+        case .name: name
+        case .address: address
+        case .port: port
+        case .macs: macs
+        }
+    }
+
+    private func set(_ field: Field, _ value: String) {
+        let value = value.trimmingCharacters(in: .whitespaces)
+        switch field {
+        case .name: name = value
+        case .address: address = value
+        case .port: port = value
+        case .macs: macs = value
+        }
+    }
+    #else
+    /// A labelled field with its value trailing, as in a settings row.
+    private func row(
+        _ label: String, _ field: Field, _ text: Binding<String>, prompt: String
+    ) -> some View {
+        LabeledContent(label) {
+            TextField(label, text: text, prompt: Text(prompt))
+                .labelsHidden()
+                .multilineTextAlignment(.trailing)
+                .autocorrectionDisabled()
+                #if os(iOS)
+                .textInputAutocapitalization(field == .name ? .words : .never)
+                .keyboardType(field == .port ? .numberPad : .default)
+                #endif
+                .focused($focused, equals: field)
+                .onSubmit(save)
+        }
+    }
+    #endif
+
+    /// Writes what the rules take (name, address and port together, the MACs on their own), then
+    /// shows the record as saved: a pasted `address:port` split, the MACs normalised.
+    private func save() {
+        var updated = host
+        let draft = HostFormDraft(name: name, address: address, port: port)
+        if draft.canSave { draft.apply(to: &updated) }
+        let parsed = AddHostSheet.parseMacs(macs)
+        if parsed != nil || macs.allSatisfy(\.isWhitespace) { updated.macAddresses = parsed }
+        if updated != host { onSave(updated) }
+        load(updated)
+    }
+
+    private func load(_ saved: StoredHost) {
+        name = saved.name
+        address = saved.address
+        port = String(saved.port)
+        macs = saved.wakeMacs.joined(separator: ", ")
     }
 }

@@ -362,9 +362,15 @@ enum PlayStatsText {
         return relativeDate.localizedString(for: date, relativeTo: Date())
     }
 
-    /// `14 hr`. Under a minute says nothing: a launch that never really ran is not play time.
-    static func playTime(_ stats: GameStats?) -> String? {
-        guard let ms = stats?.playTimeMs, ms >= 60_000 else { return nil }
+    /// `14 hr` in all.
+    static func playTime(_ stats: GameStats?) -> String? { duration(stats?.playTimeMs) }
+
+    /// `1 hr`: the latest run, still growing while it runs.
+    static func lastSession(_ stats: GameStats?) -> String? { duration(stats?.lastRunMs) }
+
+    /// Under a minute says nothing: a launch that never really ran is not play time.
+    private static func duration(_ ms: UInt64?) -> String? {
+        guard let ms, ms >= 60_000 else { return nil }
         return Duration.milliseconds(Int64(clamping: ms)).formatted(
             .units(allowed: [.hours, .minutes], width: .abbreviated, maximumUnitCount: 1))
     }
