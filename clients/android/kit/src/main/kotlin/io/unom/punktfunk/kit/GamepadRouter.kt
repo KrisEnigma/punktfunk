@@ -345,6 +345,24 @@ class GamepadRouter(
     }
 
     /**
+     * An L2/R2 key edge. True when [event]'s pad has no trigger axis
+     * ([Gamepad.PadMap.digitalTriggers]), so the key IS its trigger; false leaves the event alone.
+     */
+    fun onTriggerKey(event: KeyEvent, keyCode: Int): Boolean {
+        val left = when (keyCode) {
+            KeyEvent.KEYCODE_BUTTON_L2 -> true
+            KeyEvent.KEYCODE_BUTTON_R2 -> false
+            else -> return false
+        }
+        val dev = event.device ?: return false
+        // Asked before [slotFor], so a false answer opens no slot.
+        if (!Gamepad.padMap(dev).digitalTriggers) return false
+        val slot = slotFor(dev) ?: return false
+        if (!ringOpen && forwarding) slot.mapper.onTriggerKey(left, event.action == KeyEvent.ACTION_DOWN)
+        return true
+    }
+
+    /**
      * Is this bit's WIRE SEND kept with this device, though the bit is otherwise tracked normally?
      *
      * Exactly one is: a real mute button ([Slot.hasMuteButton]) under the "local" [systemForward]

@@ -3,6 +3,8 @@ package io.unom.punktfunk.kit
 import android.view.KeyEvent
 import android.view.MotionEvent
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -199,6 +201,23 @@ class PadButtonsTest {
         // Same when there is no Rx/Ry to fall back to in the first place.
         val none = Gamepad.padMap(Gamepad.PadButtons.GENERIC_SONY, false, hasRxRy = false, restsNegative = false)
         assertEquals(Gamepad.AXIS_NONE, none.leftTrigger)
+    }
+
+    /**
+     * A pad with no named trigger and no Rx/Ry — a Switch Pro under AOSP's layout, ZL/ZR as
+     * BUTTON_L2/R2 — takes its triggers from those keys. A pad with a trigger axis never does,
+     * or the key edge and the axis would fight over one wire value.
+     */
+    @Test
+    fun `a pad with no trigger axis takes its triggers from the L2 and R2 keys`() {
+        for (p in Gamepad.PadButtons.entries) {
+            fun digital(named: Boolean, rxRy: Boolean) =
+                Gamepad.padMap(p, namedTriggers = named, hasRxRy = rxRy, restsNegative = false).digitalTriggers
+            assertTrue(digital(named = false, rxRy = false))
+            assertFalse(digital(named = false, rxRy = true))
+            assertFalse(digital(named = true, rxRy = false))
+            assertFalse(digital(named = true, rxRy = true))
+        }
     }
 
     /**

@@ -694,7 +694,10 @@ class MainActivity : ComponentActivity() {
             // no BUTTON_SELECT scancode delivers its Select: see [Gamepad.padButtonBit], which is
             // why this asks it rather than `buttonBit`).
             if (fromPad(event)) {
-                val bit = Gamepad.padButtonBit(Gamepad.padKeyCode(event), event.flags)
+                val key = Gamepad.padKeyCode(event)
+                val bit = Gamepad.padButtonBit(key, event.flags)
+                // A pad with no trigger axis sends its triggers as L2/R2 keys.
+                if (bit == 0 && gamepadRouter?.onTriggerKey(event, key) == true) return true
                 if (bit != 0) {
                     // The router forwards the bit on this device's own wire pad index and tracks held
                     // state per pad. The emergency-exit chord (Select + Start + L1 + R1) is handled
