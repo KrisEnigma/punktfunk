@@ -200,6 +200,13 @@ enum ShotScenes {
         scenes.append(ShotScene(name: "20b-tv-library-tab", orientation: .natural, colorScheme: .dark) {
             AnyView(ShotTVTabs(tab: .library))
         })
+        // The settings sidebar on General and on Display.
+        scenes.append(ShotScene(name: "21-tv-settings-general", orientation: .natural, colorScheme: .dark) {
+            AnyView(ShotTVTabs(tab: .settings))
+        })
+        scenes.append(ShotScene(name: "21b-tv-settings-display", orientation: .natural, colorScheme: .dark) {
+            AnyView(ShotTVTabs(tab: .settings, category: .display))
+        })
         #endif
         scenes.append(ShotScene(name: "10-edithost", orientation: .natural, colorScheme: .dark) {
             AnyView(ShotEditHost())
@@ -404,6 +411,7 @@ private struct ShotHome: View {
 /// The TV's tab bar as the app draws it, over the mock hosts and catalog.
 private struct ShotTVTabs: View {
     let tab: TouchTab
+    var category: SettingsCategory = .general
 
     var body: some View {
         TabView(selection: .constant(tab)) {
@@ -413,7 +421,7 @@ private struct ShotTVTabs: View {
             ShotLibraryFilter()
                 .tabItem { Label("Library", systemImage: "square.grid.2x2") }
                 .tag(TouchTab.library)
-            NavigationStack { SettingsView() }
+            NavigationStack { SettingsView(initialCategory: category) }
                 .tabItem { Label("Settings", systemImage: "gearshape") }
                 .tag(TouchTab.settings)
         }
