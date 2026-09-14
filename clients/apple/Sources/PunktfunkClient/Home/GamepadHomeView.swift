@@ -139,6 +139,10 @@ struct GamepadHomeView: View {
     @State private var showAddHost = false
     /// The card whose options menu is up (UP on a saved tile) — see GamepadHostOptionsView.
     @State private var hostOptionsTarget: HostOptionsTarget?
+    #if os(tvOS)
+    /// Focus on a line above or below the strip — see `edgeCatcher`.
+    @FocusState private var edgeCatcherFocused: VerticalEdge?
+    #endif
     /// The host being edited. Set from the options menu, which closes itself as it opens this so
     /// the two are never stacked — depth stays ≤ 1, which is what `GamepadScreen` assumes.
     @State private var editTarget: StoredHost?
@@ -239,6 +243,14 @@ struct GamepadHomeView: View {
         // double-firing just sets the same Bool twice.
         #if os(tvOS)
         .onPlayPauseCommand { if homeOwnsController { showSettings = true } }
+        .onChange(of: edgeCatcherFocused) { _, edge in
+            // A pad's dpad up also reaches the poll, so the menu may already be opening.
+            switch edge {
+            case .top: if hostOptionsTarget == nil { openOptionsForSelected() }
+            case .bottom: if libraryTarget == nil { openLibraryForSelected() }
+            case nil: break
+            }
+        }
         #endif
         // The settings / add-host screens take over the controller (the carousel's `isActive`
         // gate above). macOS has no fullScreenCover — they are generously sized sheets over the
@@ -520,7 +532,31 @@ struct GamepadHomeView: View {
             hostCard(tile, size: CGSize(width: cardWidth, height: cardHeight), entrance: entrance)
         }
         .frame(height: cardHeight + 40)
+        #if os(tvOS)
+        .overlay(alignment: .top) {
+            if case .saved = selection { edgeCatcher(.top) }
+        }
+        .overlay(alignment: .bottom) {
+            if tiles.first(where: { $0.id == selection })?.hasLibrary == true { edgeCatcher(.bottom) }
+        }
+        #endif
     }
+
+    #if os(tvOS)
+    /// A Siri Remote never reaches the poll's UP or Y, and no card sits above or below the strip,
+    /// so a swipe or click lands on this line instead: up opens the card's menu, down its library.
+    /// Either takes the controller, which unmounts the line; the carousel seats focus back on its
+    /// card when the screen closes.
+    @ViewBuilder private func edgeCatcher(_ edge: VerticalEdge) -> some View {
+        if homeOwnsController {
+            Color.clear
+                .frame(maxWidth: .infinity)
+                .frame(height: 1)
+                .focusable()
+                .focused($edgeCatcherFocused, equals: edge)
+        }
+    }
+    #endif
 
     /// The host tile plus its focus treatment. Every continuous visual reads the scroll view's own
     /// per-frame `phase` (real distance-from-centered), so the look always matches what's on screen
@@ -566,8 +602,10 @@ struct GamepadHomeView: View {
             text: action ?? connectVerb(for: selected),
             action: { tiles.first { $0.id == selection }?.activate() })]
         if selected?.hasLibrary == true {
+            // A Siri Remote has no Y; down reaches the library there (see `edgeCatcher`).
+            let y = buttonGlyph(\.buttonY, fallback: "y.circle")
             hints.append(.init(
-                glyph: buttonGlyph(\.buttonY, fallback: "y.circle"), text: "Library",
+                glyph: y.isEmpty ? "arrow.down" : y, text: "Library",
                 action: { openLibraryForSelected() }))
         }
         // Only a saved card has a menu, so the cell appears only where the press does something —

@@ -5,10 +5,9 @@
 // focus cursor, controller polling, haptics, and keeping the focused row scrolled into view.
 //
 // On tvOS the rows are focusable Buttons and the NATIVE FOCUS ENGINE replaces the poll entirely
-// (Siri Remote and pads both drive it: up/down moves focus, select activates, Menu — via
-// onExitCommand — backs out). Left/right value-adjust isn't wired there; select cycles a value
-// forward exactly like A does elsewhere, the standard tvOS settings interaction. The iOS/macOS
-// poll-driven behavior is untouched by the tvOS mode.
+// (Siri Remote and pads both drive it: up/down moves focus, left/right lands on a catcher beside
+// the row that steps its value, select activates, Menu — via onExitCommand — backs out). The
+// iOS/macOS poll-driven behavior is untouched by the tvOS mode.
 //
 // Unlike the carousel there is no snapping and no `.scrollPosition` two-way binding to fight: the
 // cursor is plainly authoritative, the scroll view just chases it with `scrollTo`. Touch stays a
@@ -42,18 +41,21 @@ struct GamepadMenuList<Item: Identifiable, Row: View>: View where Item.ID: Hasha
     /// Whether this list currently owns controller input — same handoff contract as
     /// GamepadCarousel's `isActive` (a covered screen must stop polling the shared pad).
     var isActive: Bool = true
+    /// tvOS: real focus sits outside the list (the settings tab strip), so a list change leaves it
+    /// there instead of pulling it back onto a row.
+    var focusOutside = false
     @ViewBuilder let row: (Item, _ focused: Bool) -> Row
 
     @State private var input = GamepadMenuInput(manager: .shared)
     @State private var haptics = MenuHaptics(manager: .shared)
     #if os(tvOS)
-    /// tvOS: the focus engine is the navigation authority for UP/DOWN — `cursor` chases this, so
-    /// the caller's `focused` row styling always matches real system focus. LEFT/RIGHT adjust
-    /// comes from the POLL (see `wire`), never from `.onMoveCommand`: the command stream is
-    /// 4-way with no axis data (diagonal scroll wobble buckets into left/right), and its
-    /// interception of up/down proved INPUT-SOURCE-DEPENDENT on hardware — keyboard arrows were
-    /// intercepted but a pad's dpad was not, so programmatic stepping double-moved every press.
+    /// tvOS: the focus engine is the navigation authority — `cursor` chases this, so the caller's
+    /// `focused` row styling always matches real system focus. Never `.onMoveCommand`: its
+    /// interception proved INPUT-SOURCE-DEPENDENT on hardware — keyboard arrows were intercepted
+    /// but a pad's dpad was not, so programmatic stepping double-moved every press.
     @FocusState private var focusedID: Item.ID?
+    /// Which side catcher holds focus (-1 left, +1 right) — see `adjustCatcher`.
+    @FocusState private var adjustCatch: Int?
     #endif
     /// Authoritative focus cursor (index into `items`).
     @State private var cursor = 0
@@ -75,11 +77,15 @@ struct GamepadMenuList<Item: Identifiable, Row: View>: View where Item.ID: Hasha
                         // activates (`tap` keeps the cursor in step before firing). The row's
                         // own `focused` styling is the focus treatment — the bare style adds
                         // no system chrome on top of it.
-                        Button { tap(idx) } label: {
-                            row(item, focusedID == item.id)
+                        HStack(spacing: 0) {
+                            adjustCatcher(-1, at: idx)
+                            Button { tap(idx) } label: {
+                                row(item, focusedID == item.id || (adjustCatch != nil && idx == cursor))
+                            }
+                            .buttonStyle(ConsoleBareButtonStyle())
+                            .focused($focusedID, equals: item.id)
+                            adjustCatcher(1, at: idx)
                         }
-                        .buttonStyle(ConsoleBareButtonStyle())
-                        .focused($focusedID, equals: item.id)
                         .id(item.id)
                         #else
                         row(item, idx == cursor && isActive)
@@ -111,6 +117,11 @@ struct GamepadMenuList<Item: Identifiable, Row: View>: View where Item.ID: Hasha
             cursor = idx
             focusID = id
             haptics.move()
+        }
+        .onChange(of: adjustCatch) { _, side in
+            guard let side else { return }
+            adjust(by: side)
+            if cursor < items.count { focusedID = items[cursor].id }
         }
         .defaultFocus($focusedID, items.first?.id)
         .onExitCommand { onBack?() }
@@ -163,19 +174,22 @@ struct GamepadMenuList<Item: Identifiable, Row: View>: View where Item.ID: Hasha
 
     // MARK: - Input wiring
 
+    #if os(tvOS)
+    /// A one-point focus target beside the cursor's row. Left/right moves focus onto it, which
+    /// steps the value and seats focus back on the row, so the Siri Remote and a pad adjust alike.
+    @ViewBuilder private func adjustCatcher(_ side: Int, at idx: Int) -> some View {
+        if onAdjust != nil, idx == cursor {
+            Color.clear.frame(width: 1).focusable().focused($adjustCatch, equals: side)
+        } else {
+            Color.clear.frame(width: 1)
+        }
+    }
+    #endif
+
     private func wire() {
         #if os(tvOS)
-        // The focus engine owns up/down, select and Menu; this poll takes only the horizontal axis,
-        // whose deadzone and hold-repeat give the adjust feel, and drops vertical moves the engine
-        // already makes. The Siri Remote has no extended gamepad profile and never reaches this
-        // poll, so remote users cycle values with select, which `activate` already does.
-        input.onMove = { direction in
-            switch direction {
-            case .left: adjust(by: -1)
-            case .right: adjust(by: 1)
-            case .up, .down: break
-            }
-        }
+        // The focus engine owns every direction, select and Menu (left/right through
+        // `adjustCatcher`). The poll keeps only the shoulders, which focus has no concept of.
         input.onShoulder = { forward in onShoulder?(forward ? 1 : -1) }
         #else
         input.onMove = { direction in
@@ -246,7 +260,8 @@ struct GamepadMenuList<Item: Identifiable, Row: View>: View where Item.ID: Hasha
         }
         #if os(tvOS)
         // Keep real focus on the reconciled row when its old target vanished from the list.
-        if focusedID == nil || !items.contains(where: { $0.id == focusedID }), cursor < items.count {
+        if !focusOutside,
+           focusedID == nil || !items.contains(where: { $0.id == focusedID }), cursor < items.count {
             focusedID = items[cursor].id
         }
         #endif

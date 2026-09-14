@@ -154,7 +154,8 @@ struct GamepadSettingsView: View {
             onActivate: { activate(id: $0.id) },
             onBack: { back() },
             onShoulder: { step(tabBy: $0) },
-            isActive: controllerActive
+            isActive: controllerActive,
+            focusOutside: stripHasFocus
         ) { row, focused in
             rowView(row, focused: focused)
                 .frame(maxWidth: metrics.rowMaxWidth)
@@ -261,12 +262,24 @@ struct GamepadSettingsView: View {
                 withAnimation(.easeOut(duration: 0.2)) { proxy.scrollTo(t) }
             }
             #if os(tvOS)
+            // Entering the strip lands on the selected pill. Left to geometry, a swipe up from the
+            // centred rows reached the last pill and selected it.
+            .focusSection()
+            .defaultFocus($focusedTab, tab, priority: .userInitiated)
             .onChange(of: focusedTab) { _, t in
                 // Focus IS selection on a tab bar; nil means focus dropped back into the rows.
                 if let t { select(tab: t) }
             }
             #endif
         }
+    }
+
+    private var stripHasFocus: Bool {
+        #if os(tvOS)
+        focusedTab != nil
+        #else
+        false
+        #endif
     }
 
     private func pill(_ t: GpSettingsTab) -> some View {

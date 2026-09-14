@@ -343,12 +343,10 @@ struct GamepadCarousel<Item: Identifiable, Card: View>: View where Item.ID: Hash
         // The poll carries only the buttons focus has no concept of: Y/X, the screen actions.
         input.onSecondary = onSecondary
         input.onTertiary = onTertiary
-        // UP is the one direction the poll may also read here, and ONLY to open the menu — it
-        // never calls `step`, so it cannot double-move against the focus engine. Routing it
-        // through `.onMoveCommand` instead was the obvious alternative and the wrong one: that
-        // stream is 4-way and its interception is input-source-dependent on real hardware (see
-        // GamepadMenuList's tvOS note), so claiming up there risks left/right focus with it.
-        // Nothing sits above the strip for the engine to move to, so this direction is free.
+        // UP only opens the menu and never steps, so it can't double-move against focus. Not
+        // `.onMoveCommand`: its interception depends on the input source (GamepadMenuList's tvOS
+        // note) and would risk left/right. A Siri Remote never reaches this poll; the launcher
+        // catches its up with a focus line above the strip (GamepadHomeView's `edgeCatcher`).
         if let onUp {
             input.onMove = { direction in
                 if direction == .up { onUp() }
