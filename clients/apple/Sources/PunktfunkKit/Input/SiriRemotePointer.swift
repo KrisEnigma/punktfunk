@@ -8,11 +8,11 @@
 //
 // The remote is read through GameController as a GCMicroGamepad with
 // `reportsAbsoluteDpadValues = true`: the dpad axes then report the finger's ABSOLUTE position
-// on the surface (±1, +y up) while touched, and snap to exactly (0, 0) on lift. Successive
-// positions are differenced into relative mouse deltas. The exact-zero snap and a quiet gap
-// end a touch; the touch report (`buttonA.isTouched`) may end one early, but a clickpad remote
-// reports its click there, so it never gates motion. Handlers (not a poll) — the same
-// in-session delivery GamepadCapture relies on.
+// on the surface (±1, +y up), one axis per callback, and snap to exactly (0, 0) on lift, again
+// one axis at a time. Successive positions are differenced into relative mouse deltas. The
+// exact-zero snap and a quiet gap end a touch; the touch report (`buttonA.isTouched`) may end
+// one early, but a clickpad remote reports its click there, so it never gates motion. Handlers
+// (not a poll) — the same in-session delivery GamepadCapture relies on.
 //
 // Lifecycle mirrors GamepadCapture: started by SessionModel when streaming begins (never
 // during the trust prompt), stopped on disconnect; held buttons are released on stop so the
@@ -65,12 +65,8 @@ public final class SiriRemotePointer {
     /// small; two comfortable swipes should cross a 1080p desktop.
     private static let pointerScale: Float = 1100
     /// Largest single-callback finger travel accepted as real motion (surface units; the axes
-    /// span ±1, so 0.4 ≈ a fifth of the pad). On RELEASE the hardware slides the reported
-    /// position back to (0, 0) through intermediate callbacks — naive differencing turns that
-    /// tail into reverse deltas that RETRACE the whole swipe, so the cursor springs back to its
-    /// anchor and the pointer feels absolute. Real finger motion arrives as many small steps
-    /// (even a fast flick stays well under this per callback); the release tail arrives as one
-    /// or two huge jumps — discard those (the anchor still follows, so nothing accumulates).
+    /// span ±1, so 0.4 ≈ a fifth of the pad). Real motion arrives in steps of a few hundredths
+    /// even on a fast flick; a bigger jump is a tracking glitch, skipped while the anchor follows.
     private static let maxStep: Float = 0.4
     /// Motion inside this of contact is dropped. The framework ramps the reported position
     /// from the centre to the finger over the first callbacks of a touch — read as motion,
@@ -102,8 +98,8 @@ public final class SiriRemotePointer {
     }
     /// The finger position the next ring step is measured from; nil = lifted.
     private var swipeAnchor: (x: Float, y: Float)?
-    /// Finger travel that steps the ring once (axes span ±1): about a quarter of the surface,
-    /// so a held swipe walks several slots.
+    /// Finger travel that aims the ring once (axes span ±1): about a quarter of the surface, so
+    /// a held swipe in the sheet walks several rows.
     private static let swipeStep: Float = 0.45
 
     public init(connection: PunktfunkConnection) {
@@ -211,6 +207,12 @@ public final class SiriRemotePointer {
             guard quiet else { return }
             inReleaseRamp = false
         }
+        // Half of the lift snap: one axis went to exactly 0 and the other held. Keep the anchor;
+        // the (0, 0) that follows ends the touch, and a real crossing of 0 moves with the next sample.
+        if let last = lastTouch, !quiet,
+           (x == 0 && last.x != 0 && y == last.y) || (y == 0 && last.y != 0 && x == last.x) {
+            return
+        }
         defer { lastTouch = (x, y) }
         // First contact — or the first sample after a quiet gap, a lift the remote never
         // snapped for — anchors and moves nothing.
@@ -226,9 +228,8 @@ public final class SiriRemotePointer {
         }
         let stepX = x - last.x
         let stepY = y - last.y
-        // The release tail (and any tracking glitch) shows up as a single impossible jump —
-        // see `maxStep`. Skip the emission; the deferred anchor update above still follows the
-        // reported position, so the gesture cleanly re-anchors instead of retracing.
+        // A tracking glitch shows up as a single impossible jump (`maxStep`). Skip the emission;
+        // the deferred anchor update still follows the reported position.
         guard abs(stepX) < Self.maxStep, abs(stepY) < Self.maxStep else {
             swipeAnchor = (x, y)
             return
@@ -242,8 +243,9 @@ public final class SiriRemotePointer {
         connection.send(.mouseMove(dx: ix, dy: iy))
     }
 
-    /// A ring step per `swipeStep` of travel from the anchor, along the dominant axis; the
-    /// anchor moves with each step so a long swipe keeps walking.
+    /// Every `swipeStep` of travel from the anchor aims the ring at the slot in the swipe's
+    /// direction, the stick's sector rule. The anchor moves with each step, so a long swipe in
+    /// the sheet keeps walking rows.
     private func ringSwipe(x: Float, y: Float) {
         guard let a = swipeAnchor else {
             swipeAnchor = (x, y)
@@ -251,9 +253,10 @@ public final class SiriRemotePointer {
         }
         let dx = x - a.x
         let dy = y - a.y
-        guard abs(dx) >= Self.swipeStep || abs(dy) >= Self.swipeStep else { return }
+        let travel = hypot(dx, dy)
+        guard travel >= Self.swipeStep else { return }
         swipeAnchor = (x, y)
-        onRingNav?(abs(dx) >= abs(dy) ? (dx > 0 ? .right : .left) : (dy > 0 ? .up : .down))
+        onRingNav?(.sector(GamepadCapture.ringSector(dx / travel, dy / travel, nil)))
     }
 
     /// Surface click: the left button — or, with the ring up, its confirm. A release after the
