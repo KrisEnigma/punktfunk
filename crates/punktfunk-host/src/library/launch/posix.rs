@@ -189,6 +189,9 @@ pub fn launch_session_command(
                 // Own process group: later teardown signals the shell and its
                 // children, and not the host's group.
                 .process_group(0);
+            // AppImageLauncher's binfmt hook would swap an .AppImage for its integration
+            // dialog on the host's own screen; this makes it exec the image directly.
+            c.env("APPIMAGELAUNCHER_DISABLE", "1");
             // X11 apps (Steam, Lutris, most native games) need a display of their own. A systemd
             // `--user` host has none to pass on, so take the session's — without it Steam opens
             // "Unable to open a connection to X" instead of the game.

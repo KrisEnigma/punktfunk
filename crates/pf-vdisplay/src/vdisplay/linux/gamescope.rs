@@ -896,6 +896,8 @@ fn descends_from(mut pid: u32, ancestor: u32) -> bool {
 pub fn launch_into_session(cmd: &str, seat: Option<&str>) -> Result<std::process::Child> {
     let mut c = Command::new("sh");
     c.arg("-c").arg(cmd);
+    // Keeps AppImageLauncher's binfmt hook from replacing an .AppImage with its dialog.
+    c.env("APPIMAGELAUNCHER_DISABLE", "1");
     match discover_session_display_env(seat) {
         Some((x11, wayland, _xauth)) => {
             tracing::info!(
