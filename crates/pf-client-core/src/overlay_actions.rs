@@ -96,49 +96,7 @@ pub struct Shortcut {
     pub keys: Vec<String>,
 }
 
-/// Windows VK for a stored key name. The wire is VKs; presets store names.
-/// `None` means this build does not know the name — the chord does not fire.
-pub fn key_vk(name: &str) -> Option<u8> {
-    let n = name.trim().to_ascii_lowercase();
-    let vk = match n.as_str() {
-        "ctrl" | "control" => 0x11,
-        "shift" => 0x10,
-        "alt" | "option" => 0x12,
-        "win" | "cmd" | "super" | "meta" => 0x5B,
-        "escape" | "esc" => 0x1B,
-        "tab" => 0x09,
-        "enter" | "return" => 0x0D,
-        "space" => 0x20,
-        "backspace" => 0x08,
-        "delete" | "del" => 0x2E,
-        "insert" => 0x2D,
-        "home" => 0x24,
-        "end" => 0x23,
-        "pageup" => 0x21,
-        "pagedown" => 0x22,
-        "up" => 0x26,
-        "down" => 0x28,
-        "left" => 0x25,
-        "right" => 0x27,
-        "printscreen" => 0x2C,
-        "pause" => 0x13,
-        "capslock" => 0x14,
-        _ => {
-            let b = n.as_bytes();
-            return match b {
-                [c @ b'a'..=b'z'] => Some(0x41 + (c - b'a')),
-                [c @ b'0'..=b'9'] => Some(0x30 + (c - b'0')),
-                [b'f', rest @ ..] if !rest.is_empty() => n[1..]
-                    .parse::<u8>()
-                    .ok()
-                    .filter(|f| (1..=24).contains(f))
-                    .map(|f| 0x70 + f - 1),
-                _ => None,
-            };
-        }
-    };
-    Some(vk)
-}
+pub use punktfunk_core::input::key_vk;
 
 pub fn chord_chip(keys: &[String]) -> String {
     keys.iter()
