@@ -801,10 +801,10 @@ async fn negotiate_video_format(
     // that latch is per-source and this gate already used this session's source.
     let capture_supports_hdr = crate::capture::capturer_supports_hdr_for(compositor);
     // SDR-10: Windows IDD expands BGRA 8→10 (`Rgb10a2Sdr`); only direct-NVENC ingests that
-    // packed RGB. HEVC only — NVENC packed-RGB → 10-bit AV1 is unverified. Linux has no
-    // SDR-10 chain (`resolved_backend_ingests_rgb_444` is false off Windows).
+    // packed RGB. Linux has no SDR-10 chain (`resolved_backend_ingests_rgb_444` is false off
+    // Windows).
     let sdr10_chain_ok =
-        codec == crate::encode::Codec::H265 && crate::encode::resolved_backend_ingests_rgb_444();
+        codec_carries_sdr10(codec) && crate::encode::resolved_backend_ingests_rgb_444();
     let depth_reachable = (client_wants_hdr && capture_supports_hdr) || sdr10_chain_ok;
     // Probe may open a tiny encoder; spawn_blocking, short-circuited behind the cheap gates.
     let gpu_can_10bit =
@@ -934,6 +934,15 @@ fn linux_chroma_under_hdr(
     crate::encode::ChromaFormat::Yuv420
 }
 
+/// Codecs that carry 10-bit SDR off the packed-RGB capture. PyroWave is out: that capture path
+/// hands it NV12 under SDR, so a 10-bit label would outrun the stream.
+fn codec_carries_sdr10(codec: crate::encode::Codec) -> bool {
+    matches!(
+        codec,
+        crate::encode::Codec::H265 | crate::encode::Codec::Av1
+    )
+}
+
 /// Whether Hello carried a format at all. Decode maps an absent one to 48 kHz/16-bit, so
 /// that pair (or a bare zero) is "nothing asked" — the rule `Hello::encode` applies.
 fn audio_format_asked(rate_hz: u32, bits: u8) -> bool {
@@ -1001,6 +1010,16 @@ mod tests {
         assert_eq!(linux_chroma_under_hdr(Yuv444, true), Yuv420);
         assert_eq!(linux_chroma_under_hdr(Yuv444, false), Yuv444);
         assert_eq!(linux_chroma_under_hdr(Yuv420, true), Yuv420);
+    }
+
+    /// AV1 carries 10-bit SDR like HEVC; PyroWave captures NV12 under SDR, so it must not.
+    #[test]
+    fn av1_carries_sdr10_and_pyrowave_does_not() {
+        use crate::encode::Codec;
+        assert!(codec_carries_sdr10(Codec::Av1));
+        assert!(codec_carries_sdr10(Codec::H265));
+        assert!(!codec_carries_sdr10(Codec::PyroWave));
+        assert!(!codec_carries_sdr10(Codec::H264));
     }
 
     /// 1472-byte discovery ceiling minus QUIC header + AEAD. Same number `pcm`'s ladder test uses.
