@@ -198,19 +198,14 @@ enum SettingsOptions {
     // MARK: - Stream mode (iOS/macOS pickers + the gamepad settings rows on all three; the
     // touch/remote tvOS SettingsView builds its own preset list)
 
-    /// 16:9 then ultrawide presets; the device's native mode is prepended by `resolutionModes`.
-    static let resolutionPresets: [(name: String, w: Int, h: Int)] = [
-        ("720p", 1280, 720),
-        ("1080p", 1920, 1080),
-        ("1440p", 2560, 1440),
-        ("4K", 3840, 2160),
-        ("Ultrawide 1080p", 2560, 1080),
-        ("Ultrawide 1440p", 3440, 1440),
-        ("Super ultrawide", 5120, 1440),
-    ]
+    /// The family a picker lists for a stored size: its shape, or 16:9 while the size is this
+    /// device's own or a shape no family has (see `Resolutions`).
+    static func family(width: Int, height: Int) -> Int {
+        Resolutions.aspectOf(width, height) ?? 0
+    }
 
-    /// This device's native mode first, then the presets, deduped by dimensions (native wins a
-    /// tie).
+    /// This device's native mode first, then one aspect family's sizes (unnamed — a picker
+    /// shows them as plain `w × h`), deduped by dimensions (native wins a tie).
     ///
     /// On iOS the native row is followed by its **safe-area** variant, which is the same mode
     /// narrowed so the picture clears the sensor housing and the rounded corners — see
@@ -219,7 +214,7 @@ enum SettingsOptions {
     /// duplicate is dropped, and no pointless row appears. A notched Mac gets the same pair from
     /// [`macDisplayModes`], shortened instead of narrowed.
     @MainActor
-    static func resolutionModes() -> [(name: String, w: Int, h: Int)] {
+    static func resolutionModes(family: Int) -> [(name: String, w: Int, h: Int)] {
         var native: [(name: String, w: Int, h: Int)] = []
         #if os(iOS) || os(tvOS)
         let bounds = UIScreen.main.nativeBounds // portrait-oriented pixels (tvOS: the TV mode)
@@ -235,8 +230,9 @@ enum SettingsOptions {
         #else
         native = macDisplayModes()
         #endif
+        let sizes = Resolutions.aspects[family].sizes.map { (name: "", w: $0.w, h: $0.h) }
         var seen = Set<String>()
-        return (native + resolutionPresets).filter { seen.insert("\($0.w)x\($0.h)").inserted }
+        return (native + sizes).filter { seen.insert("\($0.w)x\($0.h)").inserted }
     }
 
     #if os(macOS)

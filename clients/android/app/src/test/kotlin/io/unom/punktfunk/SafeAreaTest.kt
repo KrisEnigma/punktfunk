@@ -43,6 +43,6 @@ class SafeAreaTest {
         assertTrue(!s.isCustomResolution())
         // And it must be distinct from the UI's own "Custom…" sentinel (-1).
         assertTrue(SAFE_AREA_MODE != -1)
-        assertTrue(RESOLUTION_OPTIONS.any { it.first == SAFE_AREA_MODE && it.second == SAFE_AREA_MODE })
+        assertTrue(NATIVE_RESOLUTION_OPTIONS.any { it.first == SAFE_AREA_MODE && it.second == SAFE_AREA_MODE })
     }
 }

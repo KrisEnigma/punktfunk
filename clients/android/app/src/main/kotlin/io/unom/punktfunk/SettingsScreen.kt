@@ -15,6 +15,7 @@ import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -47,6 +48,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExposedDropdownMenuBox
 import androidx.compose.material3.ExposedDropdownMenuAnchorType
 import androidx.compose.material3.ExposedDropdownMenuDefaults
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -736,9 +738,33 @@ private fun DisplaySettings(s: Settings, update: (Settings) -> Unit, context: an
     var customPicked by remember { mutableStateOf(false) }
     val showCustom = customPicked || s.isCustomResolution()
     SettingsGroup("Resolution") {
+        // The family the dropdown lists. A chip writes that family's size nearest the current
+        // height, so the dropdown always holds a row of the family it shows.
+        val family = s.resolutionFamily()
+        Text(
+            "Aspect ratio",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Row(
+            modifier = Modifier.horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Resolutions.ASPECTS.forEachIndexed { i, a ->
+                FilterChip(
+                    selected = i == family,
+                    onClick = {
+                        customPicked = false
+                        val (w, h) = Resolutions.nearest(i, s.height)
+                        update(s.copy(width = w, height = h))
+                    },
+                    label = { Text(a.label) },
+                )
+            }
+        }
         SettingDropdown(
             label = "Resolution",
-            options = RESOLUTION_OPTIONS.map { (w, h, lbl) ->
+            options = resolutionOptions(family).map { (w, h, lbl) ->
                 (w to h) to when (w) {
                     0 -> "$lbl ($nw × $nh)"
                     SAFE_AREA_MODE -> "$lbl ($sw × $sh)"

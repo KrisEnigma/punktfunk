@@ -853,6 +853,18 @@ struct GamepadSettingsView: View {
         }
         list += [
             choiceRow(
+                id: "aspect", tab: .stream, icon: "rectangle.ratio.16.to.9",
+                label: "Aspect ratio",
+                detail: "Which shapes the Resolution row offers. Picking one moves to its size "
+                    + "nearest the current height.",
+                options: Resolutions.aspects.enumerated().map { (label: $0.element.label, tag: $0.offset) },
+                current: family
+            ) { i in
+                let mode = Resolutions.nearest(i, height: height)
+                width = mode.w
+                height = mode.h
+            },
+            choiceRow(
                 id: "resolution", tab: .stream, field: "resolution", icon: "aspectratio",
                 label: "Resolution",
                 detail: "The host creates a real display at exactly this size.",
@@ -1199,11 +1211,17 @@ struct GamepadSettingsView: View {
             + "pin them here."
     }
 
+    /// The family the Resolution row lists — see `SettingsOptions.family`.
+    private var family: Int { SettingsOptions.family(width: width, height: height) }
+
     /// Resolution choices as "WxH" tags — the current size is inserted when it's a custom mode
     /// (set via the touch settings), so cycling starts from it instead of jumping.
     private var resolutionOptions: [(label: String, tag: String)] {
-        var options = SettingsOptions.resolutionModes()
-            .map { (label: "\($0.name) · \($0.w) × \($0.h)", tag: "\($0.w)x\($0.h)") }
+        var options = SettingsOptions.resolutionModes(family: family)
+            .map {
+                (label: $0.name.isEmpty ? "\($0.w) × \($0.h)" : "\($0.name) · \($0.w) × \($0.h)",
+                 tag: "\($0.w)x\($0.h)")
+            }
         let current = "\(width)x\(height)"
         if !options.contains(where: { $0.tag == current }) {
             options.insert((label: "Custom · \(width) × \(height)", tag: current), at: 0)

@@ -618,21 +618,68 @@ val VIDEO_FIT_OPTIONS = listOf("fit" to "Fit", "crop" to "Crop to fill", "stretc
 
 // ---- UI option tables (value, label). The first entry is always the "auto/native" default. ----
 
-/** (width, height, label). `(0,0)` = native display; [SAFE_AREA_MODE] = native minus the cutout. */
-val RESOLUTION_OPTIONS = listOf(
+/**
+ * Stream-mode presets grouped by aspect ratio — the Kotlin twin of `punktfunk_core::resolutions`
+ * (and `PunktfunkShared/Resolutions.swift`). A picker shows one family at a time behind an aspect
+ * switch, plus its own native rows; picking a family moves to its size nearest the current height
+ * ([nearest]), so the switch and the list always agree without picker-side state. Pure + covered
+ * by [ResolutionsTest].
+ */
+object Resolutions {
+    /** One family: the switch label, width over height, and its common panels ascending (all
+     * sides even — the host rejects odd modes). */
+    class Aspect(val label: String, val shape: Double, val sizes: List<Pair<Int, Int>>)
+
+    /** Families in the order the switch shows them: most common first. */
+    val ASPECTS = listOf(
+        Aspect("16:9", 16.0 / 9, listOf(1280 to 720, 1920 to 1080, 2560 to 1440, 3840 to 2160, 5120 to 2880)),
+        Aspect("16:10", 16.0 / 10, listOf(1280 to 800, 1920 to 1200, 2560 to 1600, 2880 to 1800, 3840 to 2400)),
+        Aspect("21:9", 21.0 / 9, listOf(2560 to 1080, 3440 to 1440, 3840 to 1600, 5120 to 2160)),
+        Aspect("32:9", 32.0 / 9, listOf(3840 to 1080, 5120 to 1440, 7680 to 2160)),
+        Aspect("3:2", 3.0 / 2, listOf(2160 to 1440, 2256 to 1504, 2880 to 1920, 3000 to 2000)),
+        Aspect("4:3", 4.0 / 3, listOf(1024 to 768, 1600 to 1200, 2048 to 1536)),
+    )
+
+    /** Shape tolerance for [aspectOf]: "21:9" panels are really 2.37–2.40, so 4 % keeps them in
+     * one family and still parts 16:10 (1.60) from 3:2 (1.50). */
+    private const val TOLERANCE = 0.04
+
+    /** The family `w`×`h` belongs to by shape, not by membership: a custom 1500×1000 is 3:2.
+     * `null` for a non-positive side (native, the safe-area sentinel) or a shape no family has. */
+    fun aspectOf(w: Int, h: Int): Int? {
+        if (w <= 0 || h <= 0) return null
+        val shape = w.toDouble() / h
+        return ASPECTS.indexOfFirst { kotlin.math.abs(shape / it.shape - 1) < TOLERANCE }.takeIf { it >= 0 }
+    }
+
+    /** The size in family [aspect] nearest in height to [h]; native (`0` or a sentinel) looks for
+     * 1080. Ties go to the smaller size. */
+    fun nearest(aspect: Int, h: Int): Pair<Int, Int> {
+        val want = if (h <= 0) 1080 else h
+        return ASPECTS[aspect].sizes.minBy { kotlin.math.abs(it.second - want) }
+    }
+}
+
+/** (width, height, label) rows every family shares: `(0,0)` = native display; [SAFE_AREA_MODE] =
+ * native minus the cutout. */
+val NATIVE_RESOLUTION_OPTIONS = listOf(
     Triple(0, 0, "Native display"),
     Triple(SAFE_AREA_MODE, SAFE_AREA_MODE, "Native display (safe area)"),
-    Triple(1280, 720, "1280 × 720"),
-    Triple(1920, 1080, "1920 × 1080"),
-    Triple(2560, 1440, "2560 × 1440"),
-    Triple(3840, 2160, "3840 × 2160"),
 )
 
-/** True when the stored size is none of the [RESOLUTION_OPTIONS] presets — a custom resolution
- * typed in the touch settings. Detected from the size itself rather than a persisted flag, so it
- * can never disagree with what's actually stored (mirrors the Apple client). */
+/** The Resolution picker's rows for one family: the native rows, then that family's sizes. */
+fun resolutionOptions(family: Int): List<Triple<Int, Int, String>> =
+    NATIVE_RESOLUTION_OPTIONS + Resolutions.ASPECTS[family].sizes.map { (w, h) -> Triple(w, h, "$w × $h") }
+
+/** The family the Resolution picker lists for the stored size: its shape, or 16:9 while the size is
+ * native or a shape no family has. */
+fun Settings.resolutionFamily(): Int = Resolutions.aspectOf(width, height) ?: 0
+
+/** True when the stored size is none of the presets its family lists — a custom resolution typed
+ * in the touch settings. Detected from the size itself rather than a persisted flag, so it can
+ * never disagree with what's actually stored (mirrors the Apple client). */
 fun Settings.isCustomResolution(): Boolean =
-    RESOLUTION_OPTIONS.none { (w, h, _) -> w == width && h == height }
+    resolutionOptions(resolutionFamily()).none { (w, h, _) -> w == width && h == height }
 
 /** (hz, label). `0` = native refresh. */
 val REFRESH_OPTIONS = listOf(

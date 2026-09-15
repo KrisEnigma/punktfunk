@@ -31,6 +31,8 @@ pub enum RowId {
     Preset(usize),
     NoPresets,
     Resolution,
+    /// The family of sizes the Resolution row steps through.
+    Aspect,
     Refresh,
     RenderScale,
     /// `trust::Settings::video_fit`: bars, crop or stretch when the stream's shape differs.
@@ -186,6 +188,7 @@ const TABS: [(&str, &[RowId]); 7] = [
     (
         "Stream",
         &[
+            RowId::Aspect,
             RowId::Resolution,
             RowId::Refresh,
             RowId::RenderScale,
@@ -278,14 +281,14 @@ const PRESETS_TAB: usize = TABS.len() - 1;
 #[cfg(test)]
 pub(crate) const TAB_COUNT: usize = TABS.len();
 
-const RESOLUTIONS: [(u32, u32); 6] = [
-    (0, 0), // native: host follows the panel
-    (1280, 720),
-    (1280, 800), // Steam Deck panel
-    (1920, 1080),
-    (2560, 1440),
-    (3840, 2160),
-];
+/// Sizes by family; the Resolution row lists one family at a time.
+use punktfunk_core::resolutions::{aspect_of, nearest, ASPECTS};
+
+/// The family the Resolution row lists: the stored size's shape, or 16:9 while
+/// the size is Native / Match window / a shape no family has.
+fn family(s: &pf_client_core::trust::Settings) -> usize {
+    aspect_of(s.width, s.height).unwrap_or(0)
+}
 /// `0` = the panel's native refresh, resolved at connect. Must cover every value the desktop
 /// shells can write: on Linux both write the same client-gtk-settings.json, so a box that set
 /// 144 Hz there opens this screen holding it. A value missing from this table has no index, and
@@ -1110,6 +1113,7 @@ pub fn row_spec(id: RowId, ctx: &Ctx, presets: &[(String, String)]) -> RowSpec {
                 format!("{} × {}", s.width, s.height)
             },
         ),
+        RowId::Aspect => (None, "Aspect ratio", ASPECTS[family(s)].label.into()),
         RowId::Refresh => (
             None,
             "Refresh rate",
@@ -1378,6 +1382,10 @@ pub fn detail(id: RowId, ctx: &Ctx) -> &'static str {
         RowId::Resolution => {
             "The host creates a virtual display at exactly this size — no scaling. \
              Match window follows this window, including mid-stream resizes."
+        }
+        RowId::Aspect => {
+            "Which shapes the Resolution row offers. Picking one moves to its size \
+             nearest the current height."
         }
         RowId::Refresh => "Native follows the display this window is on.",
         RowId::RenderScale => {
@@ -1674,19 +1682,30 @@ pub fn adjust(id: RowId, delta: i32, wrap: bool, ctx: &mut Ctx) -> bool {
     let s = &mut *ctx.settings;
     match id {
         RowId::Resolution => {
-            // Native, Match window, then sizes. Match window is virtual index 1
-            // (`match_window` flag, w/h cleared); RESOLUTIONS[0] is Native.
+            // Native, Match window, then the current family's sizes. Match window
+            // is virtual index 1 (`match_window` flag, w/h cleared).
+            let sizes = ASPECTS[family(s)].sizes;
             let cur = if s.match_window {
                 Some(1)
+            } else if s.width == 0 {
+                Some(0)
             } else {
-                RESOLUTIONS
+                sizes
                     .iter()
-                    .position(|(w, h)| (*w, *h) == (s.width, s.height))
-                    .map(|i| if i == 0 { 0 } else { i + 1 })
+                    .position(|&wh| wh == (s.width, s.height))
+                    .map(|i| i + 2)
             };
-            step_option(cur, RESOLUTIONS.len() + 1, delta, wrap).map(|i| {
+            step_option(cur, sizes.len() + 2, delta, wrap).map(|i| {
                 s.match_window = i == 1;
-                (s.width, s.height) = if i <= 1 { (0, 0) } else { RESOLUTIONS[i - 1] };
+                (s.width, s.height) = if i <= 1 { (0, 0) } else { sizes[i - 2] };
+            })
+        }
+        RowId::Aspect => {
+            // Steps from the family shown, so Native (listed as 16:9) moves on
+            // to 16:10 rather than restating 16:9.
+            step_option(Some(family(s)), ASPECTS.len(), delta, wrap).map(|i| {
+                s.match_window = false;
+                (s.width, s.height) = nearest(i, s.height);
             })
         }
         RowId::Refresh => {
@@ -2131,13 +2150,14 @@ pub(crate) mod tests {
             device_name: "t",
             t: 0.0,
         };
-        assert_eq!(s.row_ids(&ctx)[0], RowId::Resolution);
+        assert_eq!(s.row_ids(&ctx)[0], RowId::Aspect);
         let mut fx = Outbox::default();
-        assert!(!ctx.settings.match_window);
+        assert_eq!(ctx.settings.width, 0);
         assert!(s.pointer(press(first), &mut ctx, &mut fx));
         assert_eq!(s.list.cursor, 0, "the pressed row takes focus");
-        assert!(
-            ctx.settings.match_window,
+        assert_eq!(
+            (ctx.settings.width, ctx.settings.height),
+            (1920, 1200),
             "one press both focuses the row and cycles its value"
         );
     }
@@ -2224,10 +2244,54 @@ pub(crate) mod tests {
         assert!(adjust(RowId::Resolution, -1, false, &mut ctx));
         assert!(!ctx.settings.match_window);
         assert_eq!(ctx.settings.width, 0, "back to Native");
-        (ctx.settings.width, ctx.settings.height) = (3840, 2160);
+        (ctx.settings.width, ctx.settings.height) = (5120, 2880);
         assert!(adjust(RowId::Resolution, 1, true, &mut ctx));
         assert_eq!(ctx.settings.width, 0, "wrapped to Native");
         assert!(!ctx.settings.match_window);
+    }
+
+    /// The Aspect row moves between families at the nearest height; the
+    /// Resolution row then steps inside that family only.
+    #[test]
+    fn aspect_row_switches_family_at_nearest_height() {
+        let (mut settings, pads) = ctx_parts();
+        let library = crate::library::LibraryShared::default();
+        let mut ctx = Ctx {
+            hosts: &[],
+            library: &library,
+            settings: &mut settings,
+            store: crate::store::file_store(),
+            platform: crate::platform::Platform::Desktop,
+            pads: &pads,
+            deck: false,
+            fallback_ui: false,
+            pyrowave_ok: true,
+            device_name: "t",
+            t: 0.0,
+        };
+        let size = |ctx: &Ctx| (ctx.settings.width, ctx.settings.height);
+        assert_eq!(
+            row_spec(RowId::Aspect, &ctx, &[]).value.as_deref(),
+            Some("16:9"),
+            "Native lists 16:9"
+        );
+        assert!(!adjust(RowId::Aspect, -1, false, &mut ctx), "16:9 is first");
+        assert!(adjust(RowId::Aspect, 1, false, &mut ctx));
+        assert_eq!(size(&ctx), (1920, 1200), "Native → 16:10 nearest 1080");
+        (ctx.settings.width, ctx.settings.height) = (2560, 1600);
+        assert!(adjust(RowId::Aspect, 1, false, &mut ctx));
+        assert_eq!(size(&ctx), (3840, 1600), "21:9 nearest 1600");
+        assert!(adjust(RowId::Resolution, 1, false, &mut ctx));
+        assert_eq!(size(&ctx), (5120, 2160), "steps inside 21:9");
+        assert!(
+            !adjust(RowId::Resolution, 1, false, &mut ctx),
+            "clamps at the family's end"
+        );
+        ctx.settings.match_window = true;
+        (ctx.settings.width, ctx.settings.height) = (0, 0);
+        assert!(adjust(RowId::Aspect, -1, true, &mut ctx));
+        assert_eq!(size(&ctx), (1600, 1200), "wrapped to 4:3");
+        assert!(!ctx.settings.match_window, "a size clears the policy");
     }
 
     #[test]
@@ -2954,7 +3018,7 @@ pub(crate) mod tests {
                 seen.push(*id);
             }
         }
-        assert_eq!(seen.len(), 54, "{seen:?}");
+        assert_eq!(seen.len(), 55, "{seen:?}");
         assert!(seen.contains(&RowId::StartIn));
         assert!(seen.contains(&RowId::AdvancedStats));
         assert!(seen.contains(&RowId::FollowOsTheme));
