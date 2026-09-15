@@ -14,10 +14,10 @@ a streaming host is, what protects it, and where the honest limits are.
 >   and can move the mouse, type, and act as a controller — the same as sitting at the keyboard.
 > - **Pairing is the security boundary.** Require pairing (the default), pick a strong console
 >   password, and review your paired devices from time to time.
-> - **If you installed from a Linux package, the Moonlight/GameStream plane is on** — it pairs over
->   plain HTTP, so it belongs on a trusted LAN only.
->   [Turn it off](#gamestream--moonlight-compatibility-is-the-weak-crypto-path) if you don't use
->   Moonlight. The Windows installer ships it off.
+> - **The Moonlight/GameStream plane is off by default on every install route.** It pairs over
+>   plain HTTP, so turn it on only on a LAN you fully trust, and turn it back off when no
+>   Moonlight client needs it.
+>   [Details](#gamestream--moonlight-compatibility-is-the-weak-crypto-path).
 > - **Be thoughtful about *which* machine you run it on** — especially on Windows, where the host runs
 >   with high system privileges so it can do its job. Prefer a dedicated or gaming PC over one holding
 >   your most sensitive data.
