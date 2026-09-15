@@ -82,6 +82,7 @@ impl TritonWinPad {
             // VID/PID only. If Steam balks, A/B `Some(0)` (Deck needed `Some(2)`).
             usb_mi: None,
             description: "Punktfunk Virtual Steam Controller",
+            enumerator: "punktfunk",
         })?; // Propagate — swallowing latches the slot to a pad with no devnode.
         let (hsw, instance_id) = (Some(hsw), instance_id);
         // Bind the DATA section to THIS devnode, not the pid the LocalService-writable

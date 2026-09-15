@@ -209,6 +209,7 @@ impl XboxWinPad {
             // Steam promotion needs `&MI_02`; Xbox does not.
             usb_mi: None,
             description: id.description,
+            enumerator: "punktfunk",
         })?; // Swallowing latched the slot to a pad with no devnode.
         channel.bind_devnode(
             index as u32,

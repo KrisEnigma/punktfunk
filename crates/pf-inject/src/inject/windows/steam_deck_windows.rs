@@ -76,6 +76,7 @@ impl DeckWinPad {
             // token, hidapi reports interface 0, and Steam never claims the pad.
             usb_mi: Some(2),
             description: "Punktfunk Virtual Steam Deck",
+            enumerator: "punktfunk",
         })?; // Propagate — swallowing latches the slot to a pad with no devnode.
         let (hsw, instance_id) = (Some(hsw), instance_id);
         // Bind the DATA section to THIS devnode, not the pid the LocalService-writable

@@ -63,8 +63,10 @@ impl Ds4WinPad {
             container_index: index,
             hwid: DS4_HWID,
             usb_vid_pid: "VID_054C&PID_09CC",
-            usb_mi: None,
+            // Composite USB device (headset audio on 0-2); the HID interface is 3.
+            usb_mi: Some(3),
             description: "Punktfunk Virtual DualShock 4",
+            enumerator: "VID_054C&PID_09CC&MI_03",
         })?; // `?`: a swallowed fail latched a pad with no devnode; PadSlots never retried.
         let (hsw, instance_id) = (Some(hsw), instance_id);
         channel.bind_devnode(

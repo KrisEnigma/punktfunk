@@ -429,7 +429,12 @@ fn pad_instance_ids() -> Vec<String> {
             continue;
         };
         let id = value.trim();
-        if id.to_ascii_uppercase().starts_with("SWD\\PUNKTFUNK\\") && !id.contains(' ') {
+        // Pads enumerate under their USB interface id (`SWD\VID_…&MI_03\PF_…`), the rest
+        // under `punktfunk`.
+        let up = id.to_ascii_uppercase();
+        let ours = up.starts_with("SWD\\PUNKTFUNK\\")
+            || (up.starts_with("SWD\\VID_") && up.contains("\\PF_"));
+        if ours && !id.contains(' ') {
             ids.push(id.to_string());
         }
     }
