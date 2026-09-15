@@ -1,10 +1,9 @@
 //! The VideoProc context: ingest colour conversion into the encoder's input surface.
 //!
-//! One context per session, sized to the encoder's visible picture. Every capture
-//! shape — a packed-RGB dmabuf, CPU RGB on a staging surface, a producer's own NV12 —
-//! goes through it, so the encoder sees one kind of input; the copy an NV12 source
-//! pays is the price of one path. A larger source — a mirrored head — is scaled down
-//! on the same pass.
+//! One context per session, sized to the encoder's visible picture. A packed-RGB
+//! dmabuf and CPU RGB on a staging surface go through it; a producer's own NV12/P010
+//! at the session's size is encoded as imported instead (`Encoder::submit_dmabuf`).
+//! A larger source — a mirrored head — is scaled down on the same pass.
 
 use std::os::raw::c_int;
 

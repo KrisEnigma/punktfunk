@@ -128,6 +128,12 @@ fn rgb_true_extent_request() -> bool {
     std::env::var("PUNKTFUNK_VULKAN_RGB_TRUE_EXTENT").as_deref() != Ok("0")
 }
 
+/// `PUNKTFUNK_VULKAN_DIRECT_PLANES=0`: keep the scratch-plane copies even where the driver lists
+/// the picture format as a storage target (the A/B for a driver that lists it and misrenders).
+fn direct_planes_request() -> bool {
+    std::env::var("PUNKTFUNK_VULKAN_DIRECT_PLANES").as_deref() != Ok("0")
+}
+
 /// `VK_KHR_video_encode_intra_refresh` latched at open (see [`intra_refresh_caps`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct IntraRefreshCaps {
@@ -550,6 +556,8 @@ struct Frame {
     nv12_src: vk::Image,
     nv12_mem: vk::DeviceMemory,
     nv12_view: vk::ImageView,
+    /// The CSC writes `nv12_src`'s planes through `y_view`/`uv_view`; `y_img`/`uv_img` are null.
+    direct_planes: bool,
     // CPU staging, keyed on (format, width, height) — not format alone. CSC sizes the image
     // to the SOURCE frame; a format-only key copies past the allocation on a size change.
     cpu_img: Option<(
@@ -1470,6 +1478,18 @@ impl VulkanVideoEncoder {
         )?;
         guard.compute_pool = compute_pool;
 
+        // The CSC targets the picture's planes where the driver allows a storage view on them;
+        // otherwise it writes scratch planes copied into the picture (two extra 4K copies).
+        let csc = rgb_cfg.is_none() && !native_nv12;
+        let direct_planes = csc
+            && direct_planes_request()
+            && probe_yuv_storage_planes(&vq_inst, pd, &profile, yuv_format(ten_bit));
+        if csc {
+            tracing::info!(
+                direct_planes,
+                "vulkan-encode: compute CSC writes the picture planes"
+            );
+        }
         for _ in 0..nframes {
             // Pre-push a null Frame and build in place so a mid-`make_frame` failure leaves
             // the partial handles in the guard rather than losing them with the Err.
@@ -1491,12 +1511,13 @@ impl VulkanVideoEncoder {
                 ts_period_ns > 0.0
                     && ((rgb_cfg.is_none() && !native_nv12)
                         || rgb_cfg.as_ref().is_some_and(|c| c.padded)),
-                rgb_cfg.is_none() && !native_nv12,
+                csc,
                 rgb_cfg
                     .as_ref()
                     .is_some_and(|c| c.padded)
                     .then_some(src_rgb_fmt),
                 ten_bit,
+                direct_planes,
                 guard.frames.last_mut().expect("frame just pushed"),
             )?;
         }
@@ -2034,6 +2055,7 @@ impl VulkanVideoEncoder {
         let uv_img = self.frames[slot].uv_img;
         let nv12_src = self.frames[slot].nv12_src;
         let nv12_view = self.frames[slot].nv12_view;
+        let direct_planes = self.frames[slot].direct_planes;
 
         // Pending rate retarget stays pending through recording: record fns declare the
         // session's current state at begin-coding and install via ENCODE_RATE_CONTROL; bookkeeping
@@ -2290,7 +2312,8 @@ impl VulkanVideoEncoder {
         };
         self.bind_rgb(csc_set, rgb_view);
 
-        // Y/UV → GENERAL (shader write); nv12_src → GENERAL (transfer dst, discard prior).
+        // GENERAL for the CSC's targets, prior contents discarded: the picture itself when its
+        // planes are written directly, else Y/UV scratch plus the picture as the copies' dst.
         let to_general = |img, dst_stage, dst_access| {
             vk::ImageMemoryBarrier2::default()
                 .src_stage_mask(vk::PipelineStageFlags2::NONE)
@@ -2304,23 +2327,31 @@ impl VulkanVideoEncoder {
                 .image(img)
                 .subresource_range(color_range(0))
         };
-        let pre = [
-            to_general(
-                y_img,
-                vk::PipelineStageFlags2::COMPUTE_SHADER,
-                vk::AccessFlags2::SHADER_WRITE,
-            ),
-            to_general(
-                uv_img,
-                vk::PipelineStageFlags2::COMPUTE_SHADER,
-                vk::AccessFlags2::SHADER_WRITE,
-            ),
-            to_general(
+        let pre = if direct_planes {
+            vec![to_general(
                 nv12_src,
-                vk::PipelineStageFlags2::ALL_TRANSFER,
-                vk::AccessFlags2::TRANSFER_WRITE,
-            ),
-        ];
+                vk::PipelineStageFlags2::COMPUTE_SHADER,
+                vk::AccessFlags2::SHADER_WRITE,
+            )]
+        } else {
+            vec![
+                to_general(
+                    y_img,
+                    vk::PipelineStageFlags2::COMPUTE_SHADER,
+                    vk::AccessFlags2::SHADER_WRITE,
+                ),
+                to_general(
+                    uv_img,
+                    vk::PipelineStageFlags2::COMPUTE_SHADER,
+                    vk::AccessFlags2::SHADER_WRITE,
+                ),
+                to_general(
+                    nv12_src,
+                    vk::PipelineStageFlags2::ALL_TRANSFER,
+                    vk::AccessFlags2::TRANSFER_WRITE,
+                ),
+            ]
+        };
         dev.cmd_pipeline_barrier2(
             compute_cmd,
             &vk::DependencyInfo::default().image_memory_barriers(&pre),
@@ -2348,68 +2379,71 @@ impl VulkanVideoEncoder {
         );
         dev.cmd_dispatch(compute_cmd, (w / 2).div_ceil(8), (h_px / 2).div_ceil(8), 1);
 
-        // Y/UV shader-write → transfer-read (stay GENERAL); then copy into nv12 planes.
-        let yuv_rd = |img| {
-            vk::ImageMemoryBarrier2::default()
-                .src_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
-                .src_access_mask(vk::AccessFlags2::SHADER_WRITE)
-                .dst_stage_mask(vk::PipelineStageFlags2::ALL_TRANSFER)
-                .dst_access_mask(vk::AccessFlags2::TRANSFER_READ)
-                .old_layout(vk::ImageLayout::GENERAL)
-                .new_layout(vk::ImageLayout::GENERAL)
-                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                .image(img)
-                .subresource_range(color_range(0))
-        };
-        dev.cmd_pipeline_barrier2(
-            compute_cmd,
-            &vk::DependencyInfo::default().image_memory_barriers(&[yuv_rd(y_img), yuv_rd(uv_img)]),
-        );
-        let plane_copy = |src_aspect, dst_aspect, ew, eh| {
-            vk::ImageCopy::default()
-                .src_subresource(
-                    vk::ImageSubresourceLayers::default()
-                        .aspect_mask(src_aspect)
-                        .layer_count(1),
-                )
-                .dst_subresource(
-                    vk::ImageSubresourceLayers::default()
-                        .aspect_mask(dst_aspect)
-                        .layer_count(1),
-                )
-                .extent(vk::Extent3D {
-                    width: ew,
-                    height: eh,
-                    depth: 1,
-                })
-        };
-        dev.cmd_copy_image(
-            compute_cmd,
-            y_img,
-            vk::ImageLayout::GENERAL,
-            nv12_src,
-            vk::ImageLayout::GENERAL,
-            &[plane_copy(
-                vk::ImageAspectFlags::COLOR,
-                vk::ImageAspectFlags::PLANE_0,
-                w,
-                h_px,
-            )],
-        );
-        dev.cmd_copy_image(
-            compute_cmd,
-            uv_img,
-            vk::ImageLayout::GENERAL,
-            nv12_src,
-            vk::ImageLayout::GENERAL,
-            &[plane_copy(
-                vk::ImageAspectFlags::COLOR,
-                vk::ImageAspectFlags::PLANE_1,
-                w / 2,
-                h_px / 2,
-            )],
-        );
+        if !direct_planes {
+            // Y/UV shader-write → transfer-read (stay GENERAL); then copy into nv12 planes.
+            let yuv_rd = |img| {
+                vk::ImageMemoryBarrier2::default()
+                    .src_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
+                    .src_access_mask(vk::AccessFlags2::SHADER_WRITE)
+                    .dst_stage_mask(vk::PipelineStageFlags2::ALL_TRANSFER)
+                    .dst_access_mask(vk::AccessFlags2::TRANSFER_READ)
+                    .old_layout(vk::ImageLayout::GENERAL)
+                    .new_layout(vk::ImageLayout::GENERAL)
+                    .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .image(img)
+                    .subresource_range(color_range(0))
+            };
+            dev.cmd_pipeline_barrier2(
+                compute_cmd,
+                &vk::DependencyInfo::default()
+                    .image_memory_barriers(&[yuv_rd(y_img), yuv_rd(uv_img)]),
+            );
+            let plane_copy = |src_aspect, dst_aspect, ew, eh| {
+                vk::ImageCopy::default()
+                    .src_subresource(
+                        vk::ImageSubresourceLayers::default()
+                            .aspect_mask(src_aspect)
+                            .layer_count(1),
+                    )
+                    .dst_subresource(
+                        vk::ImageSubresourceLayers::default()
+                            .aspect_mask(dst_aspect)
+                            .layer_count(1),
+                    )
+                    .extent(vk::Extent3D {
+                        width: ew,
+                        height: eh,
+                        depth: 1,
+                    })
+            };
+            dev.cmd_copy_image(
+                compute_cmd,
+                y_img,
+                vk::ImageLayout::GENERAL,
+                nv12_src,
+                vk::ImageLayout::GENERAL,
+                &[plane_copy(
+                    vk::ImageAspectFlags::COLOR,
+                    vk::ImageAspectFlags::PLANE_0,
+                    w,
+                    h_px,
+                )],
+            );
+            dev.cmd_copy_image(
+                compute_cmd,
+                uv_img,
+                vk::ImageLayout::GENERAL,
+                nv12_src,
+                vk::ImageLayout::GENERAL,
+                &[plane_copy(
+                    vk::ImageAspectFlags::COLOR,
+                    vk::ImageAspectFlags::PLANE_1,
+                    w / 2,
+                    h_px / 2,
+                )],
+            );
+        }
         if self.ts_period_ns > 0.0 {
             dev.cmd_write_timestamp2(
                 compute_cmd,
@@ -4173,7 +4207,7 @@ mod reframe_stage;
 mod build;
 use self::build::{
     align_up, build_parameters_av1, build_parameters_h265, make_frame, make_video_image,
-    probe_rgb_direct, rgb_model_for,
+    probe_rgb_direct, probe_yuv_storage_planes, rgb_model_for,
 };
 
 #[cfg(test)]
