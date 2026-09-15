@@ -1560,12 +1560,12 @@ pub fn detail(id: RowId, ctx: &Ctx) -> &'static str {
              for priority. Off if a decoder shows artefacts under it."
         }
         RowId::PhoneRumble => {
-            "Play the host's rumble on this phone's own motor when no controller is \
-             attached. Costs battery; does nothing with a pad connected."
+            "Also play controller 1's rumble on this phone's own motor — for a clip-on pad \
+             with no motor. Costs battery."
         }
         RowId::PhoneGyro => {
-            "Send this phone's motion as the controller's gyro when no controller is \
-             attached. Only games that read gyro notice; a pad's own gyro wins."
+            "Send this phone's motion as controller 1's gyro when that pad has none of its \
+             own — the on-screen pad included. Only games that read gyro notice."
         }
         RowId::Sc2Passthrough => {
             "Capture the Steam Controller 2 directly (touchpads, gyro, paddles) instead of \

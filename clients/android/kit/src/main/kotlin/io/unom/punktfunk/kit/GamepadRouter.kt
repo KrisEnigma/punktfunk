@@ -151,6 +151,12 @@ class GamepadRouter(
          * capture link.
          */
         val hasMuteButton: Boolean = false,
+        /**
+         * Whether this pad brings a motion source of its own, so the phone-gyro mirror stands
+         * down for it ([padHasOwnMotion]): every capture link's pad. A real controller earns it
+         * later through [PadSensors]; the on-screen pad never does.
+         */
+        val ownMotion: Boolean = false,
     ) {
         /** Forwarded button bits currently held (Gamepad.BTN_*) — for release-on-close + chord detection. */
         var held = 0
@@ -621,16 +627,16 @@ class GamepadRouter(
     fun padMask(): Int = slots.values.fold(0) { m, s -> m or (1 shl s.index) }
 
     /**
-     * Whether wire pad [pad]'s motion already comes from the controller's OWN IMU — either a
-     * capture-link slot ([ExternalPad] — USB DualSense / SC2; synthetic ids are negative
-     * ([EXTERNAL_ID_BASE]), real [InputDevice] ids positive), or a real controller whose gyro
+     * Whether wire pad [pad]'s motion already comes from the controller's OWN IMU — a capture
+     * link's pad (USB DualSense / SC2, opened with `ownMotion`), or a real controller whose gyro
      * [PadSensors] is reading through the platform sensor framework (a Bluetooth DualSense /
-     * Switch Pro / 8BitDo). The phone-gyro mirror stands down for both: two motion writers on one
-     * wire pad would fight, and the pad's own IMU is the one attached to the player's hands.
+     * Switch Pro / 8BitDo). The on-screen pad has none, so the phone's gyro may speak for it.
+     * The phone-gyro mirror stands down for the rest: two motion writers on one wire pad would
+     * fight, and the pad's own IMU is the one attached to the player's hands.
      * Read from the phone-gyro thread (both tables are concurrent).
      */
     fun padHasOwnMotion(pad: Int): Boolean =
-        slots.any { (id, slot) -> slot.index == pad && (id < 0 || id in sensorDevices) }
+        slots.any { (id, slot) -> slot.index == pad && (slot.ownMotion || id in sensorDevices) }
 
     /**
      * Declare (or withdraw) that real controller [deviceId] is sourcing its own rotation — see
@@ -749,8 +755,12 @@ class GamepadRouter(
      * whose motion rides inside the opaque passthrough report that [ExternalPad.hidReport] carries
      * and which nothing here may second-guess. It gates only the notice: a pad that never sends
      * motion must not produce a warning about motion.
+     *
+     * [ownMotion] says whether the pad has an IMU at all ([padHasOwnMotion]): true for every
+     * capture link (the Steam Controller 2's rides in its passthrough report), false only for
+     * the on-screen pad, which the phone's own gyro may then drive.
      */
-    fun openExternal(pref: Int, hasGyro: Boolean = false): ExternalPad? {
+    fun openExternal(pref: Int, hasGyro: Boolean = false, ownMotion: Boolean = true): ExternalPad? {
         val index = lowestFreeIndex() ?: return null
         // Synthetic ids live below any real InputDevice id (those are positive), so they can't
         // collide and InputDevice.getDevice(id) resolves them to null for the feedback path.
@@ -769,6 +779,7 @@ class GamepadRouter(
             index,
             Gamepad.AxisMapper(handle, index),
             hasMuteButton = hasMute,
+            ownMotion = ownMotion,
         )
         return ExternalPad(syntheticId, index, motionReaches)
     }
