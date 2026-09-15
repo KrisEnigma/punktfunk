@@ -157,6 +157,11 @@ internal object SettingsFields {
         fun overlayFromJson(o: SettingsOverlay, j: JSONObject): SettingsOverlay =
             overlay?.let { ov -> kind.read(j, key)?.let { ov.set(o, it) } } ?: o
 
+        /** The override in the console document's encoding, under the console's key. */
+        fun overlayToConsoleJson(o: SettingsOverlay, j: JSONObject) {
+            overlay?.get?.invoke(o)?.let { consoleKind.write(j, consoleKey, it) }
+        }
+
         private val consoleKey get() = console?.key ?: key
         private val consoleKind get() = console?.kind ?: kind
         fun consoleWrite(j: JSONObject, s: Settings) = consoleKind.write(j, consoleKey, get(s))
