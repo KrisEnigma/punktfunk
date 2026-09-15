@@ -1110,7 +1110,7 @@ mod drain_tests {
             .collect();
         assert_eq!(
             entries.len(),
-            8,
+            9,
             "parsed {entries:?} out of the driver's table — the shape changed and this test went \
              vacuous; fix the parse rather than deleting the assert"
         );
@@ -1140,6 +1140,12 @@ mod drain_tests {
             (
                 super::super::triton_windows::TRITON_HWID,
                 pf_driver_proto::gamepad::DEVTYPE_TRITON,
+            ),
+            // Server's unfiltered Xbox line: any Xbox type, so the pad never enumerates as a
+            // DualSense while hidclass asks; the section sets the real one on attach.
+            (
+                super::super::xbox_windows::XBOX_UNFILTERED_HWID,
+                pf_driver_proto::gamepad::DEVTYPE_XBOX,
             ),
         ]
         .into_iter()

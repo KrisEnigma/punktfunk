@@ -282,12 +282,20 @@ impl Drive<'_> {
         next
     }
 
+    /// Hand a slot back unless this thread was detached: its successor reclaimed every slot
+    /// (`reset`), and a release here would free one that successor is encoding.
+    fn release_if_live(&self, slot: usize) {
+        if self.live.load(Ordering::Acquire) {
+            self.pool.release(slot);
+        }
+    }
+
     /// Submit one pool slot, or drop it where dropping is free. `false` means the backend has
     /// failed [`MAX_SUBMIT_FAILURES`] times running and the thread leaves.
     fn submit_one(&mut self, (slot, qpc, seq): (usize, u64, u64)) -> bool {
         // Back-pressure lands here: no free AU slot, no submit.
         if !self.section_has_free() {
-            self.pool.release(slot);
+            self.release_if_live(slot);
             self.count_drop();
             return true;
         }
@@ -295,7 +303,7 @@ impl Drive<'_> {
         let frame = match self.pool.frame(slot, pts) {
             Ok(f) => f,
             Err(_) => {
-                self.pool.release(slot);
+                self.release_if_live(slot);
                 self.count_drop();
                 return true;
             }
@@ -309,7 +317,7 @@ impl Drive<'_> {
         let submitted = qpc_now();
         if let Err(e) = self.enc.submit_indexed(&frame, index) {
             dbglog!("[pf-vd] encode: submit failed: {e:#}");
-            self.pool.release(slot);
+            self.release_if_live(slot);
             self.set_state(au::ENCODER_WEDGED);
             // A lazy backend re-runs its whole bring-up per submit; stop retrying at the compose
             // rate and leave the session threadless for the host's reset rung.

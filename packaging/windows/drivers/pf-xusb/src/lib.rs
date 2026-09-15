@@ -202,30 +202,9 @@ extern "C" fn evt_device_add(_driver: WDFDRIVER, mut device_init: PWDFDEVICE_INI
     };
     WAIT_QUEUE.store(wait_queue, Ordering::SeqCst);
 
-    // Run the sealed-channel handshake on a worker (must NOT block EvtDeviceAdd): publish our pid in
-    // the bootstrap mailbox and poll for the host's delivered DATA handle, so the pad attaches (and
-    // the host's driver-attach health check goes green) even before any game polls XInput. Bounded;
-    // a later host (or a re-delivery) is picked up by the periodic timer below. This closure is 100%
-    // safe — the whole channel state machine lives in pf_umdf_util (whose adopt CAS is explicitly
-    // built for concurrent pumps, so worker + timer coexisting is sound).
-    std::thread::spawn(|| {
-        let cfg = channel_cfg();
-        for _ in 0..500 {
-            if let Some(v) = CHANNEL.pump(&cfg) {
-                touch_driver_marks(v);
-                HOST_LIVE.store(true, Ordering::Relaxed);
-                return;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
-        log(
-            "[pf-xusb] no sealed-channel delivery within 10s (host absent, or host/driver version mismatch — see above)",
-        );
-    });
-
-    // Periodic sealed-channel tick (the pf-gamepad timer pattern, parented to the default queue):
-    // owns the mailbox pump — adoption, re-delivery, host-gone — so the XInput IOCTL path never
-    // re-opens the mailbox (see `evt_io_device_control`).
+    // Periodic sealed-channel tick, parented to the default queue. It is the only mailbox pump
+    // (adoption, re-delivery, host-gone), so the XInput IOCTL path never re-opens the mailbox and
+    // nothing outlives the device to stamp a later session's mailbox.
     // SAFETY: `queue` is the live default queue just created.
     let timer = unsafe { skeleton::create_periodic_timer(queue.cast(), Some(evt_timer), 8) };
     if let Err(st) = timer {

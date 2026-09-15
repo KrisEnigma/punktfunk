@@ -143,7 +143,10 @@ impl SwapChainProcessor {
         // For the log lines: 0 for a monitor the registry does not hold, whose worker only drains.
         let target_id = monitor.upgrade().map_or(0, |m| m.target_id());
 
-        let join_handle = thread::spawn(move || {
+        // The raw handle outlives the closure's move: a worker that never starts still owns the
+        // swap-chain and must delete it, or IddCx keeps an undrained chain.
+        let sc_raw = swap_chain.0;
+        let spawned = thread::Builder::new().name("pf-vd-swapchain".into()).spawn(move || {
             // Rust 2021 disjoint closure captures would otherwise grab the raw `swap_chain.0` /
             // `events.0` FIELDS directly (defeating the `Sendable` Send wrapper, since the inner
             // `*mut IDDCX_SWAPCHAIN__` / `HANDLE` are `!Send`). Rebind the WHOLE wrappers here so the
@@ -177,7 +180,17 @@ impl SwapChainProcessor {
             }
         });
 
-        self.thread = Some(join_handle);
+        match spawned {
+            Ok(join_handle) => self.thread = Some(join_handle),
+            Err(e) => {
+                dbglog!("[pf-vd] swap-chain worker did not start: {e} — deleting the swap-chain");
+                // SAFETY: the worker never ran, so this is the sole reference to a live IddCx
+                // swap-chain handle that IddCx handed us.
+                unsafe {
+                    call_unsafe_wdf_function_binding!(WdfObjectDelete, sc_raw as WDFOBJECT);
+                }
+            }
+        }
     }
 
     /// The drain loop. It upgrades `monitor` once per pass for the delivery gate and releases
