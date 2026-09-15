@@ -739,9 +739,8 @@ in
           # Sandbox — the same confinement scripts/punktfunk-scripting.service gives the deb/rpm
           # installs. The runner `import()`s the operator's own `.ts` files, so this is the one unit
           # here that executes arbitrary code by design; without these it ran strictly LESS confined
-          # on NixOS than on every other channel. Read-only outside $HOME, no setuid re-escalation,
-          # and only the address families automation actually uses (loopback mgmt API, LAN/IPv6
-          # webhooks, unix sockets).
+          # on NixOS than on every other channel. Keep the two files in step: module-check.nix
+          # asserts each directive below.
           NoNewPrivileges = true;
           # PrivateTmp deliberately OFF (field report 2026-08-03, the VirtualHere plugin). A
           # plugin's whole job is integrating with things already running on this box, and on Linux
@@ -751,17 +750,77 @@ in
           # which presents as an error no amount of config fixes.
           PrivateTmp = false;
           ProtectSystem = "strict";
-          # ReadWritePaths puts back the write bit ProtectSystem=strict takes away: plugin state and
-          # ~/.config/punktfunk under $HOME, plus the /tmp above. A plugin that must write OUTSIDE
-          # $HOME (a game library on another mount) gets it with
-          #   systemctl --user edit punktfunk-scripting  →  [Service] ReadWritePaths=/mnt/games
-          # ⚠ ProtectSystem is a MOUNT-NAMESPACE option, and for a *user* unit that needs
-          # unprivileged user namespaces. On a kernel/config that restricts those it fails the unit
-          # rather than degrading — drop it via the same drop-in if this box is one of them.
-          ReadWritePaths = [
-            "%h"
-            "/tmp"
+          # The plugin token's privilege split, made real by the filesystem: a plugin holds a
+          # capability-limited token, so the runner must not reach the full-admin `mgmt-token` or
+          # the identity key beside it. Same uid as the operator means file modes cannot say that;
+          # an empty home plus an explicit allow-list can. Mirrors the Windows runner's ACL, which
+          # grants LocalService the scoped token and the TLS pin and nothing else.
+          #
+          # InaccessiblePaths is belt and braces: wherever the home tmpfs does not land, or a
+          # drop-in removes ProtectHome, the denylist is what still stands.
+          #
+          # ⚠ All of these are MOUNT-NAMESPACE options, and for a *user* unit that needs
+          # unprivileged user namespaces. On a kernel/config that restricts those they fail the
+          # unit rather than degrading — drop them via
+          #   systemctl --user edit punktfunk-scripting
+          # which is also where a plugin that must reach elsewhere gets `ReadWritePaths=/mnt/games`
+          # (outside the home) or `BindReadOnlyPaths=` (inside it).
+          ProtectHome = "tmpfs";
+          InaccessiblePaths = [
+            "-%h/.config/punktfunk/mgmt-token"
+            "-%h/.config/punktfunk/key.pem"
+            "-%h/.config/punktfunk/native-key.pem"
           ];
+          # Writable: the installed packages (the runner refreshes their shared SDK with
+          # `bun install` on every start) and the one directory a plugin may persist into. `%t` is
+          # $XDG_RUNTIME_DIR, which ProtectHome empties too — the host publishes its live-stream
+          # marker there, and the session bus and compositor sockets live there.
+          BindPaths = [
+            "-%h/.config/punktfunk/plugins"
+            "-%h/.config/punktfunk/plugin-state"
+            # bun's package cache ($BUN_INSTALL). Only the SDK refresh writes here, and it fails
+            # soft — but soft means plugins keep an old SDK across host upgrades.
+            "-%h/.bun"
+            "%t"
+          ];
+          # Read-only. The punktfunk entries are the runner's credentials and its inputs: the
+          # scoped token, the TLS pin (native-cert.pem after the identity split, cert.pem before
+          # it), the port the host really bound, the operator's loose scripts, and the drop box
+          # another local account fills.
+          #
+          # The launcher roots are there because on Linux a game library lives IN the home, so an
+          # empty home is an EMPTY LIBRARY — the scanner plugins read exactly these. A scanner for
+          # a launcher not listed needs a drop-in.
+          #
+          # The punktfunk-scripting entries cover the SteamOS layout, which builds the runner under
+          # the home and points ExecStart at it. Every path is '-' because none is guaranteed.
+          BindReadOnlyPaths = [
+            "-%h/.config/punktfunk/plugin-token"
+            "-%h/.config/punktfunk/native-cert.pem"
+            "-%h/.config/punktfunk/cert.pem"
+            "-%h/.config/punktfunk/mgmt-endpoint"
+            "-%h/.config/punktfunk/scripts"
+            "-%h/.config/punktfunk/ingest"
+            "-%h/.local/share/Steam"
+            "-%h/.steam"
+            "-%h/.var/app"
+            "-%h/.local/share/lutris"
+            "-%h/.config/lutris"
+            "-%h/.config/heroic"
+            "-%h/.local/bin/punktfunk-scripting"
+            "-%h/.local/lib/punktfunk-scripting"
+            "-%h/.local/share/punktfunk-scripting"
+          ];
+          # Puts back the write bit ProtectSystem=strict takes away from the real /tmp above.
+          ReadWritePaths = [ "/tmp" ];
+          # Free for a JS runtime that only talks HTTP and reads files. Two are absent on purpose:
+          # MemoryDenyWriteExecute because bun JITs, and PrivateDevices because a plugin's vendor
+          # binary integrates with hardware already on this box (VirtualHere forwards USB).
+          ProtectKernelTunables = true;
+          ProtectControlGroups = true;
+          RestrictNamespaces = true;
+          SystemCallArchitectures = "native";
+          CapabilityBoundingSet = "";
           RestrictAddressFamilies = [
             "AF_UNIX"
             "AF_INET"
