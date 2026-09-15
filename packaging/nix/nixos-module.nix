@@ -205,8 +205,8 @@ in
           `host.env` key/value pairs passed to the service via `EnvironmentFile`. See
           `''${package}/share/punktfunk-host/host.env.example` for the full surface. Booleans render
           as `1`/`0`. Leave empty to rely on the host's per-connect auto-detection of the
-          compositor + input backend. Do NOT put secrets here (world-readable in the store) — use
-          `environmentFile` instead.
+          compositor + input backend. Secrets are REFUSED here (this renders to a world-readable
+          store path) — use `environmentFile`, or let the host generate them.
         '';
       };
 
@@ -215,8 +215,10 @@ in
         default = null;
         example = "/run/secrets/punktfunk-host.env";
         description = ''
-          Extra `EnvironmentFile` layered AFTER `settings` (its values win). For secrets such as
-          `PUNKTFUNK_MGMT_TOKEN`. Loaded optionally (a missing file does not fail the unit).
+          Extra `EnvironmentFile` layered AFTER `settings` (its values win), for values that must
+          not reach the store. Loaded optionally (a missing file does not fail the unit). The host
+          keeps its own credentials in `~/.config/punktfunk/`, owner-only, and takes them out of its
+          environment at startup so the games and hooks it launches cannot inherit them.
         '';
       };
 
@@ -395,6 +397,18 @@ in
     # --- shared: whenever either half is enabled -----------------------------------------------
     (mkIf (cfg.host.enable || cfg.client.enable) {
       assertions = [
+        {
+          # `settings` renders to a world-readable store path, and every value in it is inherited
+          # by the games and hooks the host launches.
+          assertion = !(lib.any (k: lib.hasInfix "TOKEN" k || lib.hasInfix "PASSWORD" k) (
+            lib.attrNames cfg.host.settings
+          ));
+          message = ''
+            services.punktfunk.host.settings must not carry a token or a password: it becomes a
+            world-readable file in the Nix store. Use services.punktfunk.host.environmentFile, or
+            let the host generate its own credentials in ~/.config/punktfunk/.
+          '';
+        }
         {
           assertion = system == "x86_64-linux";
           message = "services.punktfunk is x86_64-linux only (desktop NVENC host; no aarch64 build).";

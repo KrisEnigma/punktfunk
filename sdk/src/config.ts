@@ -136,17 +136,19 @@ export const resolveConfig = async (
 		publishedMgmtUrl() ??
 		"https://127.0.0.1:47990"
 	).replace(/\/+$/, "");
+	// Never falls back to the admin `mgmt-token` file. On Linux the runner shares the operator's
+	// uid, so reading it is one line away — and a zero-config `connect()` that silently picked it
+	// up handed every plugin full admin on any host whose plugin token was missing.
 	const token =
 		options?.token ??
 		process.env.PUNKTFUNK_MGMT_TOKEN ??
 		process.env.PUNKTFUNK_PLUGIN_TOKEN ??
-		parseTokenFile(readIfExists(path.join(configDir(), "plugin-token")) ?? "") ??
-		parseTokenFile(readIfExists(path.join(configDir(), "mgmt-token")) ?? "");
+		parseTokenFile(readIfExists(path.join(configDir(), "plugin-token")) ?? "");
 	if (!token) {
 		throw new Error(
-			"no management token: set PUNKTFUNK_PLUGIN_TOKEN (or PUNKTFUNK_MGMT_TOKEN), pass " +
-				"{ token }, or run where the host's token files exist " +
-				`(${path.join(configDir(), "plugin-token")})`,
+			"no plugin token: the host writes one to " +
+				`${path.join(configDir(), "plugin-token")} once the runner is installed. Pass ` +
+				"{ token }, or set PUNKTFUNK_MGMT_TOKEN for a script that needs the admin API.",
 		);
 	}
 	const caPath = process.env.PUNKTFUNK_MGMT_CA;

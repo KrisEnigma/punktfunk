@@ -1,4 +1,4 @@
-# punktfunk plugin/script runner — systemd USER unit (bun runtime, OPT-IN).
+# punktfunk plugin/script runner — systemd USER unit (bun runtime, ON BY DEFAULT, opt-out).
 #
 # Runs the operator's automation under supervision: loose files in ~/.config/punktfunk/scripts/ and
 # installed `punktfunk-plugin-*` packages under ~/.config/punktfunk/plugins/. Each unit is an Effect
