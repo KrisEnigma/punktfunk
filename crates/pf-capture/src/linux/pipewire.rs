@@ -3,7 +3,7 @@
 use super::pw_cursor::{composite_cursor, update_cursor_meta, CursorState};
 use super::pw_pods::{
     build_cursor_meta_param, build_default_format_obj, build_dmabuf_buffers, build_dmabuf_format,
-    build_hdr_dmabuf_format, build_mappable_buffers, build_shm_only_buffers, serialize_pod,
+    build_hdr_dmabuf_format, build_mappable_buffers, build_shm_only_buffers, serialize_pod, Pacing,
     HDR_FORMAT_ORDER,
 };
 use super::{CapturedFrame, DmabufFrame, FramePayload, PixelFormat, ZeroCopyPolicy};
@@ -44,18 +44,12 @@ struct UserData {
     slot: super::FrameSlot,
     wake: SyncSender<()>,
     signals: super::CaptureSignals,
-    /// Consecutive tiled-import failures; reset on success. See [`IMPORT_FAIL_POISON`].
-    import_fail_streak: u32,
-    /// NVIDIA zero-copy: dmabuf → CUDA, usually via the isolated worker (`Importer::Remote`).
-    importer: Option<pf_zerocopy::Importer>,
     /// Raw dmabuf to the encoder instead of a CUDA import (VAAPI).
     vaapi_passthrough: bool,
-    /// `PUNKTFUNK_NV12`: tiled EGL/GL path converts to NV12 for native NVENC YUV. Off leaves BGRx.
-    nv12: bool,
-    /// Tiled EGL/GL path converts to planar YUV444. Wins over `nv12` — 4:4:4 must not subsample.
-    yuv444: bool,
-    /// LINEAR NV12 compute CSC failed once: RGB for the rest of this stream. Cleared by the next `Ud`.
-    linear_nv12_failed: bool,
+    /// CUDA import choices; the consumer imports held frames with the same policy.
+    import_policy: ImportPolicy,
+    /// Arrival-path import memory. The consumer keeps its own.
+    import_state: ImportState,
     /// Rate-limit counter for the latest-frame-only diagnostic (see `.process`).
     dbg_log_n: u64,
     /// Which clock feeds wire `pts_ns`. Delivery stamps sit downstream of compositor jitter.
@@ -157,12 +151,42 @@ pub(super) struct NegotiationInputs {
     pub native_nv12_env_on: bool,
     /// Encoder can ingest packed 10-bit PQ CUDA. Only direct-SDK NVENC can.
     pub hdr_cuda_ok: bool,
+    /// `PUNKTFUNK_NV12`: the CUDA import emits NV12 (tiled blit or LINEAR compute CSC).
+    pub nv12_env_on: bool,
+}
+
+/// Format choices the CUDA import makes per frame; the same on both threads.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(super) struct ImportPolicy {
+    /// `PUNKTFUNK_NV12`: emit NV12 for native NVENC YUV. Off leaves packed RGB.
+    pub nv12: bool,
+    /// Planar YUV444 on tiled EGL. Wins over `nv12` — 4:4:4 must not subsample.
+    pub yuv444: bool,
+}
+
+/// Per-stream import memory: the LINEAR NV12 latch and the tiled failure streak.
+#[derive(Debug, Default)]
+pub(super) struct ImportState {
+    /// LINEAR NV12 compute CSC failed once: RGB for the rest of this stream.
+    pub linear_nv12_failed: bool,
+    /// Consecutive tiled-import failures; reset on success. See [`IMPORT_FAIL_POISON`].
+    pub fail_streak: u32,
+}
+
+/// [`gpu_import`]'s verdict. `ImporterLost` is a LINEAR failure: the caller retires the
+/// importer and the stream continues on the CPU path.
+pub(super) enum ImportOutcome {
+    Frame(pf_zerocopy::DeviceBuffer, PixelFormat),
+    Dropped,
+    ImporterLost,
 }
 
 /// Zero-copy negotiation, resolved once and consumed by the PipeWire thread and `spawn_pipewire`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct NegotiationPlan {
     pub build_importer: bool,
+    /// What every CUDA import of this stream does, on either thread.
+    pub import_policy: ImportPolicy,
     pub vaapi_passthrough: bool,
     pub prefer_native_nv12: bool,
     /// Carried so [`want_dmabuf`](Self::want_dmabuf) needs no second copy.
@@ -206,6 +230,10 @@ pub(super) fn negotiation_plan(i: NegotiationInputs) -> NegotiationPlan {
         && !i.want_hdr;
     NegotiationPlan {
         build_importer,
+        import_policy: ImportPolicy {
+            nv12: i.nv12_env_on,
+            yuv444: i.want_444,
+        },
         vaapi_passthrough,
         prefer_native_nv12,
         force_shm: i.force_shm,
@@ -492,7 +520,7 @@ impl PoolCensus {
 ///
 /// `.process` runs per frame; per-reason so a transient `NoFormat` at open does not spend
 /// the budget a persistent `NotDmabuf` needs.
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(super) struct PassthroughFallbacks {
     frames: u64,
     logged: u8,
@@ -513,6 +541,108 @@ impl PassthroughFallbacks {
 /// Tiled-import failures (worker alive) before the stream is poisoned for rebuild.
 /// Never fall through to CPU mmap: de-padding tiled bytes as linear is a scrambled image.
 const IMPORT_FAIL_POISON: u32 = 3;
+
+/// Holds exist for this pool: two stay with the producer, the rest may sit in the slot or under
+/// the consumer's import. False means the arrival path imports itself.
+fn holds_possible(hold_enabled: bool, pool_live: u32) -> bool {
+    hold_enabled && pool_live > HOLD_POOL_RESERVE
+}
+
+/// One dmabuf → CUDA import: tiled through EGL, LINEAR through the Vulkan bridge, NV12 or
+/// YUV444 where the policy asks. Failures are graded here so both threads act alike: a tiled
+/// failure drops the frame and poisons the stream after [`IMPORT_FAIL_POISON`] (or at once
+/// when the worker died); a LINEAR failure retires the importer.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn gpu_import(
+    importer: &mut pf_zerocopy::Importer,
+    policy: ImportPolicy,
+    state: &mut ImportState,
+    signals: &super::CaptureSignals,
+    fmt: PixelFormat,
+    w: u32,
+    h: u32,
+    plane: pf_zerocopy::DmabufPlane,
+    modifier: u64,
+) -> ImportOutcome {
+    let Some(fourcc) = pf_frame::drm_fourcc(fmt) else {
+        return ImportOutcome::Dropped; // format has no DRM fourcc mapping
+    };
+    let modifier = (modifier != 0).then_some(modifier);
+    let ten_bit = fmt.is_hdr_rgb10();
+    let yuv444 = policy.yuv444 && modifier.is_some() && !ten_bit;
+    let mut nv12 = policy.nv12 && !policy.yuv444 && !ten_bit;
+    let imported = if let Some(m) = modifier {
+        if yuv444 {
+            importer.import_yuv444(&plane, w, h, fourcc, Some(m))
+        } else if nv12 {
+            importer.import_nv12(&plane, w, h, fourcc, Some(m))
+        } else {
+            importer.import(&plane, w, h, fourcc, Some(m))
+        }
+    } else if nv12 && !state.linear_nv12_failed {
+        match importer.import_linear_nv12(&plane, w, h) {
+            Ok(buf) => Ok(buf),
+            Err(e) => {
+                state.linear_nv12_failed = true;
+                nv12 = false;
+                tracing::warn!(error = %format!("{e:#}"),
+                    "LINEAR NV12 compute CSC failed — RGB for the rest of this \
+                     stream (NVENC does the CSC internally)");
+                importer.import_linear(&plane, w, h)
+            }
+        }
+    } else {
+        nv12 = false;
+        importer.import_linear(&plane, w, h)
+    };
+    match imported {
+        Ok(devbuf) => {
+            state.fail_streak = 0;
+            pf_zerocopy::note_gpu_import_ok();
+            static ONCE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+            if ONCE.swap(false, Ordering::Relaxed) {
+                tracing::info!(
+                    w,
+                    h,
+                    modifier = modifier.unwrap_or(0),
+                    nv12,
+                    yuv444,
+                    "zero-copy: dmabuf imported to CUDA (no CPU copy)"
+                );
+            }
+            let out = if yuv444 {
+                PixelFormat::Yuv444
+            } else if nv12 {
+                PixelFormat::Nv12
+            } else {
+                fmt
+            };
+            ImportOutcome::Frame(devbuf, out)
+        }
+        Err(e) => {
+            let dead = importer.dead();
+            if dead {
+                pf_zerocopy::note_gpu_import_death();
+            }
+            if modifier.is_none() {
+                tracing::warn!(error = %format!("{e:#}"),
+                    "LINEAR dmabuf GPU import failed — falling back to the CPU copy path");
+                return ImportOutcome::ImporterLost;
+            }
+            state.fail_streak += 1;
+            if dead || state.fail_streak >= IMPORT_FAIL_POISON {
+                tracing::error!(error = %format!("{e:#}"), dead,
+                    "tiled GPU import lost — failing this capture for rebuild");
+                signals.broken.store(true, Ordering::Relaxed);
+            } else {
+                tracing::warn!(error = %format!("{e:#}"),
+                    streak = state.fail_streak,
+                    "tiled dmabuf GPU import failed — frame dropped");
+            }
+            ImportOutcome::Dropped
+        }
+    }
+}
 
 /// Buffers left in the producer's pool: one it is rendering, one in transit.
 /// Withholding past that skips frames when holds peak (host frame + up to two encoder slots).
@@ -1011,128 +1141,99 @@ fn consume_frame(
     }
 
     // dmabuf + importer → CUDA, no CPU touch. Else fall through to the shm de-pad copy.
+    // dmabuf + importer: hand the held buffer to the consumer, which imports at its own tick
+    // (`import_held`). Arrivals above the wire rate then cost nothing here. A buffer that
+    // cannot be held is dropped while holds are possible at all — the slot already has a held
+    // frame — and imported here only when this pool can never hold.
     let mut gpu_import_broken = false;
-    if let (Some(importer), Some(fmt)) = (ud.importer.as_mut(), ud.format) {
-        // 10-bit PQ may take LINEAR (Vulkan-bridge, 4 Bpp verbatim) but never the tiled EGL
-        // de-tile blit (`GL_RGBA8`, silent depth loss). A tiled modifier here means the
-        // producer ignored the LINEAR-only HDR offer — drop to CPU rather than trust it.
-        let hdr_tiled = fmt.is_hdr_rgb10() && ud.modifier != 0;
-        if hdr_tiled {
-            warn_once(
-                "HDR frame arrived with a tiled modifier — the GPU de-tile blit is 8-bit, so \
-                 this stream falls back to the CPU path (the producer ignored our LINEAR-only \
-                 HDR offer)",
-            );
-        }
-        if datas[0].type_() == pw::spa::buffer::DataType::DmaBuf && !hdr_tiled {
-            let plane = pf_zerocopy::DmabufPlane {
-                fd: datas[0].fd(),
-                offset: datas[0].chunk().offset(),
-                stride: datas[0].chunk().stride().max(0) as u32,
-            };
-            // Tiled → EGL/GL de-tile; LINEAR (gamescope) → CUDA external-memory (NVIDIA EGL
-            // cannot sample LINEAR).
-            let modifier = (ud.modifier != 0).then_some(ud.modifier);
-            if let Some(fourcc) = pf_frame::drm_fourcc(fmt) {
-                // 4:4:4 planar YUV444 on tiled EGL (never subsample; wins over NV12). Else
-                // `PUNKTFUNK_NV12` → NV12 (tiled blit or LINEAR compute CSC). HDR stays packed
-                // RGB: both CSCs write 8-bit planes, and NVENC ingests ARGB10/ABGR10 natively.
-                // LINEAR NV12 failure latches RGB for the stream (no drop).
-                let ten_bit = fmt.is_hdr_rgb10();
-                let yuv444 = ud.yuv444 && modifier.is_some() && !ten_bit;
-                let mut nv12 = ud.nv12 && !ud.yuv444 && !ten_bit;
-                let imported = if let Some(m) = modifier {
-                    if yuv444 {
-                        importer.import_yuv444(&plane, w as u32, h as u32, fourcc, Some(m))
-                    } else if nv12 {
-                        importer.import_nv12(&plane, w as u32, h as u32, fourcc, Some(m))
-                    } else {
-                        importer.import(&plane, w as u32, h as u32, fourcc, Some(m))
-                    }
-                } else if nv12 && !ud.linear_nv12_failed {
-                    match importer.import_linear_nv12(&plane, w as u32, h as u32) {
-                        Ok(buf) => Ok(buf),
-                        Err(e) => {
-                            ud.linear_nv12_failed = true;
-                            nv12 = false;
-                            tracing::warn!(error = %format!("{e:#}"),
-                                "LINEAR NV12 compute CSC failed — RGB for the rest of this \
-                                 stream (NVENC does the CSC internally)");
-                            importer.import_linear(&plane, w as u32, h as u32)
-                        }
-                    }
-                } else {
-                    nv12 = false;
-                    importer.import_linear(&plane, w as u32, h as u32)
+    if ud.signals.has_importer.load(Ordering::Relaxed) {
+        if let Some(fmt) = ud.format {
+            let hdr_tiled = fmt.is_hdr_rgb10() && ud.modifier != 0;
+            if hdr_tiled {
+                warn_once(
+                    "HDR frame arrived with a tiled modifier — the GPU de-tile blit is 8-bit, so \
+                     this stream falls back to the CPU path (the producer ignored our LINEAR-only \
+                     HDR offer)",
+                );
+            }
+            if datas[0].type_() == pw::spa::buffer::DataType::DmaBuf && !hdr_tiled {
+                let Some(fourcc) = pf_frame::drm_fourcc(fmt) else {
+                    return; // format has no DRM fourcc mapping — skip the frame
                 };
-                match imported {
-                    Ok(devbuf) => {
-                        ud.import_fail_streak = 0;
-                        pf_zerocopy::note_gpu_import_ok();
-                        static ONCE: std::sync::atomic::AtomicBool =
-                            std::sync::atomic::AtomicBool::new(true);
-                        if ONCE.swap(false, Ordering::Relaxed) {
-                            tracing::info!(
-                                w,
-                                h,
-                                modifier = ud.modifier,
-                                nv12,
-                                yuv444,
-                                "zero-copy: dmabuf imported to CUDA (no CPU copy)"
-                            );
-                        }
+                let plane = pf_zerocopy::DmabufPlane {
+                    fd: datas[0].fd(),
+                    offset: datas[0].chunk().offset(),
+                    stride: datas[0].chunk().stride().max(0) as u32,
+                };
+                // SAFETY: `fd` is the producer's open dmabuf for this buffer; F_DUPFD_CLOEXEC
+                // only creates a second descriptor.
+                let dup = unsafe { libc::fcntl(datas[0].fd() as i32, libc::F_DUPFD_CLOEXEC, 0) };
+                if dup >= 0 {
+                    if let Some(hold) = ud.try_defer(pw_buf) {
                         ud.publish(CapturedFrame {
                             provenance: Default::default(),
                             width: w as u32,
                             height: h as u32,
                             pts_ns,
-                            format: if yuv444 {
-                                PixelFormat::Yuv444
-                            } else if nv12 {
-                                PixelFormat::Nv12
-                            } else {
-                                fmt
-                            },
-                            payload: FramePayload::Cuda(devbuf),
-                            // CUDA encoder blends cursor-as-metadata into its owned device surface.
+                            format: fmt,
+                            payload: FramePayload::Dmabuf(DmabufFrame {
+                                // SAFETY: `dup` is a fresh descriptor this frame owns.
+                                fd: unsafe { OwnedFd::from_raw_fd(dup) },
+                                fourcc,
+                                modifier: ud.modifier,
+                                offset: plane.offset,
+                                stride: plane.stride,
+                                plane1: None,
+                                hold: Some(hold),
+                            }),
                             cursor: ud.cursor.overlay(),
                         });
                         return;
                     }
-                    Err(e) => {
-                        let dead = importer.dead();
-                        if dead {
-                            pf_zerocopy::note_gpu_import_death();
-                        }
-                        if modifier.is_some() {
-                            // Tiled: CPU mmap would de-pad tiled bytes as linear — scrambled.
-                            // Drop the frame; on a dead worker or a short streak, poison so
-                            // capture-loss rebuild renegotiates.
-                            ud.import_fail_streak += 1;
-                            if dead || ud.import_fail_streak >= IMPORT_FAIL_POISON {
-                                tracing::error!(error = %format!("{e:#}"), dead,
-                                    "tiled GPU import lost — failing this capture for rebuild");
-                                ud.signals.broken.store(true, Ordering::Relaxed);
-                            } else {
-                                tracing::warn!(error = %format!("{e:#}"),
-                                    streak = ud.import_fail_streak,
-                                    "tiled dmabuf GPU import failed — frame dropped");
-                            }
-                            return;
-                        }
-                        // LINEAR dmabuf is CPU-mappable: disable the importer and fall through.
-                        tracing::warn!(error = %format!("{e:#}"),
-                            "LINEAR dmabuf GPU import failed — falling back to the CPU copy path");
-                        gpu_import_broken = true;
+                    // SAFETY: `dup` is ours and nothing else saw it.
+                    unsafe { libc::close(dup) };
+                    if holds_possible(zerocopy_hold_enabled(), ud.pool.live) {
+                        return;
                     }
                 }
-            } else {
-                return; // format has no DRM fourcc mapping — skip the frame
+                let cell = ud.signals.importer.clone();
+                let mut guard = cell.lock().unwrap_or_else(|e| e.into_inner());
+                if let Some(importer) = guard.as_mut() {
+                    match gpu_import(
+                        importer,
+                        ud.import_policy,
+                        &mut ud.import_state,
+                        &ud.signals,
+                        fmt,
+                        w as u32,
+                        h as u32,
+                        plane,
+                        ud.modifier,
+                    ) {
+                        ImportOutcome::Frame(devbuf, out_fmt) => {
+                            ud.publish(CapturedFrame {
+                                provenance: Default::default(),
+                                width: w as u32,
+                                height: h as u32,
+                                pts_ns,
+                                format: out_fmt,
+                                payload: FramePayload::Cuda(devbuf),
+                                cursor: ud.cursor.overlay(),
+                            });
+                            return;
+                        }
+                        ImportOutcome::Dropped => return,
+                        ImportOutcome::ImporterLost => gpu_import_broken = true,
+                    }
+                }
+                if gpu_import_broken {
+                    *guard = None;
+                }
             }
         }
     }
     if gpu_import_broken {
-        ud.importer = None;
+        ud.signals.has_importer.store(false, Ordering::Relaxed);
     }
 
     let d = &mut datas[0];
@@ -1509,6 +1610,12 @@ pub fn pipewire_thread(
     // request, no sooner than a wire interval after the last. Every entry point runs on this
     // thread. The stream pointer lands once the stream exists.
     let pacer = lazy.then(|| Pacer::new(wire_interval(preferred)));
+    // Shared with the consumer, which imports held frames at its own tick.
+    signals
+        .has_importer
+        .store(importer.is_some(), Ordering::Relaxed);
+    *signals.importer.lock().unwrap_or_else(|e| e.into_inner()) = importer;
+    let signals_exit = signals.clone();
     let data = UserData {
         info: VideoInfoRaw::default(),
         format: None,
@@ -1516,12 +1623,9 @@ pub fn pipewire_thread(
         slot,
         wake,
         signals,
-        import_fail_streak: 0,
-        importer,
         vaapi_passthrough,
-        nv12: pf_zerocopy::nv12_enabled(),
-        yuv444: want_444,
-        linear_nv12_failed: false,
+        import_policy: plan.import_policy,
+        import_state: ImportState::default(),
         dbg_log_n: 0,
         pts: crate::pts_provenance::PtsProvenance::new(),
         pts_reported: std::time::Instant::now(),
@@ -1612,7 +1716,13 @@ pub fn pipewire_thread(
                 ud.signals.negotiated.store(true, Ordering::Relaxed);
                 // Renegotiation replaces the pool: cached per-buffer imports key on buffers
                 // that no longer exist, and a recycled fd/inode must not resolve to a stale import.
-                if let Some(imp) = ud.importer.as_mut() {
+                if let Some(imp) = ud
+                    .signals
+                    .importer
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .as_mut()
+                {
                     imp.clear_cache();
                 }
                 let sz = ud.info.size();
@@ -1947,7 +2057,7 @@ pub fn pipewire_thread(
             ),
         )
     } else {
-        build_default_format_obj(preferred, false)
+        build_default_format_obj(preferred, Pacing::Producer)
     };
 
     // gamescope paints the Steam overlay into this node only when negotiated
@@ -1964,19 +2074,20 @@ pub fn pipewire_thread(
     // makes the compositor pick shm). Modifiers go out as MANDATORY `ChoiceEnum::Enum`;
     // this is not the two-step DONT_FIXATE handshake (`ChoiceFlags` cannot express it).
     let build_pods = |unpaced: bool| -> Result<Vec<Vec<u8>>> {
+        let pacing = offer_pacing(unpaced, producer_is_gamescope, preferred);
         if want_hdr {
             // Offering SDR alongside lets the producer pick it, and a timeout latches SDR
             // downgrade. Order is the fix — see the NVIDIA note on `HDR_FORMAT_ORDER`. First
             // compatible pod wins.
             return HDR_FORMAT_ORDER
                 .iter()
-                .map(|fmt| build_hdr_dmabuf_format(*fmt, preferred, unpaced))
+                .map(|fmt| build_hdr_dmabuf_format(*fmt, preferred, pacing))
                 .collect::<Result<Vec<_>>>();
         }
         if !want_dmabuf {
             // The fixed bisect pod stays exactly what the operator typed.
             let o = if unpaced && fixed_pod.is_none() {
-                build_default_format_obj(preferred, true)
+                build_default_format_obj(preferred, Pacing::Unpaced)
             } else {
                 obj.clone()
             };
@@ -1990,7 +2101,7 @@ pub fn pipewire_thread(
                 VideoFormat::NV12,
                 &[0],
                 preferred,
-                unpaced,
+                pacing,
             )?);
         }
         if !modifiers.is_empty() {
@@ -1998,7 +2109,7 @@ pub fn pipewire_thread(
                 VideoFormat::BGRx,
                 &modifiers,
                 preferred,
-                unpaced,
+                pacing,
             )?);
         }
         // xdph (Hyprland/sway) lists only BGRA on its dmabuf EnumFormat (BGRA+BGRx on SHM).
@@ -2010,7 +2121,7 @@ pub fn pipewire_thread(
                 VideoFormat::BGRA,
                 &modifiers_bgra,
                 preferred,
-                unpaced,
+                pacing,
             )?);
         }
         Ok(pods)
@@ -2100,9 +2211,14 @@ pub fn pipewire_thread(
         let _ = t.update_timer(Some(HEARTBEAT), Some(HEARTBEAT));
     }
 
-    // Blocks until capturer `Drop` fires the quit channel; `run()` returns and the thread
-    // unwinds, releasing the importer / CUDA context.
+    // Blocks until capturer `Drop` fires the quit channel. The importer goes here, not with
+    // the last `CaptureSignals` clone: the next pipeline must find the EGL/CUDA state gone.
     mainloop.run();
+    signals_exit.has_importer.store(false, Ordering::Relaxed);
+    *signals_exit
+        .importer
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = None;
     Ok(())
 }
 
@@ -2449,6 +2565,21 @@ fn producer_supports_request(
     supports.unwrap_or(false)
 }
 
+/// The offer's `maxFramerate`. KWin asks for its own signal (`Unpaced`); gamescope paints on
+/// every commit, so the wire rate caps its pushes (`Cap`); anyone else keeps its rate.
+fn offer_pacing(unpaced: bool, gamescope: bool, preferred: Option<(u32, u32, u32)>) -> Pacing {
+    if unpaced {
+        Pacing::Unpaced
+    } else if gamescope {
+        preferred
+            .map(|(_, _, hz)| hz)
+            .filter(|hz| *hz > 0)
+            .map_or(Pacing::Producer, Pacing::Cap)
+    } else {
+        Pacing::Producer
+    }
+}
+
 /// gamescope's node offers LINEAR as `{0,0}`. spa_pod_filter without DONT_FIXATE
 /// fixates our default, so a tiled NVIDIA default fails the link. Empty `egl`
 /// with `advertise` still yields LINEAR — the importer exists, EGL listed none.
@@ -2469,9 +2600,37 @@ fn dmabuf_modifiers_for_producer(egl: &[u64], advertise: bool, gamescope: bool) 
 #[cfg(test)]
 mod tests {
     use super::{
-        dmabuf_modifiers_for_producer, negotiation_plan, packed_frame_geometry,
-        supported_data_plane_count, NegotiationInputs,
+        dmabuf_modifiers_for_producer, holds_possible, negotiation_plan, offer_pacing,
+        packed_frame_geometry, supported_data_plane_count, NegotiationInputs, Pacing,
     };
+
+    /// The consumer imports with the offer's policy: NV12 unless the session is 4:4:4. Holds
+    /// need a pool deeper than the producer's reserve.
+    #[test]
+    fn import_policy_follows_the_session_and_holds_need_a_deep_pool() {
+        let p = negotiation_plan(nvenc());
+        assert!(p.import_policy.nv12 && !p.import_policy.yuv444);
+        let p = negotiation_plan(NegotiationInputs {
+            want_444: true,
+            ..nvenc()
+        });
+        assert!(p.import_policy.yuv444, "4:4:4 must not subsample");
+        assert!(holds_possible(true, HOLD_POOL_RESERVE + 1));
+        assert!(!holds_possible(true, HOLD_POOL_RESERVE));
+        assert!(!holds_possible(false, 8));
+    }
+
+    /// Only gamescope gets the wire-rate cap; KWin keeps its own signal; a missing rate caps nothing.
+    #[test]
+    fn only_gamescope_is_capped_at_the_wire_rate() {
+        assert_eq!(offer_pacing(true, true, Some((1, 1, 90))), Pacing::Unpaced);
+        assert_eq!(offer_pacing(false, true, Some((1, 1, 90))), Pacing::Cap(90));
+        assert_eq!(offer_pacing(false, true, Some((1, 1, 0))), Pacing::Producer);
+        assert_eq!(
+            offer_pacing(false, false, Some((1, 1, 90))),
+            Pacing::Producer
+        );
+    }
 
     /// NVIDIA block-linear, the EGL default on this host. gamescope does not offer it.
     const NVIDIA_TILED: u64 = 216172782120099856;
@@ -2522,6 +2681,7 @@ mod tests {
             gpu_dmabuf_negotiation_failed: false,
             native_nv12_env_on: true,
             hdr_cuda_ok: true,
+            nv12_env_on: true,
         }
     }
 
