@@ -206,9 +206,18 @@ internal object ConsoleJson {
         return JSONObject().put("hosts", hosts).toString()
     }
 
+    /** The catalog with each preset's overrides, so a settings row can say when a host's
+     *  bound preset outranks the global it shows. */
     fun presets(presets: List<StreamPreset>): String {
         val out = JSONArray()
-        for (p in presets) out.put(JSONArray().put(p.id).put(p.name))
+        for (p in presets) {
+            out.put(
+                JSONObject()
+                    .put("id", p.id)
+                    .put("name", p.name)
+                    .put("overrides", p.overrides.toConsoleJson()),
+            )
+        }
         return out.toString()
     }
 
