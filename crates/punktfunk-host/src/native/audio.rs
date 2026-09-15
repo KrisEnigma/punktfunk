@@ -151,6 +151,9 @@ pub(super) fn audio_thread(
     sink: Option<String>,
     // A `join` session taps the owner's sink instead of minting a second one of that name.
     tap: bool,
+    // This session's live-display record: the sink name goes here on every open, so a
+    // later joiner finds the one to tap.
+    published: Arc<std::sync::Mutex<Option<String>>>,
 ) {
     use crate::audio::SAMPLE_RATE;
     const FRAME_MS: usize = 5;
@@ -226,6 +229,12 @@ pub(super) fn audio_thread(
             }
         }
     };
+    let publish = |c: &dyn crate::audio::AudioCapturer| {
+        *published.lock().unwrap() = c.sink_name().map(str::to_owned);
+    };
+    if let Some(c) = &capturer {
+        publish(c.as_ref());
+    }
     // No Opus encoder at all on the PCM plane — there is nothing for it to do, and building one
     // would make a libopus failure able to kill a session that does not use libopus.
     let mut enc = if pcm_plane {
@@ -343,6 +352,7 @@ pub(super) fn audio_thread(
             {
                 Ok(c) => {
                     tracing::info!("punktfunk/1 audio capture reopened");
+                    publish(c.as_ref());
                     capturer = Some(c);
                     last_failed = None;
                     acc.clear(); // drop the partial frame straddling the gap
