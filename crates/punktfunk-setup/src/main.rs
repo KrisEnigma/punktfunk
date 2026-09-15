@@ -41,7 +41,7 @@ usage: punktfunk-setup [options]
   --channel stable|canary   package channel (default stable; canary = latest main build). On a box
                         that already has it this SWITCHES channel, either direction.
   --gamestream | --no-gamestream   Moonlight/Artemis/third-party clients (default depends on the box)
-  --clipboard | --no-clipboard     shared clipboard (default no)
+  --clipboard | --no-clipboard     shared clipboard (default yes)
   --punktfunk-group | --no-punktfunk-group   full controller / virtual Steam Deck pad (default yes;
                         it joins the punktfunk group, which grants usbip attach)
   --linger | --no-linger           start at boot with nobody logged in (default depends on the box)
