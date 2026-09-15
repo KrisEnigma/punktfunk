@@ -246,8 +246,19 @@ fun StreamScreen(session: ActiveSession, onSessionEnded: (SessionEndReason) -> U
     // hide, one leave (§9). Never toggled by the ring's own open and close (§8 trap 4).
     var padShown by remember(handle) { mutableStateOf(false) }
     var virtualPad by remember(handle) { mutableStateOf<GamepadRouter.ExternalPad?>(null) }
+    // Its kind follows the Controller type setting. Automatic is an Xbox 360 pad, or a
+    // DualSense when this phone's gyro is to speak for it — a 360 has no motion plane.
+    val virtualPadKind = when {
+        initialSettings.gamepad != Gamepad.PREF_AUTO -> initialSettings.gamepad
+        initialSettings.gyroOnPhone -> Gamepad.PREF_DUALSENSE
+        else -> Gamepad.PREF_XBOX360
+    }
     DisposableEffect(padShown) {
-        val ext = if (padShown) activity?.gamepadRouter?.openExternal(Gamepad.PREF_XBOX360) else null
+        val ext = if (padShown) {
+            activity?.gamepadRouter?.openExternal(virtualPadKind, ownMotion = false)
+        } else {
+            null
+        }
         virtualPad = ext
         onDispose {
             ext?.close()
