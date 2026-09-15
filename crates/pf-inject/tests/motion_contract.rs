@@ -16,8 +16,8 @@ use pf_inject::dualsense_proto::{
     DS_TOUCH_H, DS_TOUCH_W,
 };
 use pf_inject::dualshock4_proto::{
-    serialize_state as ds4_serialize, DS4_FEATURE_CALIBRATION, DS4_INPUT_REPORT_LEN, DS4_TOUCH_H,
-    DS4_TOUCH_W,
+    serialize_state as ds4_serialize, DS4_FEATURE_CALIBRATION, DS4_FEATURE_FIRMWARE,
+    DS4_FEATURE_PAIRING, DS4_INPUT_REPORT_LEN, DS4_RDESC, DS4_TOUCH_H, DS4_TOUCH_W,
 };
 use pf_inject::steam_proto::SteamState;
 use pf_inject::steam_remap::motion_wire_to_deck;
@@ -330,6 +330,23 @@ fn extract_byte_array(src: &str, name: &str) -> Vec<u8> {
         .collect();
     assert!(!bytes.is_empty(), "{name}: extracted no bytes");
     bytes
+}
+
+/// The driver's other DualShock 4 assets are byte copies: the descriptor fixes every
+/// length, so bytes compare. A shifted firmware word once served hw 0x00A0 on Windows.
+#[test]
+fn windows_driver_ds4_assets_are_byte_copies() {
+    for (name, canonical) in [
+        ("DS4_RDESC", DS4_RDESC),
+        ("DS4_FEATURE_PAIRING", DS4_FEATURE_PAIRING),
+        ("DS4_FEATURE_FIRMWARE", DS4_FEATURE_FIRMWARE),
+    ] {
+        assert_eq!(
+            extract_byte_array(DRIVER_SRC, name),
+            canonical,
+            "the UMDF driver's {name} has drifted from pf-inject's"
+        );
+    }
 }
 
 /// Driver blobs match pf-inject field-for-field. Trailing padding may differ
