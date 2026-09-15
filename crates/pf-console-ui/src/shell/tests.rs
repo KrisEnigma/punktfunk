@@ -2435,10 +2435,10 @@ fn the_announcement_carries_a_settings_value() {
     s.handle_menu(MenuEvent::Tertiary);
     finish_motion(&mut s);
     let row = s.focus_announcement().expect("a settings row names itself");
-    assert!(row.starts_with("Resolution, "), "{row}");
+    assert!(row.starts_with("Aspect ratio, "), "{row}");
     s.handle_menu(MenuEvent::Move(MenuDir::Down));
     let below = s.focus_announcement().expect("…and so does the row below");
-    assert!(below.starts_with("Refresh rate, "), "{below}");
+    assert!(below.starts_with("Resolution, "), "{below}");
     assert_ne!(row, below);
     s.handle_menu(MenuEvent::Move(MenuDir::Up));
     s.handle_menu(MenuEvent::Move(MenuDir::Up));
