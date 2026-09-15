@@ -30,6 +30,57 @@ pub(crate) fn register_all(reg: &Diagnostics) {
     reg.register(hyprland_permissions);
     reg.register(omarchy_updates);
     reg.register(vdisplay_driver);
+    reg.register(pad_audio);
+}
+
+/// The controller speaker endpoint takes the host's 4-channel open, or DualSense titles fall
+/// back to rumble and the pad stays silent.
+#[cfg(windows)]
+fn pad_audio() -> HostCheck {
+    use crate::audio::pad_endpoint::PadAudioHealth;
+    let id = ids::PAD_AUDIO;
+    match crate::audio::pad_endpoint::health() {
+        PadAudioHealth::Off => {
+            HostCheck::inapplicable(id, "Controller audio is turned off on this host.")
+        }
+        PadAudioHealth::NotProvisioned => HostCheck::problem(
+            id,
+            CheckStatus::Warn,
+            Severity::Warning,
+            "The controller speaker endpoint is not set up",
+            "Games see no DualSense speaker, so haptics fall back to rumble. The host retries \
+             at the next connect.",
+        ),
+        PadAudioHealth::Ok { slots } => HostCheck::ok(
+            id,
+            format!("The controller speaker endpoint takes the host's open ({slots} pad slot(s))."),
+        ),
+        PadAudioHealth::Refused { pad } => HostCheck::problem(
+            id,
+            CheckStatus::Fail,
+            Severity::Warning,
+            "The controller speaker endpoint refuses the 4-channel format",
+            "Games can't pair the DualSense with its speaker, so haptics fall back to rumble \
+             and the pad stays silent.",
+        )
+        .with_remedy(Remedy {
+            text: "Update Steam — its streaming audio driver backs the endpoint — and restart \
+                   the punktfunk host. If it stays, run `punktfunk-host pad-endpoint repair` \
+                   as administrator."
+                .to_string(),
+            command: None,
+            relogin_required: false,
+        })
+        .with_param("pad", pad.to_string()),
+    }
+}
+
+#[cfg(not(windows))]
+fn pad_audio() -> HostCheck {
+    HostCheck::inapplicable(
+        ids::PAD_AUDIO,
+        "The controller speaker endpoint is a Windows component.",
+    )
 }
 
 /// The Windows virtual-display driver answers, or the host has no video at all. A driver whose

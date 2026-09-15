@@ -692,6 +692,11 @@ fn send_rumble(
 /// `design/trigger-rumble-plane.md`). Four motors share one `seq` and one TTL.
 /// `PUNKTFUNK_RUMBLE_ENVELOPE=0` reverts to v1 + a flat 500 ms refresh, which
 /// drops trigger rumble ([`send_rumble`]).
+///
+/// Ends on `stop` or when `rx` disconnects. The pads (and their OS slots) go
+/// before the streamer join, so a session that preempted this one can claim
+/// them inside its 1.5 s grace.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn input_thread(
     rx: std::sync::mpsc::Receiver<ClientInput>,
     conn: super::link::SessionLink,
@@ -703,6 +708,7 @@ pub(super) fn input_thread(
     // a virtual pad or pad-audio streamer runs. One relaxed load per item.
     grants: Arc<AtomicU32>,
     frame_map: FrameMap,
+    stop: Arc<AtomicBool>,
 ) {
     let mut pads = Pads::new(gamepad);
     // 0xD1 streamers; `pad_audio_on` is the negotiated Welcome cap.
@@ -743,6 +749,11 @@ pub(super) fn input_thread(
     let mut held_touch: std::collections::HashSet<u32> = std::collections::HashSet::new();
     let mut pen = PenSession::new();
     loop {
+        // A reconnect or steal sets `stop` while this connection is still open and
+        // claims this session's OS slots 1.5 s later; the channel outlives that.
+        if stop.load(Ordering::SeqCst) {
+            break;
+        }
         // Pen in range: wake at least every 100 ms so check_timeout can meet its 200 ms deadline.
         let poll = if pen.active() {
             pads.feedback_poll_interval()
@@ -1065,6 +1076,9 @@ pub(super) fn input_thread(
             flags: 0,
         });
     }
+    // Slots back first: the join below can sit ~5 s on a quiet endpoint, and the
+    // session that preempted this one claims after 1.5 s.
+    drop(pads);
     // After the instant release sends: stop_all can block on a quiet capturer timeout.
     pad_streams.stop_all();
     // One line per motion pad, at `info`: the question is asked from a log after the fact.
@@ -1174,6 +1188,62 @@ mod tests {
         let slot = pads.claim_os_slot(1).expect("a free OS slot");
         assert_eq!(pads.slots.claim_for(1), Some(slot), "first frame re-mints");
         assert_eq!(pads.claim_os_slot(1), Some(slot), "re-declare re-mints");
+    }
+
+    /// A reconnect preempts its zombie by setting `stop` and claims the same OS slots
+    /// 1.5 s later, while the zombie's connection (and so its input channel) is still
+    /// open. The thread must end on the flag alone; `PadSlotMap`'s drop frees the slots.
+    #[tokio::test]
+    async fn a_stopped_session_ends_its_input_thread_while_its_link_is_open() {
+        use punktfunk_core::quic::endpoint;
+        let server = endpoint::server("127.0.0.1:0".parse().unwrap()).unwrap();
+        let addr = server.local_addr().unwrap();
+        let accept = tokio::spawn(async move {
+            let conn = server
+                .accept()
+                .await
+                .expect("incoming")
+                .await
+                .expect("host side connects");
+            (server, conn)
+        });
+        let client = endpoint::client_insecure().unwrap();
+        let client_conn = client.connect(addr, "punktfunk").unwrap().await.unwrap();
+        let (_server, host_conn) = accept.await.unwrap();
+
+        // Held open for the whole test: `Disconnected` must not be what ends the thread.
+        let (input_tx, input_rx) = std::sync::mpsc::sync_channel::<ClientInput>(8);
+        let (inj_tx, _inj_rx) = std::sync::mpsc::channel::<InputEvent>();
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread = {
+            let stop = stop.clone();
+            std::thread::spawn(move || {
+                input_thread(
+                    input_rx,
+                    super::super::link::SessionLink::Quic(host_conn),
+                    InputRoute::new(inj_tx),
+                    GamepadPref::Xbox360,
+                    false,
+                    Arc::new(AtomicU32::new(0)),
+                    Arc::new(std::sync::Mutex::new(
+                        punktfunk_core::video_fit::Reframe::default(),
+                    )),
+                    stop,
+                )
+            })
+        };
+        stop.store(true, Ordering::SeqCst);
+        let joined = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            tokio::task::spawn_blocking(move || thread.join()),
+        )
+        .await;
+        assert!(
+            joined.is_ok(),
+            "input thread still running 2 s after stop with its channel open"
+        );
+        drop(input_tx);
+        drop(client_conn);
     }
 
     #[test]

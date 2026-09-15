@@ -964,6 +964,224 @@ static PROVISIONED: OnceLock<Arc<Vec<PadEndpoint>>> = OnceLock::new();
 /// Guards the retry in [`ensure_provisioned`] against a second COM worker.
 static PROVISIONING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// Pads whose endpoint still refuses the streamer's open after [`validate`]'s ladder. The
+/// streamer does not start on one; diagnostics names it.
+static REFUSED: [std::sync::atomic::AtomicBool; 8] =
+    [const { std::sync::atomic::AtomicBool::new(false) }; 8];
+
+pub(crate) fn refuses_format(pad_index: u8) -> bool {
+    REFUSED
+        .get(pad_index as usize)
+        .is_some_and(|b| b.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+fn set_refused(pad_index: u8, refused: bool) {
+    if let Some(b) = REFUSED.get(pad_index as usize) {
+        b.store(refused, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// A shown endpoint re-activates on audiosrv's own clock; a fresh mint throws
+/// DEVICE_INVALIDATED for ~20 s while its stamps settle.
+const OPEN_SETTLE: Duration = Duration::from_secs(4);
+const MINT_SETTLE: Duration = Duration::from_secs(25);
+
+/// Retry the streamer's open until it passes or `budget` runs out. A refused format gets
+/// 2 s at most: it is the endpoint's graph, and waiting does not change a graph.
+fn opens_within(endpoint_id: &str, budget: Duration) -> Result<()> {
+    let start = Instant::now();
+    loop {
+        let err = match super::pad_capture::probe_open(endpoint_id) {
+            Ok(()) => return Ok(()),
+            Err(e) => e,
+        };
+        let cap = if super::pad_capture::needs_reshape(&err) {
+            budget.min(Duration::from_secs(2))
+        } else {
+            budget
+        };
+        if start.elapsed() >= cap {
+            return Err(err);
+        }
+        thread::sleep(Duration::from_millis(500));
+    }
+}
+
+/// The policy API refused every 4-channel format: the driver has no such mode, and no
+/// re-mint of the devnode changes what the driver can do.
+#[derive(Debug)]
+struct DriverLacksMode;
+
+impl std::fmt::Display for DriverLacksMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the pad endpoint's driver has no 4-channel mode")
+    }
+}
+
+impl std::error::Error for DriverLacksMode {}
+
+/// Ask the driver for the pad's 4-channel mode through the policy API, then probe again. The
+/// stamps bypass the driver; this write does not, so its refusal is the driver's own answer.
+fn reshape_and_probe(pe: &PadEndpoint) -> Result<()> {
+    // The stamps' own PCM16 first: a driver that takes it leaves the stored device format
+    // byte-identical to the stamp, so the next start re-stamps nothing.
+    let samples = [
+        (16, 16, wasapi::SampleType::Int),
+        (32, 32, wasapi::SampleType::Float),
+        (32, 24, wasapi::SampleType::Int),
+        (24, 24, wasapi::SampleType::Int),
+        (32, 32, wasapi::SampleType::Int),
+    ];
+    match audio_control::set_endpoint_format(
+        &pe.endpoint_id,
+        super::pad_capture::PAD_CHANNELS as u16,
+        crate::audio::SAMPLE_RATE,
+        &[super::pad_capture::PAD_CHANNEL_MASK],
+        &samples,
+    ) {
+        Ok(()) => {
+            tracing::info!(
+                pad = pe.pad_index,
+                "pad endpoint set to 4 channels through the policy API"
+            );
+            opens_within(&pe.endpoint_id, OPEN_SETTLE)
+        }
+        Err(e) => Err(e.context(DriverLacksMode)),
+    }
+}
+
+/// Remove the devnode and wait until its endpoint is deregistered too. pnputil returns
+/// before either is gone, and the next mint reuses the instance path, so an `ensure` that
+/// runs early finds the old endpoint under the new devnode and stamps a dying object.
+fn remove_and_wait(pe: &PadEndpoint) {
+    remove(pe);
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_secs(10) {
+        let devnode = find_devnode(pe.pad_index).ok().flatten().is_some();
+        let endpoint = find_endpoint_for_devnode(&pe.device_instance)
+            .ok()
+            .flatten()
+            .is_some_and(|id| id == pe.endpoint_id);
+        if !devnode && !endpoint {
+            return;
+        }
+        thread::sleep(Duration::from_millis(250));
+    }
+    tracing::warn!(pad = pe.pad_index, endpoint = %pe.endpoint_id,
+        "the removed pad endpoint is still registered after 10 s — minting beside it");
+}
+
+/// Record and log one endpoint's verdict.
+fn record_verdict(pe: &PadEndpoint, outcome: &Result<()>) {
+    match outcome {
+        Ok(()) => tracing::info!(pad = pe.pad_index, endpoint = %pe.endpoint_id,
+            "pad endpoint takes the streamer's open"),
+        Err(e) => tracing::warn!(pad = pe.pad_index, endpoint = %pe.endpoint_id,
+            error = %format!("{e:#}"),
+            "pad endpoint refuses the streamer's open — no controller audio on this pad until \
+             it is repaired (pad_audio diagnostics row)"),
+    }
+    set_refused(pe.pad_index, outcome.is_err());
+}
+
+/// The verdict ladder for one endpoint: probe with the streamer's own open; on a refused
+/// format set the 4-channel mode through the policy API and probe again; then, if allowed,
+/// re-mint the devnode once and probe again. Shows the endpoint for the probes and hides it
+/// after. Returns the endpoint, re-minted or not; the verdict lands in [`refuses_format`].
+pub(crate) fn validate(mut pe: PadEndpoint, may_remint: bool) -> PadEndpoint {
+    let idx = pe.pad_index;
+    if pe.endpoint_id.is_empty() {
+        return pe;
+    }
+    set_visibility(&pe.endpoint_id, idx, true);
+    let mut outcome = opens_within(&pe.endpoint_id, OPEN_SETTLE);
+    if matches!(&outcome, Err(e) if super::pad_capture::needs_reshape(e)) {
+        outcome = reshape_and_probe(&pe);
+    }
+    let driver_lacks_mode = outcome
+        .as_ref()
+        .is_err_and(|e| e.downcast_ref::<DriverLacksMode>().is_some());
+    if outcome.is_err() && may_remint && !driver_lacks_mode {
+        tracing::warn!(pad = idx, endpoint = %pe.endpoint_id,
+            error = %format!("{:#}", outcome.as_ref().unwrap_err()),
+            "pad endpoint does not open — re-minting its devnode");
+        set_visibility(&pe.endpoint_id, idx, false);
+        remove_and_wait(&pe);
+        match ensure(idx) {
+            Ok(fresh) => {
+                pe = fresh;
+                set_visibility(&pe.endpoint_id, idx, true);
+                outcome = opens_within(&pe.endpoint_id, MINT_SETTLE);
+                if matches!(&outcome, Err(e) if super::pad_capture::needs_reshape(e)) {
+                    outcome = reshape_and_probe(&pe);
+                }
+            }
+            Err(e) => outcome = Err(e.context("re-mint the pad endpoint")),
+        }
+    }
+    record_verdict(&pe, &outcome);
+    set_visibility(&pe.endpoint_id, idx, false);
+    pe
+}
+
+/// The in-session half of [`validate`], on an endpoint the streamer has already shown: no
+/// re-mint, since the streamer holds this endpoint id for its life.
+pub(crate) fn repair_shown(pad_index: u8, endpoint_id: &str) {
+    let Some(pe) = endpoint_for(pad_index).filter(|pe| pe.endpoint_id == endpoint_id) else {
+        return;
+    };
+    let mut outcome = opens_within(endpoint_id, Duration::from_secs(1));
+    if matches!(&outcome, Err(e) if super::pad_capture::needs_reshape(e)) {
+        outcome = reshape_and_probe(&pe);
+    }
+    record_verdict(&pe, &outcome);
+}
+
+/// Re-mint the devnode by hand and run the ladder on the fresh endpoint: the `pad-endpoint
+/// repair --remint` hatch, so the re-mint branch can be watched without a broken driver.
+pub(crate) fn remint(pe: &PadEndpoint) -> Result<PadEndpoint> {
+    let idx = pe.pad_index;
+    remove_and_wait(pe);
+    let fresh = ensure(idx).context("re-mint the pad endpoint")?;
+    set_visibility(&fresh.endpoint_id, idx, true);
+    let mut outcome = opens_within(&fresh.endpoint_id, MINT_SETTLE);
+    if matches!(&outcome, Err(e) if super::pad_capture::needs_reshape(e)) {
+        outcome = reshape_and_probe(&fresh);
+    }
+    record_verdict(&fresh, &outcome);
+    set_visibility(&fresh.endpoint_id, idx, false);
+    Ok(fresh)
+}
+
+/// What the `pad_audio` diagnostics row reports.
+pub(crate) enum PadAudioHealth {
+    Off,
+    NotProvisioned,
+    Ok {
+        slots: usize,
+    },
+    /// `pad`'s endpoint refuses the streamer's open, or its stamps are not served.
+    Refused {
+        pad: u8,
+    },
+}
+
+pub(crate) fn health() -> PadAudioHealth {
+    if !pad_audio_enabled() {
+        return PadAudioHealth::Off;
+    }
+    let Some(eps) = PROVISIONED.get() else {
+        return PadAudioHealth::NotProvisioned;
+    };
+    match eps
+        .iter()
+        .find(|pe| pe.needs_aeb_kick || refuses_format(pe.pad_index))
+    {
+        Some(pe) => PadAudioHealth::Refused { pad: pe.pad_index },
+        None => PadAudioHealth::Ok { slots: eps.len() },
+    }
+}
+
 /// Host-startup pre-provision: COM worker `ensure()`s slots `0..N`, at most
 /// one AEB+Audiosrv restart if a stamp is stored-but-not-served, then
 /// publishes for [`endpoint_for`]. Failure logs once and leaves the feature
@@ -1026,12 +1244,11 @@ pub(crate) fn provision_at_startup(startup: bool) {
                          stored-but-not-served until the next reboot"),
                 }
             }
-            // Hide until a client pad attaches. Devnode/driver/stamps/AEB stay
-            // at boot (no PnP at session boundaries). A visible idle DualSense-
-            // named speaker makes libScePad titles stall on an unserviced endpoint.
-            for pe in &eps {
-                set_visibility(&pe.endpoint_id, pe.pad_index, false);
-            }
+            // Prove each endpoint takes the streamer's open before parking it: a refused
+            // format is repaired or reported here, not two seconds into a session. Each
+            // comes back hidden: a visible idle DualSense-named speaker makes libScePad
+            // titles stall on an unserviced endpoint.
+            let eps: Vec<PadEndpoint> = eps.into_iter().map(|pe| validate(pe, true)).collect();
             // Latch only if something provisioned. Storing an empty vec on the
             // first error made OnceLock disable pad audio for the process life.
             if eps.is_empty() {

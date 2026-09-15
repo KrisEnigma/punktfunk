@@ -778,7 +778,6 @@ pub(crate) fn set_endpoint_visibility(device_id: &str, visible: bool) -> Result<
 /// behind Windows' speaker setup. Tries device formats in Sunshine's order, first accepted
 /// wins. The zeroed mix format lets the engine derive its own from the device format.
 fn set_endpoint_channels(device_id: &str, channels: u16, rate_hz: u32) -> Result<()> {
-    use wasapi::{SampleType, WaveFormat};
     let mask = punktfunk_core::audio::wasapi_channel_mask(channels as u8);
     // 5.1 drivers split between back (0x3F) and side (0x60F) surrounds.
     let masks: &[u32] = if channels == 6 {
@@ -786,20 +785,34 @@ fn set_endpoint_channels(device_id: &str, channels: u16, rate_hz: u32) -> Result
     } else {
         &[mask]
     };
-    // (store bits, valid bits, type): 24-in-32, 24, 16, f32, 32.
+    // (store bits, valid bits, type): 24-in-32, 24, 16, f32, 32 — Sunshine's order.
     let samples = [
-        (32, 24, SampleType::Int),
-        (24, 24, SampleType::Int),
-        (16, 16, SampleType::Int),
-        (32, 32, SampleType::Float),
-        (32, 32, SampleType::Int),
+        (32, 24, wasapi::SampleType::Int),
+        (24, 24, wasapi::SampleType::Int),
+        (16, 16, wasapi::SampleType::Int),
+        (32, 32, wasapi::SampleType::Float),
+        (32, 32, wasapi::SampleType::Int),
     ];
+    set_endpoint_format(device_id, channels, rate_hz, masks, &samples)
+}
+
+/// `IPolicyConfig::SetDeviceFormat` with the first of `samples` (store bits, valid bits,
+/// type) the driver takes, per mask. The write replaces the endpoint's whole stored format
+/// set, and the driver validates it, so `Err` means it has no `channels`-channel mode at all.
+pub(crate) fn set_endpoint_format(
+    device_id: &str,
+    channels: u16,
+    rate_hz: u32,
+    masks: &[u32],
+    samples: &[(usize, usize, wasapi::SampleType)],
+) -> Result<()> {
+    use wasapi::WaveFormat;
     // WAVEFORMATEXTENSIBLE is 40 bytes, packed.
     let mix = [0u8; 40];
     with_policy_config(device_id, |raw, vtbl, id| {
         let mut last = None;
         for &m in masks {
-            for (store, valid, ty) in &samples {
+            for (store, valid, ty) in samples {
                 let wave = WaveFormat::new(
                     *store,
                     *valid,

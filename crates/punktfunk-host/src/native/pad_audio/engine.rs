@@ -216,6 +216,9 @@ pub(super) fn pad_audio_thread<C: crate::audio::AudioCapturer>(
     let mut capturer: Option<C> = None;
     let mut last_failed: Option<std::time::Instant> = None;
     let mut oversized_drops: u64 = 0;
+    // Consecutive open failures. The third one warns: a first open can lose a race with the
+    // endpoint's own re-activate, a streak means no controller audio for the session.
+    let mut open_failures: u32 = 0;
     tracing::info!(
         pad,
         haptics = kinds & KIND_BIT_HAPTICS != 0,
@@ -233,11 +236,22 @@ pub(super) fn pad_audio_thread<C: crate::audio::AudioCapturer>(
                     if last_failed.take().is_some() {
                         tracing::info!(pad, "pad-audio capture reopened");
                     }
+                    open_failures = 0;
                     capturer = Some(c);
                     framer.clear();
                 }
                 Err(e) => {
-                    tracing::debug!(pad, error = %format!("{e:#}"), "pad-audio open failed — will retry");
+                    open_failures += 1;
+                    if open_failures == 3 {
+                        tracing::warn!(
+                            pad,
+                            error = %format!("{e:#}"),
+                            "pad-audio capture did not open — no controller audio until it does, \
+                             retrying every 2 s"
+                        );
+                    } else {
+                        tracing::debug!(pad, error = %format!("{e:#}"), "pad-audio open failed — will retry");
+                    }
                     last_failed = Some(std::time::Instant::now());
                     std::thread::sleep(std::time::Duration::from_millis(200));
                     continue;
