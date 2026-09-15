@@ -27,14 +27,9 @@ use punktfunk_core::config::GamepadPref;
 use std::sync::Arc;
 use windows_reactor::*;
 
+/// Sizes by family; the Resolution combo lists one family at a time behind the Aspect combo.
 /// `(0, 0)` = the native size of the display the window is on, resolved at connect.
-const RESOLUTIONS: &[(u32, u32)] = &[
-    (0, 0),
-    (1280, 720),
-    (1920, 1080),
-    (2560, 1440),
-    (3840, 2160),
-];
+use punktfunk_core::resolutions::{aspect_of, nearest, ASPECTS};
 /// `0` = the display's native refresh, resolved at connect.
 const REFRESH: &[u32] = &[0, 30, 60, 90, 120, 144, 165, 240];
 /// Render-scale multipliers. `1.0` = Native; applied at connect and each match-window resize.
@@ -830,32 +825,40 @@ pub(crate) fn settings_page(
     };
 
     // --- Display ---------------------------------------------------------------------------
-    // The D1 tri-state: Native, Match window (a virtual index 1, stored as the
-    // `match_window` flag), then the explicit sizes.
+    // The Aspect combo picks a family and lands on its size nearest the current height. The
+    // Resolution combo is the D1 tri-state — Native, Match window (a virtual index 1, stored
+    // as the `match_window` flag) — then that family's sizes.
+    let family = aspect_of(s.width, s.height).unwrap_or(0);
+    let aspect_combo = setting_combo(
+        ctx,
+        scope,
+        (rev, set_rev),
+        ASPECTS.iter().map(|a| a.label.to_string()).collect(),
+        family,
+        |s, i| {
+            s.match_window = false;
+            (s.width, s.height) = nearest(i, s.height);
+        },
+    );
+    let sizes = ASPECTS[family].sizes;
     let (res_names, res_i) = {
-        let names: Vec<String> = std::iter::once("Native display".to_string())
-            .chain(std::iter::once("Match window".to_string()))
-            .chain(
-                RESOLUTIONS
-                    .iter()
-                    .skip(1)
-                    .map(|&(w, h)| format!("{w} \u{00D7} {h}")),
-            )
+        let names: Vec<String> = ["Native display".to_string(), "Match window".to_string()]
+            .into_iter()
+            .chain(sizes.iter().map(|&(w, h)| format!("{w} \u{00D7} {h}")))
             .collect();
         let i = if s.match_window {
             1
         } else {
-            RESOLUTIONS
+            sizes
                 .iter()
                 .position(|&(w, h)| w == s.width && h == s.height)
-                .map(|i| if i == 0 { 0 } else { i + 1 })
-                .unwrap_or(0)
+                .map_or(0, |i| i + 2)
         };
         (names, i)
     };
-    let res_combo = setting_combo(ctx, scope, (rev, set_rev), res_names, res_i, |s, i| {
+    let res_combo = setting_combo(ctx, scope, (rev, set_rev), res_names, res_i, move |s, i| {
         s.match_window = i == 1;
-        (s.width, s.height) = if i <= 1 { (0, 0) } else { RESOLUTIONS[i - 1] };
+        (s.width, s.height) = if i <= 1 { (0, 0) } else { sizes[i - 2] };
     });
     let (hz_names, hz_i) = {
         let names: Vec<String> = REFRESH
@@ -1229,6 +1232,12 @@ pub(crate) fn settings_page(
             let mut out = group(
                 Some("Resolution"),
                 vec![
+                    described_labeled(
+                        "Aspect ratio",
+                        aspect_combo,
+                        "Which shapes the Resolution list offers. Picking one moves to its \
+                         size nearest the current height.",
+                    ),
                     described_overridable(
                         (rev, set_rev),
                         scope,

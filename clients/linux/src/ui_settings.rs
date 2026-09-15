@@ -73,14 +73,9 @@ impl Touched {
     }
 }
 
+/// Sizes by family; the Resolution row lists one family at a time behind the Aspect row.
 /// `(0, 0)` = the native size of the monitor the window is on, resolved at connect.
-const RESOLUTIONS: &[(u32, u32)] = &[
-    (0, 0),
-    (1280, 720),
-    (1920, 1080),
-    (2560, 1440),
-    (3840, 2160),
-];
+use punktfunk_core::resolutions::{aspect_of, nearest, ASPECTS};
 /// `0` = the monitor's native refresh, resolved at connect.
 const REFRESH: &[u32] = &[0, 30, 60, 90, 120, 144, 165, 240];
 /// Render-scale multipliers. `1.0` = Native; applied at connect and each match-window resize.
@@ -93,18 +88,21 @@ use punktfunk_core::render_scale::PRESETS as RENDER_SCALES;
 mod index {
     use super::*;
 
+    /// The family the Resolution row lists: the stored size's shape, or 16:9 for Native.
+    pub fn aspect(s: &Settings) -> u32 {
+        aspect_of(s.width, s.height).unwrap_or(0) as u32
+    }
+
     pub fn resolution(s: &Settings) -> u32 {
-        // Index 1 is the virtual "Match window" entry; 0 = Native, 2.. = the explicit sizes.
-        let i = if s.match_window {
-            1
-        } else {
-            RESOLUTIONS
-                .iter()
-                .position(|&(w, h)| w == s.width && h == s.height)
-                .map(|i| if i == 0 { 0 } else { i + 1 })
-                .unwrap_or(0)
-        };
-        i as u32
+        // Index 1 is the virtual "Match window" entry; 0 = Native, 2.. = the family's sizes.
+        if s.match_window {
+            return 1;
+        }
+        ASPECTS[aspect(s) as usize]
+            .sizes
+            .iter()
+            .position(|&(w, h)| w == s.width && h == s.height)
+            .map_or(0, |i| i as u32 + 2)
     }
 
     pub fn refresh(s: &Settings) -> u32 {
@@ -935,7 +933,11 @@ struct ChoiceRow {
     changed: ChangedFn,
     /// Subpage mode only: the current value rendered as the row's suffix.
     value_label: Option<gtk::Label>,
-    options: Rc<Vec<String>>,
+    options: Rc<RefCell<Vec<String>>>,
+}
+
+fn string_list(options: &[String]) -> gtk::StringList {
+    gtk::StringList::new(&options.iter().map(String::as_str).collect::<Vec<_>>())
 }
 
 impl ChoiceRow {
@@ -948,7 +950,9 @@ impl ChoiceRow {
         subtitle: &str,
         options: &[&str],
     ) -> ChoiceRow {
-        let options: Rc<Vec<String>> = Rc::new(options.iter().map(|s| s.to_string()).collect());
+        let options: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(
+            options.iter().map(|s| s.to_string()).collect(),
+        ));
         let selected = Rc::new(Cell::new(0u32));
         let changed: ChangedFn = Rc::new(RefCell::new(Vec::new()));
 
@@ -956,9 +960,7 @@ impl ChoiceRow {
             let row = adw::ComboRow::builder()
                 .title(title)
                 .subtitle(subtitle)
-                .model(&gtk::StringList::new(
-                    &options.iter().map(String::as_str).collect::<Vec<_>>(),
-                ))
+                .model(&string_list(&options.borrow()))
                 .build();
             let (sel, chg) = (selected.clone(), changed.clone());
             row.connect_selected_notify(move |r| {
@@ -1005,7 +1007,7 @@ impl ChoiceRow {
                     .selection_mode(gtk::SelectionMode::None)
                     .css_classes(["boxed-list"])
                     .build();
-                for (i, opt) in options.iter().enumerate() {
+                for (i, opt) in options.borrow().iter().enumerate() {
                     let check = crate::lucide::row_icon("check");
                     check.set_visible(i as u32 == sel.get());
                     let opt_row = adw::ActionRow::builder()
@@ -1064,8 +1066,24 @@ impl ChoiceRow {
     fn sync_value(&self) {
         if let Some(l) = &self.value_label {
             let i = self.selected.get() as usize;
-            l.set_text(self.options.get(i).map(String::as_str).unwrap_or(""));
+            l.set_text(
+                self.options
+                    .borrow()
+                    .get(i)
+                    .map(String::as_str)
+                    .unwrap_or(""),
+            );
         }
+    }
+
+    /// Swap the option list; the caller re-seats the selection. A combo lands on row 0 with
+    /// its new model, which fires `changed` like a user step would.
+    fn set_options(&self, options: &[String]) {
+        *self.options.borrow_mut() = options.to_vec();
+        if let Some(combo) = self.row.downcast_ref::<adw::ComboRow>() {
+            combo.set_model(Some(&string_list(options)));
+        }
+        self.sync_value();
     }
 
     fn widget(&self) -> &adw::PreferencesRow {
@@ -1212,6 +1230,20 @@ fn resolution_caption(i: u32) -> &'static str {
     }
 }
 
+/// The Resolution row's entries for one family: the D1 tri-state's Native and Match window,
+/// then that family's sizes.
+fn resolution_names(family: usize) -> Vec<String> {
+    ["Native display".to_string(), "Match window".to_string()]
+        .into_iter()
+        .chain(
+            ASPECTS[family]
+                .sizes
+                .iter()
+                .map(|&(w, h)| format!("{w} × {h}")),
+        )
+        .collect()
+}
+
 /// The SELECTED codec explained: the PyroWave entry is the one that needs its trade-off
 /// spelled out; everything else shares the soft-preference line.
 fn codec_caption(i: u32) -> &'static str {
@@ -1307,16 +1339,8 @@ pub fn show_scoped(
 
     // ---- Display: Resolution ----
     // The D1 tri-state: Native, Match window (a virtual index 1, stored as the
-    // `match_window` flag), then the explicit sizes.
-    let res_names: Vec<String> = std::iter::once("Native display".to_string())
-        .chain(std::iter::once("Match window".to_string()))
-        .chain(
-            RESOLUTIONS
-                .iter()
-                .skip(1)
-                .map(|&(w, h)| format!("{w} × {h}")),
-        )
-        .collect();
+    // `match_window` flag), then the sizes of the family the Aspect row picks.
+    let res_names = resolution_names(0);
     let res_row = ChoiceRow::new(
         &dialog,
         inline,
@@ -1327,6 +1351,32 @@ pub fn show_scoped(
     {
         let w = res_row.widget().clone();
         res_row.connect_changed(move |i| set_row_subtitle(&w, resolution_caption(i)));
+    }
+    let aspect_row = ChoiceRow::new(
+        &dialog,
+        inline,
+        "Aspect ratio",
+        "Which shapes the Resolution row offers",
+        &ASPECTS.iter().map(|a| a.label).collect::<Vec<_>>(),
+    );
+    // The family the Resolution row lists right now; only the handler below moves it.
+    let shown_family = Rc::new(Cell::new(0usize));
+    {
+        let (res, shown) = (res_row.clone(), shown_family.clone());
+        aspect_row.connect_changed(move |g| {
+            // Re-list the family and land on its size nearest the one shown, so the two
+            // rows never disagree. Native and Match window count as 1080 (`nearest`).
+            let g = g as usize;
+            let h = (res.selected() as usize)
+                .checked_sub(2)
+                .and_then(|i| ASPECTS[shown.get()].sizes.get(i))
+                .map_or(0, |&(_, h)| h);
+            shown.set(g);
+            res.set_options(&resolution_names(g));
+            let target = nearest(g, h);
+            let i = ASPECTS[g].sizes.iter().position(|&wh| wh == target);
+            res.set_selected(i.map_or(0, |i| i as u32 + 2));
+        });
     }
     let hz_names: Vec<String> = REFRESH
         .iter()
@@ -1840,6 +1890,7 @@ pub fn show_scoped(
     // ---- Seed from the effective settings for this scope ----
     {
         let s = &seed;
+        aspect_row.set_selected(index::aspect(s)); // re-lists `res_row` for the family
         let res_i = index::resolution(s);
         res_row.set_selected(res_i);
         set_row_subtitle(res_row.widget(), resolution_caption(res_i));
@@ -2054,12 +2105,36 @@ pub fn show_scoped(
             }};
         }
 
-        choice!(
-            res_row,
-            "resolution",
-            o.width.is_some() || o.height.is_some() || o.match_window.is_some(),
-            index::resolution
-        );
+        // `choice!` for the Resolution row, whose revert first puts the Aspect row back so
+        // the family is re-listed before the size is re-seated.
+        {
+            let overridden = o.width.is_some() || o.height.is_some() || o.match_window.is_some();
+            let revert = {
+                let (res, aspect, globals, touched) = (
+                    res_row.clone(),
+                    aspect_row.clone(),
+                    globals.clone(),
+                    touched.clone(),
+                );
+                Box::new(move || {
+                    touched.set_suspended(true);
+                    aspect.set_selected(index::aspect(&globals));
+                    res.set_selected(index::resolution(&globals));
+                    touched.set_suspended(false);
+                }) as Box<dyn Fn()>
+            };
+            let show = mark(res_row.widget(), "resolution", overridden, revert);
+            let t = touched.clone();
+            res_row.connect_changed(move |_| {
+                if t.suspended() {
+                    return;
+                }
+                t.mark("resolution");
+                if let Some(show) = &show {
+                    show();
+                }
+            });
+        }
         choice!(hz_row, "refresh_hz", o.refresh_hz.is_some(), index::refresh);
         choice!(
             scale_row,
@@ -2276,6 +2351,7 @@ pub fn show_scoped(
 
     let display = page("Display", "video-display-symbolic");
     let resolution_group = group("Resolution", "");
+    resolution_group.add(aspect_row.widget());
     resolution_group.add(res_row.widget());
     resolution_group.add(hz_row.widget());
     let quality_group = group("Quality", "");
@@ -2414,27 +2490,27 @@ pub fn show_scoped(
         // Sharing it is what keeps the two scopes from interpreting the same controls
         // differently (the tri-state resolution row is the obvious trap).
         let apply_rows = |s: &mut Settings| {
-            // A value these tables cannot list (the console offers the Deck's 1280x800, this
-            // one offers 144 Hz up) displays as the fallback rung, so writing it back erases it
-            // just by opening and closing. Write only what this table lists, or what moved —
-            // the rule the gamepad and pad-speaker rows below already follow.
+            // A value these tables cannot list (a size typed into another client's custom
+            // fields, a refresh rate off the ladder) displays as the fallback rung, so writing
+            // it back erases it just by opening and closing. Write only what a table lists, or
+            // what moved — the rule the gamepad and pad-speaker rows below already follow.
             let listed_res = s.match_window
                 || (s.width, s.height) == (0, 0)
-                || RESOLUTIONS.contains(&(s.width, s.height));
+                || ASPECTS
+                    .iter()
+                    .any(|a| a.sizes.contains(&(s.width, s.height)));
             let (seed_res, seed_hz, seed_scale) = (
                 index::resolution(s),
                 index::refresh(s),
                 index::render_scale(s),
             );
-            // Index 1 is the virtual "Match window" option; 0 = Native, 2.. = explicit.
-            let res_i = (res_row.selected() as usize).min(RESOLUTIONS.len());
+            // Index 1 is the virtual "Match window" option; 0 = Native, 2.. = the listed
+            // family's sizes.
+            let sizes = ASPECTS[shown_family.get()].sizes;
+            let res_i = (res_row.selected() as usize).min(sizes.len() + 1);
             if listed_res || res_i as u32 != seed_res {
                 s.match_window = res_i == 1;
-                (s.width, s.height) = if res_i <= 1 {
-                    (0, 0)
-                } else {
-                    RESOLUTIONS[res_i - 1]
-                };
+                (s.width, s.height) = if res_i <= 1 { (0, 0) } else { sizes[res_i - 2] };
             }
             let hz_i = (hz_row.selected() as usize).min(REFRESH.len() - 1);
             if REFRESH.contains(&s.refresh_hz) || hz_i as u32 != seed_hz {
@@ -2618,17 +2694,28 @@ mod tests {
     /// No display needed: these are the pure index helpers the rows are seeded from.
     #[test]
     fn off_ladder_values_seed_a_fallback_rung() {
-        // The Steam Deck's panel, which the console's table offers and this one does not.
+        // A size typed into another client's custom fields: 3:2 by shape, listed by no family.
+        let custom = Settings {
+            width: 1500,
+            height: 1000,
+            ..Default::default()
+        };
+        assert_eq!(index::aspect(&custom), 4, "lists the 3:2 family");
+        assert_eq!(index::resolution(&custom), 0, "seeds Native, not 1500x1000");
+        assert!(
+            !ASPECTS
+                .iter()
+                .any(|a| a.sizes.contains(&(custom.width, custom.height))),
+            "the premise: no family can show it"
+        );
+        // The Steam Deck's panel is the first 16:10 size: family 1, row 2 (after Native and
+        // Match window), so it round-trips.
         let deck = Settings {
             width: 1280,
             height: 800,
             ..Default::default()
         };
-        assert_eq!(index::resolution(&deck), 0, "seeds Native, not 1280x800");
-        assert!(
-            !RESOLUTIONS.contains(&(deck.width, deck.height)),
-            "the premise: this table cannot show it"
-        );
+        assert_eq!((index::aspect(&deck), index::resolution(&deck)), (1, 2));
 
         // A refresh rung the console's table lacks round-trips here, so it must be written.
         let fast = Settings {

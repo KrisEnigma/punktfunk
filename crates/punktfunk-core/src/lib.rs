@@ -55,6 +55,8 @@ pub mod quic;
 pub mod reanchor;
 pub mod reject;
 pub mod render_scale;
+/// cbindgen:ignore
+pub mod resolutions;
 pub mod session;
 pub mod stats;
 #[cfg(feature = "tls")]

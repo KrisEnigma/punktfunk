@@ -96,15 +96,27 @@ extension SettingsView {
     #if os(iOS)
     // MARK: - Display: Resolution (iOS wheel)
 
-    /// Touch-first: a rotating wheel of common resolutions (this device's own mode first) — the
-    /// same family as the Clock/Timer pickers. The host renders a virtual output at exactly the
-    /// chosen mode, so these are real pixel sizes. The last wheel row, "Custom…", reveals
-    /// width/height/refresh fields for an arbitrary mode (see `iosRefreshRows`).
+    /// Touch-first: an aspect switch over a rotating wheel of that family's common sizes (this
+    /// device's own mode first) — the same family as the Clock/Timer pickers. The host renders a
+    /// virtual output at exactly the chosen mode, so these are real pixel sizes. The last wheel
+    /// row, "Custom…", reveals width/height/refresh fields for an arbitrary mode (see
+    /// `iosRefreshRows`).
     @ViewBuilder private var iosResolutionWheel: some View {
         VStack(alignment: .leading, spacing: 4) {
+            Text("Aspect ratio")
+                .font(.geist(15, relativeTo: .subheadline))
+                .foregroundStyle(.secondary)
+            Picker("Aspect ratio", selection: aspectSelection) {
+                ForEach(Resolutions.aspects.indices, id: \.self) { i in
+                    Text(Resolutions.aspects[i].label).tag(i)
+                }
+            }
+            .labelsHidden()
+            .pickerStyle(.segmented)
             Text("Resolution")
                 .font(.geist(15, relativeTo: .subheadline))
                 .foregroundStyle(.secondary)
+                .padding(.top, 8)
             Picker("Resolution", selection: resolutionSelection) {
                 ForEach(resolutionChoices, id: \.tag) { choice in
                     Text(choice.label).tag(choice.tag)
@@ -170,16 +182,36 @@ extension SettingsView {
     /// collide with a resolution.
     private static let customResolutionTag = "custom"
 
+    /// The family the wheel lists — see `SettingsOptions.family`.
+    private var family: Int {
+        SettingsOptions.family(width: effective.width, height: effective.height)
+    }
+
+    /// The segmented switch: picking a family writes its size nearest the current height, so the
+    /// wheel below always holds a row of that family.
+    private var aspectSelection: Binding<Int> {
+        Binding(
+            get: { family },
+            set: { i in
+                customMode = false
+                let mode = Resolutions.nearest(i, height: effective.height)
+                setResolution(width: mode.w, height: mode.h)
+            })
+    }
+
     /// Wheel rows: the resolution modes (device native first — see `SettingsOptions`), then a
     /// "Custom…" row that reveals the numeric fields.
     private var resolutionChoices: [(label: String, tag: String)] {
-        SettingsOptions.resolutionModes()
-            .map { (label: "\($0.name)  ·  \($0.w) × \($0.h)", tag: "\($0.w)x\($0.h)") }
+        SettingsOptions.resolutionModes(family: family)
+            .map {
+                (label: $0.name.isEmpty ? "\($0.w) × \($0.h)" : "\($0.name)  ·  \($0.w) × \($0.h)",
+                 tag: "\($0.w)x\($0.h)")
+            }
             + [(label: "Custom…", tag: Self.customResolutionTag)]
     }
 
     private var presetResolutionTags: Set<String> {
-        Set(SettingsOptions.resolutionModes().map { "\($0.w)x\($0.h)" })
+        Set(SettingsOptions.resolutionModes(family: family).map { "\($0.w)x\($0.h)" })
     }
 
     /// True when the editable custom fields should show: the wheel is parked on "Custom…" (sticky),
