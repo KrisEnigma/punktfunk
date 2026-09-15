@@ -848,6 +848,9 @@ static HOST_LIVE: AtomicBool = AtomicBool::new(false);
 /// every pair rather than trusting this note.)
 fn devtype_from_hwids(ids: &str) -> Option<u8> {
     for (token, devtype) in [
+        // Windows Server has no `xinputhid`, so the host binds the unfiltered line for every
+        // Xbox kind; the section corrects the PID once it attaches.
+        ("pf_xbox_nofilter", 4u8),
         ("pf_xboxwireless", 4u8),
         ("pf_xboxones", 5),
         ("pf_xboxelite", 6),
