@@ -80,6 +80,7 @@ impl VirtualMouse {
             usb_vid_pid: "VID_5046&PID_4D4F",
             usb_mi: None,
             description: "Punktfunk Virtual Mouse",
+            enumerator: "punktfunk",
         }) {
             Ok((h, i)) => (Some(h), i),
             Err(e) => {
@@ -363,6 +364,7 @@ pub fn channel_proof_probe() -> Result<()> {
         usb_vid_pid: "VID_5046&PID_4D4F",
         usb_mi: None,
         description: "Punktfunk Virtual Mouse (channel-proof probe)",
+        enumerator: "punktfunk",
     })?;
     let _sw = super::gamepad_raii::SwDevice::new(hsw);
     let Some(instance_id) = instance_id else {

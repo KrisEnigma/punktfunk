@@ -263,9 +263,14 @@ pub(super) struct SwDeviceProfile<'a> {
     /// The Steam Deck controller lives on interface 2.
     pub usb_mi: Option<u8>,
     pub description: &'a str,
+    /// The `SWD\<enumerator>\<instance>` namespace. hidclass names the HID child after it, so a
+    /// PlayStation pad uses its USB interface id (`VID_054C&PID_0CE6&MI_03`): Steam merges a
+    /// pad's USB and HID devnodes by that token in the path, and under `punktfunk` it listed
+    /// the same pad twice.
+    pub enumerator: &'a str,
 }
 
-/// Spawn the per-session virtual controller devnode under enumerator `punktfunk`.
+/// Spawn the per-session virtual controller devnode under `p.enumerator`.
 /// The returned `HSWDEVICE` owns it — `SwDeviceClose` removes it on drop.
 ///
 /// Game detection (`design/windows-dualsense-game-detection.md`): `HIDD_ATTRIBUTES` VID/PID
@@ -346,12 +351,17 @@ pub(super) fn create_swdevice(p: &SwDeviceProfile) -> Result<(HSWDEVICE, Option<
         result: E_FAIL,
         instance_id: [0; 128],
     }));
+    let enumerator: Vec<u16> = p
+        .enumerator
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
     // SAFETY: info + the buffers outlive the call; `ctx` is a live heap allocation that outlives
     // every path below (reclaimed only where the callback provably ran). windows-rs returns the
     // HSWDEVICE (the C out-param) as the Result value.
     let hsw = match unsafe {
         SwDeviceCreate(
-            w!("punktfunk"),
+            PCWSTR(enumerator.as_ptr()),
             w!("HTREE\\ROOT\\0"),
             &info,
             None,
@@ -409,6 +419,8 @@ pub(super) struct WinDsIdentity {
     pub hwid: &'static str,
     pub usb_vid_pid: &'static str,
     pub description: &'static str,
+    /// See [`SwDeviceProfile::enumerator`].
+    pub enumerator: &'static str,
 }
 
 impl WinDsIdentity {
@@ -422,6 +434,7 @@ impl WinDsIdentity {
             hwid: "pf_dualsense",
             usb_vid_pid: "VID_054C&PID_0CE6",
             description: "Punktfunk Virtual DualSense",
+            enumerator: "VID_054C&PID_0CE6&MI_03",
         }
     }
 
@@ -432,6 +445,7 @@ impl WinDsIdentity {
             hwid: "pf_dualsenseedge",
             usb_vid_pid: "VID_054C&PID_0DF2",
             description: "Punktfunk Virtual DualSense Edge",
+            enumerator: "VID_054C&PID_0DF2&MI_03",
         }
     }
 }
@@ -465,8 +479,10 @@ impl DsWinPad {
             container_index: index,
             hwid: id.hwid,
             usb_vid_pid: id.usb_vid_pid,
-            usb_mi: None, // single-interface USB devices (real DS/Edge have no MI_ token)
+            // Composite USB devices: audio on interfaces 0-2, HID on 3. hidapi reads it back.
+            usb_mi: Some(3),
             description: id.description,
+            enumerator: id.enumerator,
         })?; // `?`: a swallowed fail latched a pad with no devnode; PadSlots never retried.
         let (hsw, instance_id) = (Some(hsw), instance_id);
         // Duplicate into the process this devnode is serving, not the pid the LocalService-writable
@@ -644,6 +660,7 @@ pub fn deck_spike_hold(index: u8, secs: u64) -> Result<()> {
         // hidapi parses MI_ from the child hwids; absent = interface 0, Steam wants 2.
         usb_mi: Some(2),
         description: "Punktfunk Virtual Steam Deck (spike)",
+        enumerator: "punktfunk",
     })?;
     // Same devnode-proved delivery as a session pad — a bring-up tool must not fall back
     // to the mailbox.
