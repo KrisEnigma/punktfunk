@@ -24,6 +24,7 @@ static STREAM_OUTPUT: RwLock<Option<String>> = RwLock::new(None);
 /// sessions. A later bring-up may pass `None` so a stale name cannot outlive its
 /// compositor. Parallel sessions: last writer wins (module doc).
 pub fn set_stream_output(name: Option<String>) {
+    crate::bump_aim_gen();
     let mut cur = STREAM_OUTPUT.write().unwrap_or_else(|e| e.into_inner());
     if *cur != name {
         tracing::info!(output = ?name, "absolute-input stream output set");
