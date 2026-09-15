@@ -1111,15 +1111,26 @@ fn on_output_report(request: &Request, ioctl: ULONG) -> NTSTATUS {
     // Triton OUTPUT reports (0x80.. haptics) flow through here too, untagged = OUTPUT kind; the
     // largest declared ones (0x87/0x88/0x89, 1 id + 63 payload = 64) exactly fit the 64-byte
     // ring slot, so nothing is ever truncated.
-    if !bytes.is_empty()
-        && let Some(view) = CHANNEL.data()
-    {
-        publish_output(view, &bytes, false);
+    if !bytes.is_empty() {
+        match CHANNEL.data() {
+            Some(view) => publish_output(view, &bytes, false),
+            // Before the DATA section attaches (the host probes every 250 ms) a title's first
+            // lightbar / trigger write would vanish, and a one-shot arm may never recur.
+            None => {
+                let n = bytes.len().min(64);
+                let mut latched = [0u8; 64];
+                latched[..n].copy_from_slice(&bytes[..n]);
+                *PENDING_OUTPUT.lock().unwrap_or_else(|e| e.into_inner()) = Some((n, latched));
+            }
+        }
     }
 
     request.set_information(inlen as u64);
     STATUS_SUCCESS
 }
+
+/// The last output report written before the DATA section attached, replayed once on attach.
+static PENDING_OUTPUT: std::sync::Mutex<Option<(usize, [u8; 64])>> = std::sync::Mutex::new(None);
 
 /// Deck identity: the last SET_FEATURE payload (the Steam command byte + args, minus the
 /// report-id prefix). Steam's Deck contract is command-in-SET_FEATURE → answer-in-GET_FEATURE
@@ -1507,8 +1518,18 @@ extern "C" fn evt_timer(timer: WDFTIMER) {
     let housekeeping = tick.is_multiple_of(PUMP_EVERY_N_TICKS);
     let view = if housekeeping {
         // Publish our pid / adopt a delivery / detect host-gone.
+        let was_live = HOST_LIVE.load(Ordering::Relaxed);
         let v = CHANNEL.pump(&channel_cfg());
         HOST_LIVE.store(v.is_some(), Ordering::Relaxed);
+        if let Some(view) = v
+            && !was_live
+            && let Some((n, bytes)) = PENDING_OUTPUT
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .take()
+        {
+            publish_output(view, &bytes[..n], false);
+        }
         v
     } else if HOST_LIVE.load(Ordering::Relaxed) {
         CHANNEL.data()
