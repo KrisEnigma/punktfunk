@@ -216,10 +216,9 @@ newer on AMD, Arc and newer on Intel).
 7. H.264 never uses this backend, and it exists only in a build carrying the Vulkan-encode feature
    (every shipped Linux package does). Even then the device is asked, per codec and per bit depth,
    whether it can open that encode profile; a "no" routes to VAAPI before a session is burned. A
-   Vulkan open that fails also falls back to VAAPI — with one deliberate exception: if the capture
-   already negotiated producer-native NV12 (gamescope), there is no fallback and the session fails
-   loudly, because VAAPI would misread that two-plane buffer as packed RGB and stream silent
-   garbage.
+   Vulkan open that fails falls back to the native VAAPI session, which takes a producer's
+   NV12 as it is (no conversion pass), so a gamescope session that negotiated NV12 keeps
+   streaming either way.
 8. PyroWave is 8-bit on Linux. The 10-bit path exists only on Windows.
 9. Not a hardware limit — the VAAPI backend simply has no 4:4:4 path yet, so the probe declines
    unconditionally and the session is negotiated as 4:2:0.
