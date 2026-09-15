@@ -55,17 +55,19 @@ pub struct CustomInput {
     pub art: Artwork,
     #[serde(default)]
     pub launch: Option<LaunchSpec>,
-    /// Run as the host user; operator-privileged. See [`privileged_field`].
+    /// Run as the host user; operator-privileged. See [`privileged_field`]. Absent on an
+    /// update keeps the stored list: a writer that never read it must not clear it.
     #[serde(default)]
-    pub prep: Vec<crate::hooks::PrepCmd>,
+    pub prep: Option<Vec<crate::hooks::PrepCmd>>,
     /// A hand-added launcher tile is legal without installing the matching plugin.
     #[serde(default)]
     pub role: GameRole,
     /// Brand token. A hand-added "Steam" tile can look like one. See [`GameEntry::icon`].
     #[serde(default)]
     pub icon: Option<String>,
+    /// Absent on an update keeps the stored hint, as with `prep`.
     #[serde(default)]
-    pub detect: DetectHint,
+    pub detect: Option<DetectHint>,
     /// Flattened [`GameMeta`]. Replaced wholesale on update — an edit must send every field it wants kept.
     #[serde(flatten)]
     pub meta: GameMeta,
@@ -173,6 +175,12 @@ pub fn load_custom() -> Vec<CustomEntry> {
     load_catalog().entries
 }
 
+/// One stored row by host id, as written — `detect` and `prep` included, which the
+/// catalog read model leaves out.
+pub fn get_custom(id: &str) -> Option<CustomEntry> {
+    load_catalog().entries.into_iter().find(|e| e.id == id)
+}
+
 /// Store ids a plugin has claimed, so library scans skip the matching built-in scanner.
 pub fn claimed_stores() -> BTreeMap<String, String> {
     load_catalog().claims
@@ -270,13 +278,13 @@ pub fn add_custom(input: CustomInput) -> Result<CustomEntry> {
         title: input.title,
         art: input.art,
         launch: input.launch,
-        prep: input.prep,
+        prep: input.prep.unwrap_or_default(),
         provider: None,
         external_id: None,
         store: None,
         role: input.role,
         icon: input.icon,
-        detect: input.detect,
+        detect: input.detect.unwrap_or_default(),
         meta: input.meta,
     };
     catalog.entries.push(entry.clone());
@@ -297,10 +305,15 @@ pub fn update_custom(id: &str, input: CustomInput) -> Result<MutateOutcome<Custo
     slot.title = input.title;
     slot.art = input.art;
     slot.launch = input.launch;
-    slot.prep = input.prep;
+    // Absent means keep: a writer that never read the field must not clear it.
+    if let Some(prep) = input.prep {
+        slot.prep = prep;
+    }
     slot.role = input.role;
     slot.icon = input.icon;
-    slot.detect = input.detect;
+    if let Some(detect) = input.detect {
+        slot.detect = detect;
+    }
     slot.meta = input.meta;
     let updated = slot.clone();
     save_catalog(&catalog)?;

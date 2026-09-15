@@ -4,10 +4,13 @@ import { type FC, type FormEvent, useState } from "react";
 import {
 	getGetLibraryQueryKey,
 	useCreateCustomGame,
+	useGetCustomGame,
 	useUpdateCustomGame,
 } from "@/api/gen/library/library";
+import type { CustomEntry } from "@/api/gen/model/customEntry";
 import type { CustomInput } from "@/api/gen/model/customInput";
 import type { GameEntry } from "@/api/gen/model/gameEntry";
+import type { PrepCmd } from "@/api/gen/model/prepCmd";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -32,6 +35,14 @@ interface FormState {
 	 *  the console groups launcher entries into their own rail, and clients that don't know the
 	 *  field render them as ordinary tiles. */
 	isLauncher: boolean;
+	// Process hints (the host's `detect`) and prep commands, read from the host's own copy of
+	// the row on edit. `prep` is opaque here and round-tripped so a save keeps it. `hintsLoaded`
+	// says the host answered, so a blank hint field is sent as cleared, not omitted (= kept).
+	exe: string;
+	installDir: string;
+	processName: string;
+	prep?: PrepCmd[];
+	hintsLoaded: boolean;
 	// Details — the flattened GameMeta fields; numbers and lists are kept as the raw
 	// text the user typed and only parsed on submit.
 	platform: string;
@@ -54,6 +65,10 @@ const emptyForm: FormState = {
 	command: "",
 	password: "",
 	isLauncher: false,
+	exe: "",
+	installDir: "",
+	processName: "",
+	hintsLoaded: false,
 	platform: "",
 	description: "",
 	developer: "",
@@ -77,6 +92,10 @@ function formFrom(entry: GameEntry): FormState {
 		// Round-tripped like every other field: `update_custom` REPLACES the whole entry, so an
 		// unread field here would silently demote a launcher entry back to a game on any edit.
 		isLauncher: entry.role === "launcher",
+		exe: "",
+		installDir: "",
+		processName: "",
+		hintsLoaded: false,
 		platform: entry.platform ?? "",
 		description: entry.description ?? "",
 		developer: entry.developer ?? "",
@@ -86,6 +105,21 @@ function formFrom(entry: GameEntry): FormState {
 		tags: entry.tags?.join(", ") ?? "",
 		region: entry.region ?? "",
 		players: entry.players?.toString() ?? "",
+	};
+}
+
+/** Fold the host's own copy of the row into the form: the hint fields, and `prep` as read. No
+ * copy (the request failed) leaves `hintsLoaded` false, so `toInput` omits both and the host
+ * keeps what it has. */
+function withStored(f: FormState, stored: CustomEntry | undefined): FormState {
+	if (!stored) return f;
+	return {
+		...f,
+		exe: stored.detect?.exe ?? "",
+		installDir: stored.detect?.install_dir ?? "",
+		processName: stored.detect?.process_name ?? "",
+		prep: stored.prep ?? [],
+		hintsLoaded: true,
 	};
 }
 
@@ -124,6 +158,21 @@ function toInput(f: FormState): CustomInput {
 		...(command ? { password: f.password } : {}),
 		// Omitted when it is the default, matching the host's skip-when-`game` serialization.
 		...(f.isLauncher ? { role: "launcher" as const } : {}),
+		// Sent once the host's copy was read, or when a hint was typed: an omitted key means
+		// "keep" on the host, so a blank field clears only on purpose.
+		...(f.hintsLoaded ||
+		trim(f.exe) ||
+		trim(f.installDir) ||
+		trim(f.processName)
+			? {
+					detect: {
+						exe: trim(f.exe),
+						install_dir: trim(f.installDir),
+						process_name: trim(f.processName),
+					},
+				}
+			: {}),
+		...(f.prep ? { prep: f.prep } : {}),
 		platform: trim(f.platform),
 		description: trim(f.description),
 		developer: trim(f.developer),
@@ -169,9 +218,17 @@ export const GameFormSection: FC<{
 		onClose();
 	};
 
+	// Edit waits for the host's own copy of the row: the catalog entry carries neither `detect`
+	// nor `prep`, and a form seeded without them would have nothing to round-trip.
+	const stored = useGetCustomGame(target === "new" ? "" : customId(target), {
+		query: { enabled: target !== "new" },
+	});
+	if (target !== "new" && stored.isPending) return null;
 	return (
 		<GameForm
-			initial={target === "new" ? emptyForm : formFrom(target)}
+			initial={
+				target === "new" ? emptyForm : withStored(formFrom(target), stored.data)
+			}
 			mode={target === "new" ? "add" : "edit"}
 			onSubmit={onSubmit}
 			onCancel={onClose}
@@ -333,6 +390,39 @@ export const GameForm: FC<{
 						</p>
 					</div>
 					<fieldset className="space-y-4 border-t pt-2">
+						<legend className="sr-only">{m.library_process_legend()}</legend>
+						<p
+							aria-hidden
+							className="text-sm font-medium text-muted-foreground"
+						>
+							{m.library_process_legend()}
+						</p>
+						<p className="text-xs text-muted-foreground">
+							{m.library_process_help()}
+						</p>
+						<Field
+							id="exe"
+							label={m.library_field_exe()}
+							value={form.exe}
+							onChange={set("exe")}
+							help={m.library_field_exe_help()}
+						/>
+						<Field
+							id="installDir"
+							label={m.library_field_install_dir()}
+							value={form.installDir}
+							onChange={set("installDir")}
+							help={m.library_field_install_dir_help()}
+						/>
+						<Field
+							id="processName"
+							label={m.library_field_process_name()}
+							value={form.processName}
+							onChange={set("processName")}
+							help={m.library_field_process_name_help()}
+						/>
+					</fieldset>
+					<fieldset className="space-y-4 border-t pt-2">
 						<legend className="sr-only">{m.library_details_legend()}</legend>
 						<p
 							aria-hidden
@@ -411,16 +501,11 @@ export const GameForm: FC<{
 							help={m.library_field_tags_help()}
 						/>
 					</fieldset>
-					{/* Data-loss warning, not a nicety.
-					`PUT /library/custom/{id}` REPLACES the entry (host: library/custom.rs
-					`update_custom` assigns `slot.prep = input.prep; slot.detect = input.detect`),
-					but `GET /library` returns a `GameEntry`, which carries neither field. So the
-					console cannot round-trip them — anything configured outside this form is dropped
-					by a save it did not intend to touch. The real fix is host-side (expose `detect`
-					and `prep` on the read model); until then, say so before the operator finds out. */}
-					{mode === "edit" && (
+					{/* The host's copy could not be read: the hint fields above are blank, and
+					    neither they nor `prep` are sent, so the host keeps what it has. */}
+					{mode === "edit" && !form.hintsLoaded && (
 						<p className="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm">
-							{m.library_edit_overwrites()}
+							{m.library_edit_hints_unread()}
 						</p>
 					)}
 					{error && (

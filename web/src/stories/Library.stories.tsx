@@ -17,6 +17,10 @@ const emptyForm = {
 	// because the story renders the untouched add form, which has no command yet.
 	password: "",
 	isLauncher: false,
+	exe: "",
+	installDir: "",
+	processName: "",
+	hintsLoaded: false,
 	platform: "",
 	description: "",
 	developer: "",

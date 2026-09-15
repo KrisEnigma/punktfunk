@@ -1935,6 +1935,57 @@
       }
     },
     "/api/v1/library/custom/{id}": {
+      "get": {
+        "tags": [
+          "library"
+        ],
+        "summary": "One custom entry as stored, `detect` and `prep` included",
+        "description": "Operator lane only: the hint names host paths, which is why the catalog read\nmodel leaves it out. The paired-cert allowlist names `GET /library` exactly.",
+        "operationId": "getCustomGame",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The custom entry id (without the `custom:` prefix)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The stored entry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CustomEntry"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No custom entry with that id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      },
       "put": {
         "tags": [
           "library"
@@ -6019,7 +6070,15 @@
                 "$ref": "#/components/schemas/Artwork"
               },
               "detect": {
-                "$ref": "#/components/schemas/DetectHint"
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/DetectHint",
+                    "description": "Absent on an update keeps the stored hint, as with `prep`."
+                  }
+                ]
               },
               "icon": {
                 "type": [
@@ -6039,11 +6098,14 @@
                 ]
               },
               "prep": {
-                "type": "array",
+                "type": [
+                  "array",
+                  "null"
+                ],
                 "items": {
                   "$ref": "#/components/schemas/PrepCmd"
                 },
-                "description": "Run as the host user; operator-privileged. See [`privileged_field`]."
+                "description": "Run as the host user; operator-privileged. See [`privileged_field`]. Absent on an\nupdate keeps the stored list: a writer that never read it must not clear it."
               },
               "role": {
                 "$ref": "#/components/schemas/GameRole",

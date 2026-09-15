@@ -295,7 +295,7 @@ pub(crate) async fn create_custom_game(
         lane,
         &input.art,
         input.launch.as_ref(),
-        &input.prep,
+        input.prep.as_deref().unwrap_or(&[]),
         input.icon.as_deref(),
     ) {
         return denied;
@@ -303,6 +303,29 @@ pub(crate) async fn create_custom_game(
     match crate::library::add_custom(input) {
         Ok(entry) => (StatusCode::CREATED, Json(entry)).into_response(),
         Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+    }
+}
+
+/// One custom entry as stored, `detect` and `prep` included
+///
+/// Operator lane only: the hint names host paths, which is why the catalog read
+/// model leaves it out. The paired-cert allowlist names `GET /library` exactly.
+#[utoipa::path(
+    get,
+    path = "/library/custom/{id}",
+    tag = "library",
+    operation_id = "getCustomGame",
+    params(("id" = String, Path, description = "The custom entry id (without the `custom:` prefix)")),
+    responses(
+        (status = OK, description = "The stored entry", body = crate::library::CustomEntry),
+        (status = UNAUTHORIZED, description = "Missing or invalid bearer token", body = ApiError),
+        (status = NOT_FOUND, description = "No custom entry with that id", body = ApiError),
+    )
+)]
+pub(crate) async fn get_custom_game(Path(id): Path<String>) -> Response {
+    match crate::library::get_custom(&id) {
+        Some(entry) => Json(entry).into_response(),
+        None => api_error(StatusCode::NOT_FOUND, "no custom entry with that id"),
     }
 }
 
@@ -333,7 +356,7 @@ pub(crate) async fn update_custom_game(
         lane,
         &input.art,
         input.launch.as_ref(),
-        &input.prep,
+        input.prep.as_deref().unwrap_or(&[]),
         input.icon.as_deref(),
     ) {
         return denied;

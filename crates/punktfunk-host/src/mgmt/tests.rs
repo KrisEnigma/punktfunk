@@ -1515,6 +1515,8 @@ fn every_route_is_classified_for_the_plugin_and_cert_lanes() {
         // Hide is operator curation; neither lane, unlike the scanner toggle.
         ("PUT", "/api/v1/library/hidden/{id}", false, false),
         ("POST", "/api/v1/library/custom", true, false),
+        // The stored row names host paths (`detect`): operator only, like hide.
+        ("GET", "/api/v1/library/custom/{id}", false, false),
         ("PUT", "/api/v1/library/custom/{id}", true, false),
         ("DELETE", "/api/v1/library/custom/{id}", true, false),
         ("PUT", "/api/v1/library/provider/{provider}", true, false),
@@ -3165,10 +3167,10 @@ async fn library_stats_ride_on_the_entry() {
         title: "Chrono Trigger".into(),
         art: Default::default(),
         launch: None,
-        prep: Vec::new(),
+        prep: None,
         role: Default::default(),
         icon: None,
-        detect: Default::default(),
+        detect: None,
         meta: Default::default(),
     })
     .expect("seed one custom title");
@@ -3620,4 +3622,70 @@ async fn a_host_with_no_browser_plane_stamps_nothing() {
         .unwrap();
     let res = app.oneshot(preflight).await.unwrap();
     assert_ne!(res.status(), StatusCode::NO_CONTENT, "no CORS answer");
+}
+
+/// The stored row's `detect` and `prep` come back on the operator lane, and an update that
+/// omits them keeps them — the console form never showed them and used to clear them on
+/// every save (#1064). Sending the field, even empty, still replaces it.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn custom_entry_hints_round_trip_and_survive_an_update() {
+    let _tmp = ConfigDirOverride::new();
+    let app = test_app(test_state(), None);
+    let added = crate::library::add_custom(crate::library::CustomInput {
+        title: "Eden".into(),
+        art: Default::default(),
+        launch: None,
+        prep: Some(vec![crate::hooks::PrepCmd {
+            run: "true".into(),
+            undo: None,
+        }]),
+        role: Default::default(),
+        icon: None,
+        detect: Some(crate::library::DetectHint {
+            exe: Some("/usr/bin/eden".into()),
+            ..Default::default()
+        }),
+        meta: Default::default(),
+    })
+    .expect("seed one custom title");
+    let path = format!("/api/v1/library/custom/{}", added.id);
+
+    let (s, json) = send(&app, get_req(&path)).await;
+    assert_eq!(s, StatusCode::OK, "{json}");
+    assert_eq!(json["detect"]["exe"], "/usr/bin/eden");
+    assert_eq!(json["prep"][0]["do"], "true");
+
+    let (s, json) = send(
+        &app,
+        put_json(&path, serde_json::json!({ "title": "Eden II" })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{json}");
+    let (_, json) = send(&app, get_req(&path)).await;
+    assert_eq!(json["title"], "Eden II");
+    assert_eq!(
+        json["detect"]["exe"], "/usr/bin/eden",
+        "omitted detect is kept: {json}"
+    );
+    assert_eq!(
+        json["prep"][0]["do"], "true",
+        "omitted prep is kept: {json}"
+    );
+
+    let body = serde_json::json!({ "title": "Eden II", "detect": {}, "prep": [] });
+    let (s, json) = send(&app, put_json(&path, body)).await;
+    assert_eq!(s, StatusCode::OK, "{json}");
+    let (_, json) = send(&app, get_req(&path)).await;
+    assert!(
+        json.get("detect").is_none(),
+        "an explicit empty hint clears it: {json}"
+    );
+    assert!(
+        json.get("prep").is_none(),
+        "an explicit empty list clears it: {json}"
+    );
+
+    let (s, _) = send(&app, get_req("/api/v1/library/custom/nonesuch")).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
 }
