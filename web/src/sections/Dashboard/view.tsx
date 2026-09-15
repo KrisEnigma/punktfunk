@@ -6,6 +6,7 @@ import {
 	Smartphone,
 	Video,
 	Volume2,
+	VolumeX,
 	ZapOff,
 } from "lucide-react";
 import type { FC, ReactNode } from "react";
@@ -13,6 +14,7 @@ import type { ActiveGame } from "@/api/gen/model/activeGame";
 import type { AudioWiring } from "@/api/gen/model/audioWiring";
 import type { GameEntry } from "@/api/gen/model/gameEntry";
 import type { RuntimeStatus } from "@/api/gen/model/runtimeStatus";
+import type { SessionRow } from "@/api/gen/model/sessionRow";
 import { QueryState } from "@/components/query-state";
 import { Stagger } from "@/components/stagger";
 import { Badge } from "@/components/ui/badge";
@@ -34,9 +36,11 @@ export const DashboardView: FC<{
 	onStopSession: () => void;
 	onRequestIdr: () => void;
 	onEndGame: (game: ActiveGame) => void;
+	onToggleMute: (row: SessionRow) => void;
 	isStopping: boolean;
 	isRequestingIdr: boolean;
 	isEndingGame: boolean;
+	isTogglingMute: boolean;
 }> = ({
 	status,
 	library,
@@ -44,9 +48,11 @@ export const DashboardView: FC<{
 	onStopSession,
 	onRequestIdr,
 	onEndGame,
+	onToggleMute,
 	isStopping,
 	isRequestingIdr,
 	isEndingGame,
+	isTogglingMute,
 }) => {
 	const s = status.data;
 	return (
@@ -154,6 +160,51 @@ export const DashboardView: FC<{
 									</div>
 								</CardHeader>
 								<CardContent>
+									{/* One row per native session: the only per-client control the host has.
+									    Stop is host-wide; mute names a single session by its id. */}
+									{s.sessions.length > 0 && (
+										<ul className="mb-4 flex flex-col gap-2">
+											{s.sessions.map((row) => (
+												<li key={row.id} className="flex items-center gap-3">
+													<div className="min-w-0 flex-1">
+														<div className="flex flex-wrap items-center gap-2">
+															<span className="truncate font-medium">
+																{row.client_name ?? row.client}
+															</span>
+															<Badge variant="secondary">
+																{row.joined
+																	? m.status_session_joined()
+																	: m.status_session_owner()}
+															</Badge>
+															{row.muted && (
+																<Badge variant="outline">
+																	{m.status_session_muted()}
+																</Badge>
+															)}
+														</div>
+														<p className="mt-0.5 text-xs text-muted-foreground">
+															{row.width}×{row.height} @ {row.fps}
+														</p>
+													</div>
+													<Button
+														variant="outline"
+														size="sm"
+														disabled={isTogglingMute}
+														onClick={() => onToggleMute(row)}
+													>
+														{row.muted ? (
+															<Volume2 className="size-3.5" />
+														) : (
+															<VolumeX className="size-3.5" />
+														)}
+														{row.muted
+															? m.action_unmute_session()
+															: m.action_mute_session()}
+													</Button>
+												</li>
+											))}
+										</ul>
+									)}
 									{s.stream ? (
 										<dl className="grid grid-cols-2 gap-x-6 gap-y-3 sm:grid-cols-4">
 											<Field

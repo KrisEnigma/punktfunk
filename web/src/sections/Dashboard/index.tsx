@@ -4,9 +4,11 @@ import type { FC } from "react";
 import { getGetStatusQueryKey, useGetStatus } from "@/api/gen/host/host";
 import { useGetLibrary } from "@/api/gen/library/library";
 import type { ActiveGame } from "@/api/gen/model/activeGame";
+import type { SessionRow } from "@/api/gen/model/sessionRow";
 import {
 	useEndGame,
 	useRequestIdr,
+	useSetSessionAudio,
 	useStopSession,
 } from "@/api/gen/session/session";
 import { useDialogs } from "@/components/dialogs";
@@ -40,6 +42,7 @@ export const SectionDashboard: FC = () => {
 	const stop = useStopSession();
 	const idr = useRequestIdr();
 	const endGame = useEndGame();
+	const audio = useSetSessionAudio();
 
 	const invalidate = () =>
 		qc.invalidateQueries({ queryKey: getGetStatusQueryKey() });
@@ -119,9 +122,17 @@ export const SectionDashboard: FC = () => {
 				idr.mutate(undefined, { onError: failed(m.action_idr_failed()) })
 			}
 			onEndGame={onEndGame}
+			// Per session, unlike stop: the row's id names exactly one client.
+			onToggleMute={(row: SessionRow) =>
+				audio.mutate(
+					{ id: row.id, data: { muted: !row.muted } },
+					{ onSuccess: invalidate, onError: failed(m.action_mute_failed()) },
+				)
+			}
 			isStopping={stop.isPending}
 			isRequestingIdr={idr.isPending}
 			isEndingGame={endGame.isPending || stop.isPending}
+			isTogglingMute={audio.isPending}
 		/>
 	);
 };

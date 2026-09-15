@@ -43,8 +43,24 @@ pub struct CustomEntry {
     /// host tracks only the child it spawned.
     #[serde(default, skip_serializing_if = "DetectHint::is_empty")]
     pub detect: DetectHint,
+    /// Which sessions hear this title. Absent = every session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio: Option<AudioPolicy>,
     #[serde(flatten)]
     pub meta: GameMeta,
+}
+
+/// Audio while this title runs: which of the sessions on its display hear it.
+/// `all` is the same as no policy and is stored as none.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct AudioPolicy {
+    #[serde(default)]
+    pub sessions: crate::session_status::AudioSessions,
+}
+
+/// `all` means no policy: stored as none so the row and the wire stay bare.
+fn audio_policy(audio: Option<AudioPolicy>) -> Option<AudioPolicy> {
+    audio.filter(|a| a.sessions != crate::session_status::AudioSessions::All)
 }
 
 /// Create/replace body. No `id` — the host assigns it.
@@ -68,6 +84,9 @@ pub struct CustomInput {
     /// Absent on an update keeps the stored hint, as with `prep`.
     #[serde(default)]
     pub detect: Option<DetectHint>,
+    /// Absent on an update keeps the stored policy; `{"sessions":"all"}` clears it.
+    #[serde(default)]
+    pub audio: Option<AudioPolicy>,
     /// Flattened [`GameMeta`]. Replaced wholesale on update — an edit must send every field it wants kept.
     #[serde(flatten)]
     pub meta: GameMeta,
@@ -94,6 +113,8 @@ pub struct ProviderEntryInput {
     /// Install-dir / process hint. Needed when launch goes through the provider's own client.
     #[serde(default)]
     pub detect: DetectHint,
+    #[serde(default)]
+    pub audio: Option<AudioPolicy>,
     #[serde(flatten)]
     pub meta: GameMeta,
 }
@@ -285,6 +306,7 @@ pub fn add_custom(input: CustomInput) -> Result<CustomEntry> {
         role: input.role,
         icon: input.icon,
         detect: input.detect.unwrap_or_default(),
+        audio: audio_policy(input.audio),
         meta: input.meta,
     };
     catalog.entries.push(entry.clone());
@@ -313,6 +335,9 @@ pub fn update_custom(id: &str, input: CustomInput) -> Result<MutateOutcome<Custo
     slot.icon = input.icon;
     if let Some(detect) = input.detect {
         slot.detect = detect;
+    }
+    if input.audio.is_some() {
+        slot.audio = audio_policy(input.audio);
     }
     slot.meta = input.meta;
     let updated = slot.clone();
@@ -556,6 +581,7 @@ fn reconcile_entries(
             role: input.role,
             icon: input.icon,
             detect: input.detect,
+            audio: audio_policy(input.audio),
             meta: input.meta,
         });
     }
@@ -639,6 +665,13 @@ pub fn prep_for(library_id: &str) -> Vec<crate::hooks::PrepCmd> {
         .unwrap_or_default()
 }
 
+/// The title's `audio.sessions`, if it has one. Same lookup as [`prep_for`].
+pub fn audio_sessions_for(library_id: &str) -> Option<crate::session_status::AudioSessions> {
+    entry_for_library_id(library_id)
+        .and_then(|e| e.audio)
+        .map(|a| a.sessions)
+}
+
 /// `source` is `"manual"` for operator CRUD, else the provider id. Hooks and the SDK filter on it.
 fn emit_changed(source: &str) {
     crate::events::emit(crate::events::EventKind::LibraryChanged {
@@ -649,6 +682,45 @@ fn emit_changed(source: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `audio.sessions` round-trips on the row; `all` and absent are the same bare row.
+    #[test]
+    fn audio_policy_is_bare_unless_it_narrows() {
+        use crate::session_status::AudioSessions;
+        let input = |json: &str| serde_json::from_str::<CustomInput>(json).unwrap();
+        let bare = input(r#"{"title":"x"}"#);
+        assert_eq!(audio_policy(bare.audio), None);
+        let all = input(r#"{"title":"x","audio":{"sessions":"all"}}"#);
+        assert_eq!(audio_policy(all.audio), None);
+        let owner = input(r#"{"title":"x","audio":{"sessions":"owner"}}"#);
+        assert_eq!(
+            audio_policy(owner.audio).map(|a| a.sessions),
+            Some(AudioSessions::Owner)
+        );
+        assert!(serde_json::from_str::<CustomInput>(
+            r#"{"title":"x","audio":{"sessions":"phone"}}"#
+        )
+        .is_err());
+        let row = CustomEntry {
+            id: "c1".into(),
+            title: "x".into(),
+            art: Artwork::default(),
+            launch: None,
+            prep: Vec::new(),
+            provider: None,
+            external_id: None,
+            store: None,
+            role: GameRole::default(),
+            icon: None,
+            detect: DetectHint::default(),
+            audio: audio_policy(owner.audio),
+            meta: GameMeta::default(),
+        };
+        let json = serde_json::to_value(&row).unwrap();
+        assert_eq!(json["audio"]["sessions"], "owner");
+        let back: CustomEntry = serde_json::from_value(json).unwrap();
+        assert_eq!(back.audio, row.audio);
+    }
 
     fn manual(id: &str, title: &str) -> CustomEntry {
         CustomEntry {
@@ -663,6 +735,7 @@ mod tests {
             role: GameRole::Game,
             icon: None,
             detect: DetectHint::default(),
+            audio: None,
             meta: GameMeta::default(),
         }
     }
@@ -677,6 +750,7 @@ mod tests {
             role: GameRole::Game,
             icon: None,
             detect: DetectHint::default(),
+            audio: None,
             meta: GameMeta::default(),
         }
     }

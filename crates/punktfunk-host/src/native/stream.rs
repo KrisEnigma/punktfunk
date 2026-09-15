@@ -381,6 +381,8 @@ pub(super) struct SessionContext {
     pub(super) client_hdr: Option<pf_frame::HdrMeta>,
     /// Admitted by `mode_conflict: join`: share the live display instead of creating one.
     pub(super) join_live: bool,
+    /// The audio thread's mute, registered so the console and a title policy can set it.
+    pub(super) mute: Arc<crate::session_status::SessionMute>,
     /// A joiner's view and fit ([`SessionPlan::reframe_to`](crate::session_plan::SessionPlan::reframe_to)).
     pub(super) reframe_to: Option<(punktfunk_core::video_fit::VideoFit, (u32, u32))>,
     /// The encoder's framing, published for the input thread.

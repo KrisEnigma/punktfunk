@@ -112,6 +112,9 @@ pub(crate) struct RuntimeStatus {
     active_sessions: u32,
     /// GameStream launch if present, else the first live native session. `null` when idle.
     session: Option<SessionInfo>,
+    /// Every live native session, for the per-session routes. A GameStream session is not
+    /// listed: it has no id to act on.
+    sessions: Vec<SessionRow>,
     /// Active stream parameters. `null` when idle.
     stream: Option<StreamInfo>,
     /// Launched titles: live sessions plus `state: "grace"` reconnect-window rows. Empty for a desktop-only stream.
@@ -344,6 +347,25 @@ pub(crate) struct ActiveGame {
     /// Seconds until this game is ended — only present on a `grace` row.
     #[serde(skip_serializing_if = "Option::is_none")]
     grace_remaining_s: Option<u64>,
+}
+
+/// One live native session, as the per-session routes address it.
+#[derive(Serialize, ToSchema)]
+pub(crate) struct SessionRow {
+    /// Registry id: the `{id}` in `PUT /session/{id}/audio`. Not stable across host restarts.
+    id: u64,
+    /// 12-hex cert-fingerprint prefix, or the peer IP if anonymous.
+    client: String,
+    /// Display name (trust-store, else the client's own). Absent if nameless.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    client_name: Option<String>,
+    width: u32,
+    height: u32,
+    fps: u32,
+    /// Admitted by `mode_conflict: join`: shares the owner's display and audio.
+    joined: bool,
+    /// Audio is silence on the wire: the operator's mute or the title's `audio.sessions`.
+    muted: bool,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -596,8 +618,22 @@ pub(crate) async fn get_status(State(st): State<Arc<MgmtState>>) -> Json<Runtime
             last_resize_ms: (s.last_resize_ms > 0).then_some(s.last_resize_ms),
         })
     });
+    let sessions = native
+        .iter()
+        .map(|s| SessionRow {
+            id: s.id,
+            client: s.client.clone(),
+            client_name: s.client_name.clone(),
+            width: s.width,
+            height: s.height,
+            fps: s.fps,
+            joined: s.joined,
+            muted: s.muted,
+        })
+        .collect();
     Json(RuntimeStatus {
         video_streaming: gs_video || !native.is_empty(),
+        sessions,
         audio_streaming: gs_audio || !native.is_empty(),
         pin_pending: gs_pin_pending(&st),
         paired_clients: st

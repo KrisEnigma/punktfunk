@@ -32,6 +32,39 @@ pub(crate) async fn stop_session(State(st): State<Arc<MgmtState>>) -> StatusCode
     StatusCode::NO_CONTENT
 }
 
+/// Mute or unmute one session's audio
+///
+/// Silence on the wire for that session only; the others keep hearing. The
+/// stream's cadence stays, so the client shows nothing but silence.
+#[utoipa::path(
+    put,
+    path = "/session/{id}/audio",
+    tag = "session",
+    operation_id = "setSessionAudio",
+    params(("id" = u64, Path, description = "Session id from `/status` `sessions[].id`")),
+    request_body = SessionAudioRequest,
+    responses(
+        (status = NO_CONTENT, description = "Applied"),
+        (status = NOT_FOUND, description = "No live session with that id", body = ApiError),
+        (status = UNAUTHORIZED, description = "Missing or invalid bearer token", body = ApiError),
+    )
+)]
+pub(crate) async fn set_session_audio(
+    Path(id): Path<u64>,
+    ApiJson(req): ApiJson<SessionAudioRequest>,
+) -> Response {
+    if !crate::session_status::set_muted(id, req.muted) {
+        return api_error(StatusCode::NOT_FOUND, "no live session with that id");
+    }
+    tracing::info!(id, muted = req.muted, "management API: session audio");
+    StatusCode::NO_CONTENT.into_response()
+}
+
+#[derive(Deserialize, ToSchema)]
+pub(crate) struct SessionAudioRequest {
+    pub muted: bool,
+}
+
 /// End waiting games
 ///
 /// Ends games waiting out the reconnect window. Does not touch a live session

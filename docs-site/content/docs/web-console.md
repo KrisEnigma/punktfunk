@@ -131,7 +131,8 @@ Nine destinations in the sidebar (a **More** tab on a phone holds the last five)
 ![Live status during a stream: video and audio streaming, the running game, the session's codec, resolution, frame rate and bitrate](/img/console-live-status.png)
 
 - **Dashboard** — the live status above: what's streaming, which games run, how many clients are
-  paired. Buttons stop a session or ask the encoder for a fresh keyframe.
+  paired. Buttons stop a session or ask the encoder for a fresh keyframe; with clients sharing a
+  display, each session gets its own mute.
 - **Host** — this host's identity (hostname, OS, local IP, version, unique id), the codecs it
   advertises, its ports, the **Updates** card (see [Updating the Host](/docs/updating)), the
   **GPUs** card — Automatic, or prefer one GPU for capture and encode, applied to the next session

@@ -427,9 +427,7 @@ async fn health_is_open_and_versioned() {
     assert_eq!(body["abi_version"], punktfunk_core::ABI_VERSION);
 }
 
-/// Serializes tests that touch the process-global live-session registry
-/// ([`crate::session_status`]); otherwise one test's session leaks into another.
-static SESSION_REGISTRY_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+use crate::session_status::SESSION_REGISTRY_LOCK;
 
 fn summary_req() -> axum::http::Request<Body> {
     let mut req = get_req("/api/v1/local/summary");
@@ -459,6 +457,8 @@ fn fake_native_session(
         // Desktop stream: no game row.
         game: None,
         capture_health: Arc::new(std::sync::Mutex::new(None)),
+        joined: false,
+        mute: Arc::new(crate::session_status::SessionMute::default()),
     })
 }
 
@@ -1503,6 +1503,7 @@ fn every_route_is_classified_for_the_plugin_and_cert_lanes() {
         // Session control.
         ("DELETE", "/api/v1/session", true, false),
         ("POST", "/api/v1/session/idr", true, false),
+        ("PUT", "/api/v1/session/{id}/audio", true, false),
         ("GET", "/api/v1/session/settings", true, false),
         ("PUT", "/api/v1/session/settings", true, false),
         ("POST", "/api/v1/game/end", true, false),
@@ -2731,6 +2732,31 @@ async fn native_endpoints_report_disabled_without_native_host() {
     assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE);
 }
 
+/// `/status` lists every native session with its id; the audio route mutes exactly that one
+/// and refuses an id that is not live.
+#[tokio::test]
+async fn session_audio_mutes_one_native_session() {
+    let _serial = SESSION_REGISTRY_LOCK.lock().await;
+    let app = test_app(test_state(), None);
+    let _live = fake_native_session(1920, 1080, 60);
+    let (_, body) = send(&app, get_req("/api/v1/status")).await;
+    let row = &body["sessions"][0];
+    let id = row["id"].as_u64().unwrap();
+    assert_eq!(row["client"], "test-client");
+    assert_eq!(row["muted"], false);
+    assert_eq!(row["joined"], false);
+
+    let path = format!("/api/v1/session/{id}/audio");
+    let (s, _) = send(&app, put_json(&path, serde_json::json!({ "muted": true }))).await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+    let (_, body) = send(&app, get_req("/api/v1/status")).await;
+    assert_eq!(body["sessions"][0]["muted"], true);
+
+    let gone = format!("/api/v1/session/{}/audio", id + 1_000_000);
+    let (s, _) = send(&app, put_json(&gone, serde_json::json!({ "muted": true }))).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+}
+
 fn put_json(path: &str, body: serde_json::Value) -> axum::http::Request<Body> {
     axum::http::Request::put(path)
         .header(axum::http::header::CONTENT_TYPE, "application/json")
@@ -3171,6 +3197,7 @@ async fn library_stats_ride_on_the_entry() {
         role: Default::default(),
         icon: None,
         detect: None,
+        audio: None,
         meta: Default::default(),
     })
     .expect("seed one custom title");
@@ -3646,6 +3673,7 @@ async fn custom_entry_hints_round_trip_and_survive_an_update() {
             exe: Some("/usr/bin/eden".into()),
             ..Default::default()
         }),
+        audio: None,
         meta: Default::default(),
     })
     .expect("seed one custom title");

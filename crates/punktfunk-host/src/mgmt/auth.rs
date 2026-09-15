@@ -250,6 +250,7 @@ pub(crate) fn plugin_may_access(method: &Method, path: &str) -> bool {
         (&Method::DELETE, "/api/v1/display/clients/{}"),
         (&Method::DELETE, "/api/v1/session"),
         (&Method::POST, "/api/v1/session/idr"),
+        (&Method::PUT, "/api/v1/session/{}/audio"),
         (&Method::GET, "/api/v1/session/settings"),
         (&Method::PUT, "/api/v1/session/settings"),
         (&Method::POST, "/api/v1/game/end"),

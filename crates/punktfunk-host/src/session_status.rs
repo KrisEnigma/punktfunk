@@ -47,11 +47,75 @@ struct LiveSession {
     /// The capturer's live health, published by the video loop (WP18). `None` until the
     /// first publish, or on a capturer that does not classify.
     capture_health: Arc<Mutex<Option<pf_capture::CaptureHealth>>>,
+    /// Admitted by `mode_conflict: join`: shares the owner's display and audio.
+    joined: bool,
+    /// The audio thread's mute, read per frame.
+    mute: Arc<SessionMute>,
 }
+
+/// Why a session's audio is silent. The operator's switch and a title's
+/// `audio.sessions` policy are separate bits, so a lease ending lifts only its
+/// own and never an operator's mute.
+#[derive(Default)]
+pub struct SessionMute {
+    operator: AtomicBool,
+    policy: AtomicBool,
+}
+
+impl SessionMute {
+    pub fn is_muted(&self) -> bool {
+        self.operator.load(Ordering::Relaxed) || self.policy.load(Ordering::Relaxed)
+    }
+}
+
+/// Which sessions hear a title's audio (`audio.sessions` on a custom entry).
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+    utoipa::ToSchema,
+)]
+#[serde(rename_all = "lowercase")]
+pub enum AudioSessions {
+    #[default]
+    All,
+    /// The session that owns the display; joiners are silent.
+    Owner,
+    /// The sessions that joined the display; the owner is silent.
+    Joined,
+    /// Only the session that launched the title.
+    Launcher,
+}
+
+/// Whether `policy` silences a session. `launcher` is the launching session's
+/// client label, matched the way [`stop_by_fingerprint`] matches.
+fn policy_mutes(policy: AudioSessions, launcher: &str, client: &str, joined: bool) -> bool {
+    match policy {
+        AudioSessions::All => false,
+        AudioSessions::Owner => joined,
+        AudioSessions::Joined => !joined,
+        AudioSessions::Launcher => client != launcher,
+    }
+}
+
+/// The live title policy, applied to sessions that register while it stands.
+/// One at a time: a second lease replaces it, and the first to end lifts both.
+static AUDIO_POLICY: Mutex<Option<(AudioSessions, String)>> = Mutex::new(None);
 
 /// Resolved read of one live session for `/status`.
 #[derive(Clone)]
 pub struct SessionSnapshot {
+    /// Registry id: the `{id}` of the per-session routes.
+    pub id: u64,
+    /// Client label: 12-hex cert-fingerprint prefix, or peer IP if anonymous.
+    pub client: String,
+    pub joined: bool,
+    pub muted: bool,
     pub width: u32,
     pub height: u32,
     pub fps: u32,
@@ -66,6 +130,11 @@ pub struct SessionSnapshot {
     /// Last mid-stream resize total, ms. 0 = no resize this session.
     pub last_resize_ms: u32,
 }
+
+/// Serializes tests that touch the process-global registry; otherwise one
+/// test's session leaks into another's `/status`.
+#[cfg(test)]
+pub(crate) static SESSION_REGISTRY_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 fn registry() -> &'static Mutex<Vec<LiveSession>> {
     static REG: OnceLock<Mutex<Vec<LiveSession>>> = OnceLock::new();
@@ -115,10 +184,15 @@ pub struct Registration {
     pub game: Option<Arc<crate::gamelease::LeaseShared>>,
     /// The video loop's capture-health slot; it stores the capturer's report on its own cadence.
     pub capture_health: Arc<Mutex<Option<pf_capture::CaptureHealth>>>,
+    /// Admitted by `mode_conflict: join`.
+    pub joined: bool,
+    /// The audio thread's mute; the same Arc it reads per frame.
+    pub mute: Arc<SessionMute>,
 }
 
 /// Publish a live native session. The guard removes it on drop and pairs
 /// `session.started` with `session.ended` on every exit path, including panic.
+/// A standing title policy applies to the new row at once.
 pub fn register(reg: Registration) -> LiveSessionGuard {
     let Registration {
         mode,
@@ -134,8 +208,16 @@ pub fn register(reg: Registration) -> LiveSessionGuard {
         last_resize_ms,
         game,
         capture_health,
+        joined,
+        mute,
     } = reg;
     let id = next_id();
+    if let Some((policy, launcher)) = AUDIO_POLICY.lock().unwrap().as_ref() {
+        mute.policy.store(
+            policy_mutes(*policy, launcher, &client, joined),
+            Ordering::Relaxed,
+        );
+    }
     let session = LiveSession {
         id,
         mode,
@@ -151,6 +233,8 @@ pub fn register(reg: Registration) -> LiveSessionGuard {
         last_resize_ms,
         game,
         capture_health,
+        joined,
+        mute,
     };
     crate::events::emit(crate::events::EventKind::SessionStarted {
         session: session_ref(&session),
@@ -197,6 +281,10 @@ pub fn snapshot() -> Vec<SessionSnapshot> {
         .map(|s| {
             let (width, height, fps) = crate::native::unpack_mode(s.mode.load(Ordering::Relaxed));
             SessionSnapshot {
+                id: s.id,
+                client: s.client.clone(),
+                joined: s.joined,
+                muted: s.mute.is_muted(),
                 width,
                 height,
                 fps,
@@ -377,13 +465,60 @@ pub fn force_idr_all() {
     }
 }
 
+/// The operator's mute for one session (`PUT /session/{id}/audio`).
+/// `false` = no live session has that id.
+pub fn set_muted(id: u64, muted: bool) -> bool {
+    let reg = registry().lock().unwrap();
+    let Some(s) = reg.iter().find(|s| s.id == id) else {
+        return false;
+    };
+    s.mute.operator.store(muted, Ordering::Relaxed);
+    true
+}
+
+/// Apply a title's `audio.sessions` to every live session, and to each one
+/// that registers while the guard lives. Drop lifts the policy's mutes only.
+pub fn apply_audio_policy(policy: AudioSessions, launcher: &str) -> AudioPolicyGuard {
+    *AUDIO_POLICY.lock().unwrap() = Some((policy, launcher.to_owned()));
+    for s in registry().lock().unwrap().iter() {
+        s.mute.policy.store(
+            policy_mutes(policy, launcher, &s.client, s.joined),
+            Ordering::Relaxed,
+        );
+    }
+    tracing::info!(policy = ?policy, launcher, "title audio policy applied");
+    AudioPolicyGuard(())
+}
+
+pub struct AudioPolicyGuard(());
+
+impl Drop for AudioPolicyGuard {
+    fn drop(&mut self) {
+        *AUDIO_POLICY.lock().unwrap() = None;
+        for s in registry().lock().unwrap().iter() {
+            s.mute.policy.store(false, Ordering::Relaxed);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn fake_session(client: &str) -> (LiveSessionGuard, Arc<AtomicBool>, Arc<AtomicBool>) {
+        fake_session_joined(client, false).0
+    }
+
+    fn fake_session_joined(
+        client: &str,
+        joined: bool,
+    ) -> (
+        (LiveSessionGuard, Arc<AtomicBool>, Arc<AtomicBool>),
+        Arc<SessionMute>,
+    ) {
         let stop = Arc::new(AtomicBool::new(false));
         let quit = Arc::new(AtomicBool::new(false));
+        let mute = Arc::new(SessionMute::default());
         let guard = register(Registration {
             mode: Arc::new(AtomicU64::new(0)),
             bitrate_kbps: Arc::new(AtomicU32::new(20_000)),
@@ -398,8 +533,63 @@ mod tests {
             last_resize_ms: Arc::new(AtomicU32::new(0)),
             game: None,
             capture_health: Arc::new(Mutex::new(None)),
+            joined,
+            mute: mute.clone(),
         });
-        (guard, stop, quit)
+        ((guard, stop, quit), mute)
+    }
+
+    #[test]
+    fn policy_picks_the_sessions_it_names() {
+        use AudioSessions::*;
+        // (policy, client, joined) → muted
+        for (policy, client, joined, want) in [
+            (All, "aaaaaaaaaaaa", true, false),
+            (Owner, "aaaaaaaaaaaa", false, false),
+            (Owner, "bbbbbbbbbbbb", true, true),
+            (Joined, "aaaaaaaaaaaa", false, true),
+            (Joined, "bbbbbbbbbbbb", true, false),
+            (Launcher, "aaaaaaaaaaaa", false, false),
+            (Launcher, "bbbbbbbbbbbb", true, true),
+        ] {
+            assert_eq!(
+                policy_mutes(policy, "aaaaaaaaaaaa", client, joined),
+                want,
+                "{policy:?} {client} joined={joined}"
+            );
+        }
+    }
+
+    /// A policy mutes by role, reaches a session that registers later, and its
+    /// end lifts only what it set: the operator's mute stays.
+    #[test]
+    fn policy_and_operator_mutes_are_separate_bits() {
+        let _serial = SESSION_REGISTRY_LOCK.blocking_lock();
+        let (_owner, owner_mute) = fake_session_joined("aaaaaaaaaaaa", false);
+        let guard = apply_audio_policy(AudioSessions::Owner, "aaaaaaaaaaaa");
+        let ((_joiner, ..), joiner_mute) = fake_session_joined("bbbbbbbbbbbb", true);
+        assert!(!owner_mute.is_muted());
+        assert!(
+            joiner_mute.is_muted(),
+            "a joiner registered under the policy is muted"
+        );
+        let owner_id = snapshot()
+            .iter()
+            .find(|s| s.client == "aaaaaaaaaaaa")
+            .unwrap()
+            .id;
+        assert!(set_muted(owner_id, true));
+        assert!(!set_muted(owner_id + 1_000_000, true));
+        drop(guard);
+        assert!(
+            !joiner_mute.is_muted(),
+            "the lease ending lifts the policy mute"
+        );
+        assert!(
+            owner_mute.is_muted(),
+            "the operator's mute outlives the policy"
+        );
+        assert!(snapshot().iter().any(|s| s.id == owner_id && s.muted));
     }
 
     /// Unpair revokes a live session by the 12-hex fingerprint prefix

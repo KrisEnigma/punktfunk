@@ -55,6 +55,18 @@ export const statusActive: RuntimeStatus = {
 	pin_pending: false,
 	active_sessions: 1,
 	session: { width: 5120, height: 1440, fps: 240 },
+	sessions: [
+		{
+			id: 1,
+			client: "3f9a1c2b7e4d",
+			client_name: "Living room TV",
+			width: 5120,
+			height: 1440,
+			fps: 240,
+			joined: false,
+			muted: false,
+		},
+	],
 	stream: {
 		codec: "hevc",
 		width: 5120,
@@ -85,6 +97,7 @@ export const statusIdle: RuntimeStatus = {
 	pin_pending: true,
 	active_sessions: 0,
 	session: null,
+	sessions: [],
 	stream: null,
 	games: [],
 };

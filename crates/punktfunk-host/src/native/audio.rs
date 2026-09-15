@@ -151,12 +151,20 @@ pub(super) fn audio_thread(
     sink: Option<String>,
     // A `join` session taps the owner's sink instead of minting a second one of that name.
     tap: bool,
+    // The owner's live-display slot, for a joiner on the shared path: the sink to tap
+    // appears there once the owner's capturer is open, which can be after this spawn.
+    tap_from: Option<Arc<std::sync::Mutex<Option<String>>>>,
     // This session's live-display record: the sink name goes here on every open, so a
     // later joiner finds the one to tap.
     published: Arc<std::sync::Mutex<Option<String>>>,
+    // Operator or title-policy mute: silence on the wire, cadence intact.
+    mute: Arc<crate::session_status::SessionMute>,
 ) {
     use crate::audio::SAMPLE_RATE;
     const FRAME_MS: usize = 5;
+    /// How long a joiner waits for the owner's sink name before minting its own. The owner's
+    /// capturer opens within its first second; past this, the owner has no audio to share.
+    const JOIN_SINK_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
     /// Ceiling on a single pacing sleep. The capture channel is finite and `next_chunk` has to be
     /// serviced; sleeping past a couple of frames would trade a burst on the wire for a drop at
     /// the capturer, which is strictly worse (a drop is a click AND a permanent shift).
@@ -203,11 +211,31 @@ pub(super) fn audio_thread(
     // lock so a budget-ladder change cannot turn redundancy on here.
     let (tier, redundancy) = (budget.tier, budget.redundancy && !pcm_plane);
 
+    // The sink to open: the isolated one, else the owner's once published. A joiner spawned
+    // inside the owner's first second waits for it — minting its own sink here would claim
+    // the default from under the owner.
+    let resolve = || -> Option<String> {
+        if sink.is_some() {
+            return sink.clone();
+        }
+        let slot = tap_from.as_ref()?;
+        let deadline = std::time::Instant::now() + JOIN_SINK_WAIT;
+        loop {
+            if let Some(name) = slot.lock().unwrap().clone() {
+                return Some(name);
+            }
+            if std::time::Instant::now() >= deadline || stop.load(Ordering::SeqCst) {
+                return None;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    };
+    let mut target = resolve();
     // Reuse the parked capturer only when channels AND rate match: a mismatch garbles the
     // encoder and drifts the sample clock against the wire. Isolated sessions never adopt
     // the parked shared capturer (the match cannot see the wrong sink). A failed first open
     // enters the same reopen-with-backoff loop as a mid-session death.
-    let cached = if sink.is_none() {
+    let cached = if target.is_none() {
         audio_cap.lock().unwrap().take()
     } else {
         None
@@ -219,8 +247,12 @@ pub(super) fn audio_thread(
         }
         prev => {
             drop(prev);
-            match crate::audio::open_audio_capture_named(want as u32, rate_hz, sink.as_deref(), tap)
-            {
+            match crate::audio::open_audio_capture_named(
+                want as u32,
+                rate_hz,
+                target.as_deref(),
+                tap,
+            ) {
                 Ok(c) => Some(c),
                 Err(e) => {
                     tracing::warn!(error = %format!("{e:#}"), "punktfunk/1 audio failed to open — retrying in the background until it comes up");
@@ -348,8 +380,14 @@ pub(super) fn audio_thread(
                 std::thread::sleep(std::time::Duration::from_millis(200));
                 continue;
             }
-            match crate::audio::open_audio_capture_named(want as u32, rate_hz, sink.as_deref(), tap)
-            {
+            // The owner may have reopened on a new name meanwhile.
+            target = resolve();
+            match crate::audio::open_audio_capture_named(
+                want as u32,
+                rate_hz,
+                target.as_deref(),
+                tap,
+            ) {
                 Ok(c) => {
                     tracing::info!("punktfunk/1 audio capture reopened");
                     publish(c.as_ref());
@@ -519,6 +557,11 @@ pub(super) fn audio_thread(
                 if gain != 1.0 {
                     punktfunk_core::audio::apply_gain(&mut frame_buf, gain);
                 }
+                if mute.is_muted() {
+                    // Zeroed, not skipped: seq, pts and the redundancy chain stay intact, so
+                    // the client hears a mute rather than concealing a stall.
+                    frame_buf.fill(0.0);
+                }
                 if std::mem::take(&mut resume_fade) {
                     // First real frame after a hole: fade it in from silence, the mirror of the
                     // fade the hole started with.
@@ -660,7 +703,7 @@ pub(super) fn audio_thread(
     // a sink nothing routes to.
     if let Some(mut c) = capturer {
         c.idle();
-        if sink.is_none() {
+        if target.is_none() {
             crate::audio::park_audio_capture(&audio_cap, c);
         }
     }

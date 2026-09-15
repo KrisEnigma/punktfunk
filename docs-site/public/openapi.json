@@ -3647,6 +3647,64 @@
         }
       }
     },
+    "/api/v1/session/{id}/audio": {
+      "put": {
+        "tags": [
+          "session"
+        ],
+        "summary": "Mute or unmute one session's audio",
+        "description": "Silence on the wire for that session only; the others keep hearing. The\nstream's cadence stays, so the client shows nothing but silence.",
+        "operationId": "setSessionAudio",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Session id from `/status` `sessions[].id`",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SessionAudioRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Applied"
+          },
+          "401": {
+            "description": "Missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No live session with that id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/stats/capture/live": {
       "get": {
         "tags": [
@@ -5290,6 +5348,25 @@
           }
         }
       },
+      "AudioPolicy": {
+        "type": "object",
+        "description": "Audio while this title runs: which of the sessions on its display hear it.\n`all` is the same as no policy and is stored as none.",
+        "properties": {
+          "sessions": {
+            "$ref": "#/components/schemas/AudioSessions"
+          }
+        }
+      },
+      "AudioSessions": {
+        "type": "string",
+        "description": "Which sessions hear a title's audio (`audio.sessions` on a custom entry).",
+        "enum": [
+          "all",
+          "owner",
+          "joined",
+          "launcher"
+        ]
+      },
       "AudioWiring": {
         "type": "object",
         "description": "Windows audio wiring: which endpoint carries each role. Names are the Sound-settings friendly names.",
@@ -5990,6 +6067,17 @@
               "art": {
                 "$ref": "#/components/schemas/Artwork"
               },
+              "audio": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/AudioPolicy",
+                    "description": "Which sessions hear this title. Absent = every session."
+                  }
+                ]
+              },
               "detect": {
                 "$ref": "#/components/schemas/DetectHint",
                 "description": "How to find this title after a command that hands off and exits. Without it the\nhost tracks only the child it spawned."
@@ -6068,6 +6156,17 @@
             "properties": {
               "art": {
                 "$ref": "#/components/schemas/Artwork"
+              },
+              "audio": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/AudioPolicy",
+                    "description": "Absent on an update keeps the stored policy; `{\"sessions\":\"all\"}` clears it."
+                  }
+                ]
               },
               "detect": {
                 "oneOf": [
@@ -8840,6 +8939,16 @@
               "art": {
                 "$ref": "#/components/schemas/Artwork"
               },
+              "audio": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/AudioPolicy"
+                  }
+                ]
+              },
               "detect": {
                 "$ref": "#/components/schemas/DetectHint",
                 "description": "Install-dir / process hint. Needed when launch goes through the provider's own client."
@@ -9039,6 +9148,7 @@
           "paired_clients",
           "native_paired_clients",
           "active_sessions",
+          "sessions",
           "games"
         ],
         "properties": {
@@ -9106,6 +9216,13 @@
                 "description": "GameStream launch if present, else the first live native session. `null` when idle."
               }
             ]
+          },
+          "sessions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SessionRow"
+            },
+            "description": "Every live native session, for the per-session routes. A GameStream session is not\nlisted: it has no id to act on."
           },
           "stream": {
             "oneOf": [
@@ -9214,6 +9331,17 @@
           }
         }
       },
+      "SessionAudioRequest": {
+        "type": "object",
+        "required": [
+          "muted"
+        ],
+        "properties": {
+          "muted": {
+            "type": "boolean"
+          }
+        }
+      },
       "SessionInfo": {
         "type": "object",
         "required": [
@@ -9275,6 +9403,61 @@
           "mode": {
             "type": "string",
             "description": "`WxH@Hz`, e.g. `\"3840x2160@120\"`."
+          }
+        }
+      },
+      "SessionRow": {
+        "type": "object",
+        "description": "One live native session, as the per-session routes address it.",
+        "required": [
+          "id",
+          "client",
+          "width",
+          "height",
+          "fps",
+          "joined",
+          "muted"
+        ],
+        "properties": {
+          "client": {
+            "type": "string",
+            "description": "12-hex cert-fingerprint prefix, or the peer IP if anonymous."
+          },
+          "client_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Display name (trust-store, else the client's own). Absent if nameless."
+          },
+          "fps": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "height": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Registry id: the `{id}` in `PUT /session/{id}/audio`. Not stable across host restarts.",
+            "minimum": 0
+          },
+          "joined": {
+            "type": "boolean",
+            "description": "Admitted by `mode_conflict: join`: shares the owner's display and audio."
+          },
+          "muted": {
+            "type": "boolean",
+            "description": "Audio is silence on the wire: the operator's mute or the title's `audio.sessions`."
+          },
+          "width": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
           }
         }
       },

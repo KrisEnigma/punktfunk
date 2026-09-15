@@ -1885,6 +1885,8 @@ pub(crate) async fn run_admitted(
     // Mode-conflict admission: later clients see this identity + mode + stop (and may `steal`).
     // The audio thread publishes the sink it captures here, for a joiner to tap.
     let audio_sink: Arc<std::sync::Mutex<Option<String>>> = Default::default();
+    // Shared by the audio thread (reads) and the session registry (operator + title policy).
+    let mute = Arc::new(crate::session_status::SessionMute::default());
     let _live_guard = {
         let id = conn.peer_fingerprint();
         let label = id
@@ -1938,12 +1940,9 @@ pub(crate) async fn run_admitted(
         let iso_sink = isolation.as_ref().and_then(|i| i.sink.clone());
         #[cfg(not(target_os = "linux"))]
         let iso_sink: Option<String> = None;
-        let sink = iso_sink.or_else(|| {
-            joined
-                .as_ref()
-                .and_then(|(d, _)| d.audio_sink.lock().unwrap().clone())
-        });
+        let tap_from = joined.as_ref().map(|(d, _)| d.audio_sink.clone());
         let published = audio_sink.clone();
+        let mute = mute.clone();
         std::thread::Builder::new()
             .name("punktfunk1-audio".into())
             .spawn(move || {
@@ -1954,9 +1953,11 @@ pub(crate) async fn run_admitted(
                     channels,
                     budget,
                     audio_plane,
-                    sink,
+                    iso_sink,
                     join_live,
+                    tap_from,
                     published,
+                    mute,
                 )
             })
             .map_err(|e| tracing::warn!(error = %e, "audio thread spawn failed — session continues without audio"))
@@ -2125,6 +2126,12 @@ pub(crate) async fn run_admitted(
         .peer_fingerprint()
         .map(|fp| fingerprint_hex(&fp)[..12].to_string())
         .unwrap_or_else(|| conn.remote_address().ip().to_string());
+    // The title's `audio.sessions`, over every session on this display. Lifted with the session.
+    let _audio_policy = hello
+        .launch
+        .as_deref()
+        .and_then(crate::library::audio_sessions_for)
+        .map(|policy| crate::session_status::apply_audio_policy(policy, &client_label));
     // Tray toast: trust-store name (rename at approval wins), else sanitized Hello. `None` if nameless.
     let client_name = conn
         .peer_fingerprint()
@@ -2308,6 +2315,7 @@ pub(crate) async fn run_admitted(
                         launch_target,
                         client_hdr,
                         join_live,
+                        mute,
                         reframe_to,
                         frame_map,
                         bringup: bringup_dp,
