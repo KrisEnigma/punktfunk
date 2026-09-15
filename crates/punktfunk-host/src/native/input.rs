@@ -160,6 +160,10 @@ struct Pads {
     slots: crate::inject::pad_pool::PadSlotMap<'static>,
     /// One warn per session when OS slots are exhausted — not one per frame.
     slots_exhausted_warned: bool,
+    /// Wire pads whose device is on its unplug grace. The pool slot follows the device out
+    /// (`reap_pending`), not the removal frame: released early, a second claimant lands on the
+    /// lingering mailbox and blocks 200 ms on a false "owned elsewhere".
+    pending_release: [Option<std::time::Instant>; MAX_WIRE_PADS],
     /// Resolved kind per pad; session default until a `GamepadArrival`.
     kinds: [GamepadPref; MAX_WIRE_PADS],
     /// Manager that holds a built device at this index (`None` = none). Stays put
@@ -182,6 +186,7 @@ impl Pads {
         Pads {
             slots: crate::inject::pad_pool::PadSlotMap::new(),
             slots_exhausted_warned: false,
+            pending_release: [None; MAX_WIRE_PADS],
             kinds: [default; MAX_WIRE_PADS],
             owner: [None; MAX_WIRE_PADS],
             xbox360: None,
@@ -240,13 +245,53 @@ impl Pads {
             }
             return;
         };
+        let had_device = self.owner[idx].is_some();
         let (kind, new_owner) = route_decision(self.owner[idx], self.kinds[idx], present);
         self.owner[idx] = new_owner;
         self.route_handle(kind, &self.re_index(ev, slot));
-        if !present {
-            // Release now so a pad that never re-plugs cannot leak the OS name. The node
-            // lingers `pad_slots::SWEEP_GRACE` (300 ms); a re-plug inside it claims this slot
-            // again and the sweep hands back the live pad.
+        if present {
+            self.pending_release[idx] = None;
+        } else {
+            self.note_removed(idx, had_device, std::time::Instant::now());
+        }
+    }
+
+    /// `pad_slots::SWEEP_GRACE` plus one backend pump: the device, and its mailbox, are gone
+    /// before the slot is offered again.
+    const RELEASE_GRACE: std::time::Duration = std::time::Duration::from_millis(400);
+
+    /// A removal frame. A built device lingers its grace, so its slot lingers too: a re-plug
+    /// inside it re-mints the same slot ([`PadSlotMap::claim_for`] memoizes) and the sweep hands
+    /// back the live pad. A pad with no device has nothing to wait for.
+    fn note_removed(&mut self, idx: usize, had_device: bool, now: std::time::Instant) {
+        if had_device {
+            self.pending_release[idx] = Some(now);
+        } else {
+            self.pending_release[idx] = None;
+            self.slots.release(idx);
+        }
+    }
+
+    fn reap_pending(&mut self) {
+        self.reap_pending_at(std::time::Instant::now());
+    }
+
+    fn reap_pending_at(&mut self, now: std::time::Instant) {
+        for idx in 0..MAX_WIRE_PADS {
+            if self.pending_release[idx]
+                .is_some_and(|t| now.duration_since(t) >= Self::RELEASE_GRACE)
+            {
+                self.pending_release[idx] = None;
+                self.slots.release(idx);
+            }
+        }
+    }
+
+    /// A wire pad that declared itself, and so reserved a slot, but never sent a frame has no
+    /// device to linger: its removal releases the slot at once.
+    fn release_unbuilt(&mut self, idx: usize) {
+        if idx < MAX_WIRE_PADS && self.owner[idx].is_none() {
+            self.pending_release[idx] = None;
             self.slots.release(idx);
         }
     }
@@ -354,6 +399,7 @@ impl Pads {
         mut rumble: impl FnMut(u16, u16, u16, u16, u16),
         mut hidout: impl FnMut(punktfunk_core::quic::HidOutput),
     ) {
+        self.reap_pending();
         // Reverse of `re_index`: backends tag OS slots; the client only knows its wire
         // index. Miss this and rumble lands on another session's pad.
         // Snapshot first: the callbacks borrow `&mut self.<manager>`, so they
@@ -844,6 +890,8 @@ pub(super) fn input_thread(
                                 let frame = pad_state[idx].frame(idx, pad_mask);
                                 pads.handle(&punktfunk_core::input::GamepadEvent::State(frame));
                                 tracing::info!(pad = idx, "gamepad unplugged (native detach)");
+                            } else {
+                                pads.release_unbuilt(idx);
                             }
                             // Drop the lease so a re-plug cannot buzz the new pad.
                             // Do not reset `rumble_seq`: the client gate is per-
@@ -1244,6 +1292,41 @@ mod tests {
         );
         drop(input_tx);
         drop(client_conn);
+    }
+
+    /// The device lingers 300 ms after its removal frame; the pool slot lingers with it, so a
+    /// re-plug inside the grace lands on the same slot and no other claimant takes it.
+    #[test]
+    fn a_removed_pad_keeps_its_slot_through_the_unplug_grace() {
+        use std::time::{Duration, Instant};
+        let t = Instant::now();
+        let mut pads = Pads::new(GamepadPref::Xbox360);
+        let slot = pads.slots.claim_for(0).expect("a free OS slot");
+        pads.owner[0] = Some(GamepadPref::Xbox360);
+        pads.note_removed(0, true, t);
+        pads.reap_pending_at(t + Pads::RELEASE_GRACE - Duration::from_millis(1));
+        assert_eq!(
+            pads.slots.slot_of(0),
+            Some(slot),
+            "released inside the grace"
+        );
+        // A re-plug inside the grace: the frame re-mints the memoized slot and clears the clock.
+        assert_eq!(pads.slots.claim_for(0), Some(slot));
+        pads.pending_release[0] = None;
+        pads.reap_pending_at(t + Duration::from_secs(5));
+        assert_eq!(
+            pads.slots.slot_of(0),
+            Some(slot),
+            "a re-plugged pad lost its slot"
+        );
+        // No re-plug: the slot follows the device out once the grace has run.
+        pads.note_removed(0, true, t);
+        pads.reap_pending_at(t + Pads::RELEASE_GRACE);
+        assert_eq!(pads.slots.slot_of(0), None, "held past the grace");
+        // A pad that never built a device has nothing to wait for.
+        pads.slots.claim_for(1).expect("a free OS slot");
+        pads.release_unbuilt(1);
+        assert_eq!(pads.slots.slot_of(1), None);
     }
 
     #[test]
