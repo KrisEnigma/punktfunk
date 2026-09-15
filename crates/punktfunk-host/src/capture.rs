@@ -121,11 +121,10 @@ pub fn capture_virtual_output(
     // `want.hdr` offers 10-bit PQ/BT.2020. Handshake already resolved it through
     // [`capturer_supports_hdr_for`]; only gamescope off `pipewire-hdr` is HDR.
 
-    // Aim wlr absolute mapping at THIS head. EXTEND backends (Hyprland, sway)
-    // sit beside the operator's screen; without this, abs samples never enter
-    // the stream. `None` (KWin/Mutter/gamescope) CLEARS a stale name — e.g.
-    // Game-Mode switching Hyprland → gamescope, after which `PF-…` is gone.
-    crate::inject::set_stream_output(vout.output_name.clone());
+    // Aim absolute input at THIS head: EXTEND backends sit beside the operator's
+    // screens. `None` (Mutter/gamescope) CLEARS a stale name, e.g. after a Game-Mode
+    // switch Hyprland → gamescope has removed `PF-…`.
+    crate::inject::set_stream_output(vout.output_name.clone().or(vout.input_output.clone()));
     // Direct capture first where the compositor has it: the portal's re-request timer
     // halves the rate above ~140 Hz. GPU consumers only — this delivers dmabufs, and a
     // software encoder wants the portal's CPU pixels. Any failure falls through.
