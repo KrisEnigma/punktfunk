@@ -888,6 +888,9 @@
 // [`AccessUpdate`]. 0x58: 0x50–0x51 are cursor; 0x40–0x44 are clipboard.
 #define PUNKTFUNK_MSG_ACCESS_UPDATE 88
 
+// [`AudioState`]. 0x59: next after [`MSG_ACCESS_UPDATE`].
+#define PUNKTFUNK_MSG_AUDIO_STATE 89
+
 #define PUNKTFUNK_AUDIO_MAGIC 201
 
 #define PUNKTFUNK_RUMBLE_MAGIC 202

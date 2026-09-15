@@ -1,7 +1,12 @@
-//! Session-tagged management HTTP handlers: stop, IDR, end-game, session⇄game lifetime.
+//! Session-tagged management HTTP handlers: stop, IDR, mute, live access,
+//! end-game, session⇄game lifetime.
 //!
 //! `DELETE /session` is a deliberate stop: skip keep-alive linger and apply
 //! `game_on_session_end`. Policy: `design/session-game-lifetime.md`.
+//!
+//! Each verb comes in two forms. The id-less one is host-wide and unchanged; the
+//! `/{id}` one takes an id from `GET /status` and touches that session only. An id
+//! nothing is streaming is a 404, never another session's teardown.
 
 use super::shared::*;
 use std::sync::atomic::Ordering;
@@ -30,6 +35,183 @@ pub(crate) async fn stop_session(State(st): State<Arc<MgmtState>>) -> StatusCode
         "management API: session stopped"
     );
     StatusCode::NO_CONTENT
+}
+
+/// Stop one session
+///
+/// Same deliberate stop as `DELETE /session`, for the one id. Every other live
+/// session keeps streaming.
+#[utoipa::path(
+    delete,
+    path = "/session/{id}",
+    tag = "session",
+    operation_id = "stopOneSession",
+    params(("id" = u64, Path, description = "Session id from `GET /status`")),
+    responses(
+        (status = NO_CONTENT, description = "Session stopped"),
+        (status = NOT_FOUND, description = "No live session with that id", body = ApiError),
+        (status = UNAUTHORIZED, description = "Missing or invalid bearer token", body = ApiError),
+    )
+)]
+pub(crate) async fn stop_one_session(Path(id): Path<u64>) -> Response {
+    if !crate::session_status::stop_quit(id) {
+        return no_such_session();
+    }
+    tracing::info!(session = id, "management API: one session stopped");
+    StatusCode::NO_CONTENT.into_response()
+}
+
+/// Request a keyframe on one session
+#[utoipa::path(
+    post,
+    path = "/session/{id}/idr",
+    tag = "session",
+    operation_id = "requestSessionIdr",
+    params(("id" = u64, Path, description = "Session id from `GET /status`")),
+    responses(
+        (status = ACCEPTED, description = "Keyframe requested"),
+        (status = NOT_FOUND, description = "No live session with that id", body = ApiError),
+        (status = UNAUTHORIZED, description = "Missing or invalid bearer token", body = ApiError),
+    )
+)]
+pub(crate) async fn request_session_idr(Path(id): Path<u64>) -> Response {
+    if !crate::session_status::force_idr(id) {
+        return no_such_session();
+    }
+    StatusCode::ACCEPTED.into_response()
+}
+
+/// Mute or unmute one session
+///
+/// Drops this session's audio at the wire, nothing else: the capturer and the sink
+/// stay up, so a session sharing the display keeps hearing. The client is told, so
+/// its overlay can name the silence instead of the player guessing.
+#[utoipa::path(
+    put,
+    path = "/session/{id}/audio",
+    tag = "session",
+    operation_id = "setSessionAudio",
+    params(("id" = u64, Path, description = "Session id from `GET /status`")),
+    request_body = SessionAudioRequest,
+    responses(
+        (status = NO_CONTENT, description = "Applied"),
+        (status = NOT_FOUND, description = "No live session with that id", body = ApiError),
+        (status = UNAUTHORIZED, description = "Missing or invalid bearer token", body = ApiError),
+    )
+)]
+pub(crate) async fn set_session_audio(
+    Path(id): Path<u64>,
+    ApiJson(req): ApiJson<SessionAudioRequest>,
+) -> Response {
+    let Some(controls) = crate::session_status::controls(id) else {
+        return no_such_session();
+    };
+    controls.set_muted(req.muted);
+    tracing::info!(
+        session = id,
+        muted = req.muted,
+        "management API: session audio"
+    );
+    StatusCode::NO_CONTENT.into_response()
+}
+
+#[derive(Deserialize, ToSchema)]
+pub(crate) struct SessionAudioRequest {
+    /// `true` stops audio leaving for this session.
+    muted: bool,
+}
+
+/// Change one session's access level
+///
+/// Re-points the LIVE grant set — the mask the input thread already checks every
+/// event against — so a guest gets the pad, or loses it, without reconnecting.
+/// The pairing's stored access is untouched, and a later edit to it wins.
+///
+/// The ceiling is the pairing's own mask: what is asked for is ANDed with it, so this
+/// route can narrow or restore, never grant a device something it was not paired for.
+/// The applied mask comes back, which is how a caller sees the clamp.
+#[utoipa::path(
+    put,
+    path = "/session/{id}/access",
+    tag = "session",
+    operation_id = "setSessionAccess",
+    params(("id" = u64, Path, description = "Session id from `GET /status`")),
+    request_body = SessionAccessRequest,
+    responses(
+        (status = OK, description = "Applied mask, after the pairing clamp", body = SessionAccess),
+        (status = BAD_REQUEST, description = "No level or grants, an unknown level, or reserved bits", body = ApiError),
+        (status = NOT_FOUND, description = "No live session with that id", body = ApiError),
+        (status = UNAUTHORIZED, description = "Missing or invalid bearer token", body = ApiError),
+    )
+)]
+pub(crate) async fn set_session_access(
+    Path(id): Path<u64>,
+    ApiJson(req): ApiJson<SessionAccessRequest>,
+) -> Response {
+    let requested = match (req.grants, req.level.as_deref()) {
+        (Some(g), _) => {
+            if let Some(bad) = super::native::reject_reserved(g) {
+                return bad;
+            }
+            g
+        }
+        (None, Some(level)) => match super::native::grants_for_level(level) {
+            Some(g) => g,
+            None => {
+                return api_error(
+                    StatusCode::BAD_REQUEST,
+                    "Access level must be full, controller or view.",
+                )
+            }
+        },
+        (None, None) => {
+            return api_error(
+                StatusCode::BAD_REQUEST,
+                "Send an access level or a grants mask.",
+            )
+        }
+    };
+    let Some(controls) = crate::session_status::controls(id) else {
+        return no_such_session();
+    };
+    let grants = controls.set_grants(requested);
+    tracing::info!(
+        session = id,
+        requested,
+        grants,
+        "management API: session access re-pointed"
+    );
+    Json(SessionAccess {
+        grants,
+        level: super::native::access_level(Some(grants)).to_string(),
+    })
+    .into_response()
+}
+
+#[derive(Deserialize, ToSchema)]
+pub(crate) struct SessionAccessRequest {
+    /// `full` | `controller` | `view`. Ignored when `grants` is present.
+    #[schema(example = "controller")]
+    level: Option<String>,
+    /// Exact `GRANT_*` mask, for a level the three names do not cover. Reserved bits are 400.
+    #[schema(value_type = u32, required = false, example = 1)]
+    grants: Option<u32>,
+}
+
+#[derive(Serialize, ToSchema)]
+pub(crate) struct SessionAccess {
+    /// What now governs the session — the request ANDed with the pairing's mask.
+    grants: u32,
+    /// `full` | `controller` | `view` | `custom`, derived from `grants`.
+    level: String,
+}
+
+/// One id, one 404 — never a reach across to another session.
+fn no_such_session() -> Response {
+    api_error(
+        StatusCode::NOT_FOUND,
+        "No session with that id is streaming.",
+    )
 }
 
 /// End waiting games

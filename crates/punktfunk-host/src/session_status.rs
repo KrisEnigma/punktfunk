@@ -8,10 +8,12 @@
 //! an entry.
 //!
 //! [`register`] on stream start; [`LiveSessionGuard`] removes the entry on
-//! any scope exit. `/status` reads [`snapshot`]/[`count`]. Dashboard stop
-//! and IDR reach a native session through [`stop_all`] and [`force_idr_all`].
+//! any scope exit. `/status` reads [`snapshot`]/[`count`]. The id-less Dashboard
+//! stop and IDR reach every native session through [`stop_all_quit`] and
+//! [`force_idr_all`]; the per-session routes take one id through [`stop_quit`],
+//! [`force_idr`] and [`controls`].
 
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::encode::Codec;
@@ -47,11 +49,96 @@ struct LiveSession {
     /// The capturer's live health, published by the video loop (WP18). `None` until the
     /// first publish, or on a capturer that does not classify.
     capture_health: Arc<Mutex<Option<pf_capture::CaptureHealth>>>,
+    /// Sharing another session's display (`mode_conflict: join`) rather than owning one.
+    join: bool,
+    /// What the per-session management routes act on.
+    controls: SessionControls,
+    started: std::time::Instant,
+}
+
+/// Live handles the management plane acts on for ONE session. Built in
+/// `native::serve` and carried here by the video loop, so a per-session route
+/// never has to reach across into another session's state.
+#[derive(Clone)]
+pub struct SessionControls {
+    /// LIVE grant mask — the same atomic the input filter reads every event against.
+    pub grants: Arc<AtomicU32>,
+    /// The pairing's own mask. A live change is `requested & ceiling`: the console
+    /// re-points within what this device is paired for, never above it.
+    pub ceiling: Arc<AtomicU32>,
+    /// Audio egress drops this session's frames while set. Capturer and sink stay up.
+    pub muted: Arc<AtomicBool>,
+    /// Access deadline, unix seconds; 0 = permanent. The `remaining_secs` an
+    /// `AccessUpdate` owes the client.
+    pub deadline_unix: Arc<AtomicI64>,
+    /// The control task's access lane — the same one the expiry watch writes, so a
+    /// live re-point clears the clipboard exactly like a pairing edit does.
+    pub access_tx: Option<tokio::sync::mpsc::UnboundedSender<punktfunk_core::quic::AccessUpdate>>,
+    /// The control task's audio lane. `None` on a session with no control task (tests).
+    pub audio_tx: Option<tokio::sync::mpsc::UnboundedSender<punktfunk_core::quic::AudioState>>,
+}
+
+impl SessionControls {
+    /// Full control, permanent, unmuted, nothing to tell the client. The shape an
+    /// anonymous (`--open`) session and the tests start from.
+    pub fn open() -> SessionControls {
+        SessionControls {
+            grants: Arc::new(AtomicU32::new(punktfunk_core::quic::GRANT_ALL)),
+            ceiling: Arc::new(AtomicU32::new(punktfunk_core::quic::GRANT_ALL)),
+            muted: Arc::new(AtomicBool::new(false)),
+            deadline_unix: Arc::new(AtomicI64::new(0)),
+            access_tx: None,
+            audio_tx: None,
+        }
+    }
+
+    /// Re-point the live mask, clamped to the pairing's ceiling, and tell the client
+    /// its chip changed. Returns the mask that took effect — never more than `ceiling`.
+    pub fn set_grants(&self, requested: u32) -> u32 {
+        let applied = requested & self.ceiling.load(Ordering::Relaxed);
+        self.grants.store(applied, Ordering::Relaxed);
+        let deadline = self.deadline_unix.load(Ordering::Relaxed);
+        if let Some(tx) = &self.access_tx {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_secs() as i64);
+            // Best-effort, like every other `AccessUpdate`: the host enforces either way.
+            let _ = tx.send(punktfunk_core::quic::AccessUpdate {
+                grants: applied,
+                remaining_secs: if deadline == 0 {
+                    0
+                } else {
+                    u32::try_from((deadline - now).max(1)).unwrap_or(u32::MAX)
+                },
+            });
+        }
+        applied
+    }
+
+    /// Set the audio gate and tell the client, so its overlay can name the silence
+    /// instead of leaving the player to wonder what broke.
+    pub fn set_muted(&self, muted: bool) {
+        self.muted.store(muted, Ordering::SeqCst);
+        if let Some(tx) = &self.audio_tx {
+            let _ = tx.send(punktfunk_core::quic::AudioState { muted });
+        }
+    }
 }
 
 /// Resolved read of one live session for `/status`.
 #[derive(Clone)]
 pub struct SessionSnapshot {
+    /// Same id the per-session routes and `session.started` carry.
+    pub id: u64,
+    /// Client label: 12-hex cert-fingerprint prefix, or peer IP if anonymous.
+    pub client: String,
+    pub hdr: bool,
+    /// Sharing another session's display rather than owning one.
+    pub join: bool,
+    pub muted: bool,
+    /// Live `GRANT_*` mask, after any per-session re-point.
+    pub grants: u32,
+    pub uptime_s: u64,
     pub width: u32,
     pub height: u32,
     pub fps: u32,
@@ -115,6 +202,10 @@ pub struct Registration {
     pub game: Option<Arc<crate::gamelease::LeaseShared>>,
     /// The video loop's capture-health slot; it stores the capturer's report on its own cadence.
     pub capture_health: Arc<Mutex<Option<pf_capture::CaptureHealth>>>,
+    /// Sharing another session's display (`mode_conflict: join`) rather than owning one.
+    pub join: bool,
+    /// Handles the per-session management routes act on.
+    pub controls: SessionControls,
 }
 
 /// Publish a live native session. The guard removes it on drop and pairs
@@ -134,6 +225,8 @@ pub fn register(reg: Registration) -> LiveSessionGuard {
         last_resize_ms,
         game,
         capture_health,
+        join,
+        controls,
     } = reg;
     let id = next_id();
     let session = LiveSession {
@@ -151,6 +244,9 @@ pub fn register(reg: Registration) -> LiveSessionGuard {
         last_resize_ms,
         game,
         capture_health,
+        join,
+        controls,
+        started: std::time::Instant::now(),
     };
     crate::events::emit(crate::events::EventKind::SessionStarted {
         session: session_ref(&session),
@@ -197,6 +293,13 @@ pub fn snapshot() -> Vec<SessionSnapshot> {
         .map(|s| {
             let (width, height, fps) = crate::native::unpack_mode(s.mode.load(Ordering::Relaxed));
             SessionSnapshot {
+                id: s.id,
+                client: s.client.clone(),
+                hdr: s.hdr,
+                join: s.join,
+                muted: s.controls.muted.load(Ordering::SeqCst),
+                grants: s.controls.grants.load(Ordering::Relaxed),
+                uptime_s: s.started.elapsed().as_secs(),
                 width,
                 height,
                 fps,
@@ -369,6 +472,46 @@ pub fn stop_all_quit() {
     }
 }
 
+/// Tear down ONE live native session deliberately (`DELETE /session/{id}`).
+/// `false` = no such session. Same `quit`-before-`stop` order as [`stop_all_quit`].
+pub fn stop_quit(id: u64) -> bool {
+    registry()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .find(|s| s.id == id)
+        .is_some_and(|s| {
+            s.quit.store(true, Ordering::SeqCst);
+            s.stop.store(true, Ordering::SeqCst);
+            true
+        })
+}
+
+/// Force a keyframe on ONE live native session (`POST /session/{id}/idr`).
+/// `false` = no such session.
+pub fn force_idr(id: u64) -> bool {
+    registry()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .find(|s| s.id == id)
+        .is_some_and(|s| {
+            s.force_idr.store(true, Ordering::Relaxed);
+            true
+        })
+}
+
+/// This session's management handles, cloned out so the caller acts without the
+/// registry lock. `None` = no such session (the routes' 404).
+pub fn controls(id: u64) -> Option<SessionControls> {
+    registry()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .find(|s| s.id == id)
+        .map(|s| s.controls.clone())
+}
+
 /// Force a keyframe on every live native session (`POST /session/idr`).
 /// The encode loop drains the flag like a client decode-recovery request.
 pub fn force_idr_all() {
@@ -398,6 +541,8 @@ mod tests {
             last_resize_ms: Arc::new(AtomicU32::new(0)),
             game: None,
             capture_health: Arc::new(Mutex::new(None)),
+            join: false,
+            controls: SessionControls::open(),
         });
         (guard, stop, quit)
     }
