@@ -74,6 +74,15 @@ impl HidoutDedup {
                 });
             }
         }
+        // Routing and volumes are state too: unrenewed, one lost datagram leaves the
+        // pad on rumble or muted until the title next changes the value.
+        if let Some((flags, raw)) = self.audio_ctl {
+            out.push(HidOutput::AudioCtl {
+                pad: u16::from(pad),
+                flags,
+                raw,
+            });
+        }
         out
     }
 
@@ -244,12 +253,20 @@ mod tests {
             },
             t
         ));
+        assert!(d.should_forward(
+            &HidOutput::AudioCtl {
+                pad: 0,
+                flags: 0x17,
+                raw: [0x50, 0, 0, 0, 0, 0]
+            },
+            t
+        ));
 
         let out = d.renewals(0, t + Duration::from_millis(1000));
         assert_eq!(
             out.len(),
-            4,
-            "lightbar + player LEDs + both triggers, got {out:?}"
+            5,
+            "lightbar + player LEDs + both triggers + audio routing, got {out:?}"
         );
 
         let later = t + Duration::from_millis(1500);
