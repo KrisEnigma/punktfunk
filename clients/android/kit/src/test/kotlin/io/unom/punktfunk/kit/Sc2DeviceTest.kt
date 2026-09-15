@@ -131,9 +131,10 @@ class Sc2DeviceTest {
     }
 
     /**
-     * The two initialization feature reports, byte for byte — the Apple client sends the
-     * identical 64-byte zero-padded frames (`Sc2Device.disableLizard` / its USB
-     * `normalizeJoysticks`), and the firmware accepts the padded form.
+     * Every feature report the capture writes, byte for byte: the two it opens with and the
+     * lizard restore it closes with. The Apple client sends the identical 64-byte zero-padded
+     * frames (`Sc2Device.disableLizard` / its USB `normalizeJoysticks`), and the firmware
+     * accepts the padded form.
      */
     @Test
     fun `feature command bytes verbatim`() {
@@ -150,9 +151,17 @@ class Sc2DeviceTest {
             byteArrayOf(0x01, 0x87.toByte(), 0x03, 0x2E, 0x00, 0x00),
             Sc2Device.NORMALIZE_JOYSTICKS.copyOf(6),
         )
-        // Both are pure padding past the command — a stray byte would be sent to the firmware.
+        // The release frame is the same setting with a non-zero value — the pad goes back to
+        // driving the OS with its kb/mouse the moment the capture lets go.
+        assertEquals(64, Sc2Device.ENABLE_LIZARD.size)
+        assertArrayEquals(
+            byteArrayOf(0x01, 0x87.toByte(), 0x03, 0x09, 0x01, 0x00),
+            Sc2Device.ENABLE_LIZARD.copyOf(6),
+        )
+        // All three are pure padding past the command — a stray byte would reach the firmware.
         assertTrue(Sc2Device.DISABLE_LIZARD.drop(6).all { it == 0.toByte() })
         assertTrue(Sc2Device.NORMALIZE_JOYSTICKS.drop(6).all { it == 0.toByte() })
+        assertTrue(Sc2Device.ENABLE_LIZARD.drop(6).all { it == 0.toByte() })
     }
 
     // ---- BLE framing: the rules Valve's vendor service actually applies, mirrored pair for
