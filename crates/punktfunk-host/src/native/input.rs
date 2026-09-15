@@ -440,20 +440,25 @@ struct PadAudioSlots {
     /// `(kinds, handle)` per running pad. `kinds` makes an identical re-arrival
     /// (resent against datagram loss) a no-op.
     slots: [Option<(u8, pad_audio::PadAudioHandle)>; MAX_WIRE_PADS],
-    /// Streamer starts this session, first one included. Arrivals are client-
+    /// Streamer starts inside the current window, first one included. Arrivals are client-
     /// triggered; without a ceiling the client decides how many WASAPI captures open.
     starts: [u8; MAX_WIRE_PADS],
+    /// When the window's first start happened; `None` before any.
+    window_start: [Option<std::time::Instant>; MAX_WIRE_PADS],
 }
 
-/// Captures one pad may open per session. A real pad declares once; identical
-/// re-arrivals no-op. Reached only by cycling kinds or alternating declare/stop.
+/// Captures one pad may open inside [`START_WINDOW`]. A real pad declares once and identical
+/// re-arrivals no-op; a flaky link re-plugs a few times an hour, a client cycling kinds or
+/// declare/stop would open WASAPI captures forever.
 const MAX_PAD_AUDIO_STARTS: u8 = 8;
+const START_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
 
 impl PadAudioSlots {
     fn new() -> PadAudioSlots {
         PadAudioSlots {
             slots: std::array::from_fn(|_| None),
             starts: [0; MAX_WIRE_PADS],
+            window_start: [None; MAX_WIRE_PADS],
         }
     }
 
@@ -483,6 +488,10 @@ impl PadAudioSlots {
         // Client-driven: cycling kinds or declare/stop would spawn WASAPI captures
         // forever. Gate before `stop` so a pad at the ceiling keeps the streamer
         // it has instead of losing it to the last request.
+        if self.window_start[idx].is_some_and(|t| t.elapsed() >= START_WINDOW) {
+            self.starts[idx] = 0;
+            self.window_start[idx] = None;
+        }
         if self.starts[idx] >= MAX_PAD_AUDIO_STARTS {
             tracing::warn!(
                 pad = idx,
@@ -504,6 +513,7 @@ impl PadAudioSlots {
             // Charge only an open that happened. A slot with no endpoint must not
             // spend the ceiling on arrival re-sends.
             self.starts[idx] += 1;
+            self.window_start[idx].get_or_insert_with(std::time::Instant::now);
             self.slots[idx] = Some((kinds, h));
         }
     }
