@@ -696,6 +696,23 @@ pub fn linux_native_nv12_ok(codec: Codec) -> bool {
     }
 }
 
+/// May the capture hand the NVENC lane its held dmabufs? The encoder's zero-copy worker then
+/// converts each straight into a registered input slot (`PUNKTFUNK_NVENC_RAW`). Off without
+/// direct-SDK NVENC, on the VAAPI plane, or once the raw-dmabuf latch tripped.
+#[cfg(target_os = "linux")]
+pub fn linux_nvenc_raw_dmabuf_ok() -> bool {
+    #[cfg(feature = "nvenc")]
+    {
+        !linux_zero_copy_is_vaapi()
+            && pf_zerocopy::nvenc_raw_enabled()
+            && !pf_zerocopy::raw_dmabuf_import_disabled()
+    }
+    #[cfg(not(feature = "nvenc"))]
+    {
+        false
+    }
+}
+
 /// May an HDR capture stay zero-copy on NVIDIA (packed 10-bit PQ/BT.2020 CUDA)?
 ///
 /// Only direct-SDK NVENC can: it registers `ARGB10`/`ABGR10` and CSCs in the

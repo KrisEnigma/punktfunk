@@ -153,6 +153,8 @@ pub(super) struct NegotiationInputs {
     pub hdr_cuda_ok: bool,
     /// `PUNKTFUNK_NV12`: the CUDA import emits NV12 (tiled blit or LINEAR compute CSC).
     pub nv12_env_on: bool,
+    /// The NVENC encoder converts held dmabufs itself (`ZeroCopyPolicy::nvenc_raw_dmabuf`).
+    pub nvenc_raw: bool,
 }
 
 /// Format choices the CUDA import makes per frame; the same on both threads.
@@ -187,6 +189,9 @@ pub(super) struct NegotiationPlan {
     pub build_importer: bool,
     /// What every CUDA import of this stream does, on either thread.
     pub import_policy: ImportPolicy,
+    /// Held frames go to the encoder as dmabufs; the importer stays for the modifier offer and
+    /// for a producer that cannot be held.
+    pub nvenc_raw: bool,
     pub vaapi_passthrough: bool,
     pub prefer_native_nv12: bool,
     /// Carried so [`want_dmabuf`](Self::want_dmabuf) needs no second copy.
@@ -234,6 +239,7 @@ pub(super) fn negotiation_plan(i: NegotiationInputs) -> NegotiationPlan {
             nv12: i.nv12_env_on,
             yuv444: i.want_444,
         },
+        nvenc_raw: build_importer && i.nvenc_raw && !i.force_shm && !i.raw_dmabuf_import_disabled,
         vaapi_passthrough,
         prefer_native_nv12,
         force_shm: i.force_shm,
@@ -264,6 +270,9 @@ impl NegotiationPlan {
 pub(super) enum CaptureArm {
     /// Raw dmabufs to the encoder (libva or PyroWave Vulkan). No host pixel touch.
     DmabufPassthrough,
+    /// Held dmabufs go to the NVENC encoder, whose worker converts each in one pass; the
+    /// importer stays for the offer and for a producer that cannot be held.
+    DmabufToEncoder,
     /// dmabufs imported to CUDA by the EGL→CUDA worker, for NVENC.
     CudaImport,
     /// CPU mmap de-pad. A downgrade when the consumer could have taken a dmabuf.
@@ -274,6 +283,7 @@ impl CaptureArm {
     pub(super) fn as_str(self) -> &'static str {
         match self {
             CaptureArm::DmabufPassthrough => "dmabuf-passthrough",
+            CaptureArm::DmabufToEncoder => "dmabuf-to-encoder",
             CaptureArm::CudaImport => "cuda-import",
             CaptureArm::Cpu => "cpu",
         }
@@ -292,6 +302,8 @@ pub(super) fn resolved_capture_arm(
         CaptureArm::Cpu
     } else if plan.vaapi_passthrough {
         CaptureArm::DmabufPassthrough
+    } else if have_importer && plan.nvenc_raw {
+        CaptureArm::DmabufToEncoder
     } else if have_importer {
         CaptureArm::CudaImport
     } else {
@@ -2604,6 +2616,33 @@ mod tests {
         packed_frame_geometry, supported_data_plane_count, NegotiationInputs, Pacing,
     };
 
+    /// The raw lane needs the importer (its modifier offer) and a live raw-dmabuf latch.
+    #[test]
+    fn nvenc_raw_rides_the_importer_and_the_latch() {
+        let raw = NegotiationInputs {
+            nvenc_raw: true,
+            ..nvenc()
+        };
+        assert!(negotiation_plan(raw).nvenc_raw);
+        assert!(negotiation_plan(nvenc()).build_importer && !negotiation_plan(nvenc()).nvenc_raw);
+        assert!(
+            !negotiation_plan(NegotiationInputs {
+                raw_dmabuf_import_disabled: true,
+                ..raw
+            })
+            .nvenc_raw,
+            "a tripped latch keeps the import path"
+        );
+        assert!(
+            !negotiation_plan(NegotiationInputs {
+                force_shm: true,
+                ..raw
+            })
+            .nvenc_raw,
+            "SHM builds no importer, so no raw lane"
+        );
+    }
+
     /// The consumer imports with the offer's policy: NV12 unless the session is 4:4:4. Holds
     /// need a pool deeper than the producer's reserve.
     #[test]
@@ -2682,6 +2721,7 @@ mod tests {
             native_nv12_env_on: true,
             hdr_cuda_ok: true,
             nv12_env_on: true,
+            nvenc_raw: false,
         }
     }
 

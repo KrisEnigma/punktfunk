@@ -140,6 +140,9 @@ pub struct PortalCapturer {
     vaapi_dmabuf: bool,
     /// CUDA import choices for held frames ([`Self::import_held`]).
     import_policy: pipewire::ImportPolicy,
+    /// Held frames pass through as dmabufs: the NVENC encoder's worker converts them. A
+    /// failed offer latches the same raw-dmabuf latch the VAAPI passthrough uses.
+    raw_for_encoder: bool,
     /// This consumer's import memory (LINEAR NV12 latch, tiled failure streak).
     import_state: pipewire::ImportState,
     /// One-shot: this capture's dmabuf offer negotiated; retry budget credited.
@@ -342,6 +345,8 @@ struct PwHandles {
     hdr_offer: bool,
     /// Copied from the plan: what the consumer's import of a held frame does.
     import_policy: pipewire::ImportPolicy,
+    /// Held frames pass through as dmabufs: the NVENC encoder converts them itself.
+    raw_for_encoder: bool,
     quit: ::pipewire::channel::Sender<()>,
     join: thread::JoinHandle<()>,
 }
@@ -363,6 +368,7 @@ impl PwHandles {
             stall_since: None,
             vaapi_dmabuf: self.vaapi_dmabuf,
             import_policy: self.import_policy,
+            raw_for_encoder: self.raw_for_encoder,
             import_state: pipewire::ImportState::default(),
             negotiation_confirmed: false,
             hdr_offer: self.hdr_offer,
@@ -437,9 +443,11 @@ fn spawn_pipewire(
         native_nv12_env_on: pf_host_config::env_on("PUNKTFUNK_PIPEWIRE_NV12").unwrap_or(true),
         hdr_cuda_ok: policy.hdr_cuda_ok,
         nv12_env_on: pf_zerocopy::nv12_enabled(),
+        nvenc_raw: policy.nvenc_raw_dmabuf,
     });
     let vaapi_dmabuf = plan.vaapi_passthrough;
     let import_policy = plan.import_policy;
+    let raw_for_encoder = plan.nvenc_raw;
     let join = thread::Builder::new()
         .name("punktfunk-pipewire".into())
         .spawn(move || {
@@ -467,6 +475,7 @@ fn spawn_pipewire(
         vaapi_dmabuf,
         hdr_offer: want_hdr,
         import_policy,
+        raw_for_encoder,
         quit: quit_tx,
         join,
     })
@@ -721,7 +730,10 @@ impl PortalCapturer {
 
     fn take_frame(&mut self) -> Option<CapturedFrame> {
         let frame = self.slot.lock().ok().and_then(|mut s| s.take())?;
-        if self.vaapi_dmabuf || !matches!(frame.payload, FramePayload::Dmabuf(_)) {
+        if self.vaapi_dmabuf
+            || self.raw_for_encoder
+            || !matches!(frame.payload, FramePayload::Dmabuf(_))
+        {
             return Some(frame);
         }
         self.import_held(frame)
@@ -783,7 +795,7 @@ impl PortalCapturer {
     /// Credit the dmabuf negotiation retry budget. Once per capture: the
     /// budget counts consecutive failed builds, not frames.
     fn note_negotiation_confirmed(&mut self) {
-        if self.vaapi_dmabuf && !self.negotiation_confirmed {
+        if (self.vaapi_dmabuf || self.raw_for_encoder) && !self.negotiation_confirmed {
             self.negotiation_confirmed = true;
             pf_zerocopy::note_raw_dmabuf_negotiation_ok();
         }

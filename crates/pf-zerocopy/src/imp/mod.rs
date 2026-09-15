@@ -28,6 +28,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 pub use cuda::DeviceBuffer;
 pub use egl::{DmabufPlane, EglImporter};
+pub use proto::{ConvertOut, ConvertSrc, CursorRect};
 
 /// Parse a `PUNKTFUNK_*` boolean. Unrecognised spellings return `None` (the
 /// flag's default), not false: `TRUE` as "off" inverted host-wide defaults.
@@ -74,6 +75,13 @@ pub fn enabled() -> bool {
 /// GPU RGB→NV12 before NVENC. Default ON: NVENC's internal CSC otherwise
 /// runs on the SM the game saturates. `PUNKTFUNK_NV12=0` restores RGB/BGRx.
 /// LINEAR (gamescope/Vulkan-bridge) captures ignore this.
+/// `PUNKTFUNK_NVENC_RAW=0` keeps the NVENC lane on the import path: the capture converts each
+/// frame into a CUDA buffer and the encoder copies it into a slot. Default on: the capture
+/// hands the encoder the held dmabuf and the worker's fused pass writes the slot directly.
+pub fn nvenc_raw_enabled() -> bool {
+    std::env::var("PUNKTFUNK_NVENC_RAW").as_deref() != Ok("0")
+}
+
 pub fn nv12_enabled() -> bool {
     flag_opt("PUNKTFUNK_NV12").unwrap_or(true)
 }
@@ -180,6 +188,49 @@ impl Importer {
         match self {
             Importer::Remote(r) => r.dead(),
             Importer::InProc(_) => false,
+        }
+    }
+    /// The fused convert lane: the encoder's NVENC slot, imported once by id.
+    pub fn register_slot(
+        &mut self,
+        id: u32,
+        fd: std::os::fd::OwnedFd,
+        size: u64,
+    ) -> anyhow::Result<()> {
+        match self {
+            Importer::Remote(r) => r.register_slot(id, std::os::fd::AsFd::as_fd(&fd), size),
+            Importer::InProc(i) => i.register_slot(id, fd, size),
+        }
+    }
+    pub fn forget_slots(&mut self) {
+        match self {
+            Importer::Remote(r) => r.forget_slots(),
+            Importer::InProc(i) => i.forget_slots(),
+        }
+    }
+    pub fn set_cursor(
+        &mut self,
+        serial: u64,
+        width: u32,
+        height: u32,
+        rgba: &[u8],
+    ) -> anyhow::Result<()> {
+        match self {
+            Importer::Remote(r) => r.set_cursor(serial, width, height, rgba),
+            Importer::InProc(i) => i.set_cursor(serial, width, height, rgba),
+        }
+    }
+    /// One fused pass: the dmabuf (any modifier) plus the cursor into the registered slot.
+    pub fn convert(
+        &mut self,
+        src: &ConvertSrc,
+        slot: u32,
+        out: &ConvertOut,
+        cursor: Option<CursorRect>,
+    ) -> anyhow::Result<()> {
+        match self {
+            Importer::Remote(r) => r.convert(src, slot, out, cursor),
+            Importer::InProc(i) => i.convert(src, slot, out, cursor),
         }
     }
 

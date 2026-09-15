@@ -34,11 +34,12 @@ use super::{max_forced_split_mode, resolve_split_mode};
 use super::{AuChunk, ChromaFormat, Codec, EncodedFrame, Encoder, EncoderCaps};
 use anyhow::{anyhow, bail, ensure, Context, Result};
 use pf_encode_win::rfi::{Wave, WaveMark};
-use pf_frame::{CapturedFrame, FramePayload};
+use pf_frame::{CapturedFrame, DmabufFrame, FramePayload};
 use pf_zerocopy::cuda::{self, InputSurface};
 use pf_zerocopy::vkslot::{SlotFormat, VkSlotBlend, VkSlotRef};
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::ffi::c_void;
+use std::os::fd::AsRawFd;
 use std::ptr;
 use std::sync::mpsc;
 
@@ -521,6 +522,14 @@ fn is_ten_bit_input(fmt: nv::NV_ENC_BUFFER_FORMAT) -> bool {
 }
 
 /// Encoder-owned input surface + NVENC registration (once at init, unregistered at teardown).
+/// What a submit carries: a CUDA buffer the encoder copies into a ring slot, or the held
+/// dmabuf the zero-copy worker's fused pass writes into the slot directly.
+#[derive(Clone, Copy)]
+enum Source<'a> {
+    Cuda(&'a cuda::DeviceBuffer),
+    Dmabuf(&'a DmabufFrame),
+}
+
 struct RingSlot {
     surface: SlotSurface,
     reg: nv::NV_ENC_REGISTERED_PTR,
@@ -730,6 +739,12 @@ pub struct NvencCudaEncoder {
     /// Blend-warn latch: once per failure streak. A warn on every cursor frame would evict
     /// the log ring.
     cursor_blend_warned: bool,
+    /// The fused convert lane (`PUNKTFUNK_NVENC_RAW`): the zero-copy worker writes held
+    /// dmabufs straight into the ring. `worker_slots` are the ring ids it has imported.
+    raw_wanted: bool,
+    worker: Option<pf_zerocopy::Importer>,
+    worker_slots: HashSet<usize>,
+    worker_cursor_serial: u64,
     /// One-shot [`diagnose_failed_open`](Self::diagnose_failed_open) — a reset burst logs once.
     diagnosed: bool,
     /// Two-thread retrieve. `None` in sync mode. Lives `init_session`→`teardown`.
@@ -849,6 +864,10 @@ impl NvencCudaEncoder {
             cursor_tried: false,
             cursor_serial: u64::MAX,
             cursor_blend_warned: false,
+            raw_wanted: pf_zerocopy::nvenc_raw_enabled(),
+            worker: None,
+            worker_slots: HashSet::new(),
+            worker_cursor_serial: u64::MAX,
             diagnosed: false,
             inited: false,
             rfi_supported: false,
@@ -938,6 +957,10 @@ impl NvencCudaEncoder {
         for slot in &self.ring {
             let _ = (api().unregister_resource)(self.encoder, slot.reg);
         }
+        if let Some(w) = self.worker.as_mut() {
+            w.forget_slots();
+        }
+        self.worker_slots.clear();
         for &bs in &self.bitstreams {
             let _ = (api().destroy_bitstream_buffer)(self.encoder, bs);
         }
@@ -1455,7 +1478,7 @@ impl NvencCudaEncoder {
 
             // Ring: register once, map per submit. Prefer Vulkan-imported slots so the cursor
             // blend writes the bytes NVENC encodes; any failure falls back to pitched CUDA.
-            if !self.cursor_tried && self.blend_wanted {
+            if !self.cursor_tried && (self.blend_wanted || self.raw_wanted) {
                 self.cursor_tried = true;
                 match VkSlotBlend::new() {
                     Ok(v) => self.vk_blend = Some(v),
@@ -1766,6 +1789,116 @@ impl NvencCudaEncoder {
         }
     }
 
+    /// The slot layout a raw dmabuf session encodes: YUV444 for a 4:4:4 session, NVENC's
+    /// packed 10-bit for an HDR capture, else NV12 (`PUNKTFUNK_NV12`) or packed ARGB.
+    fn raw_buffer_format(&self, fmt: pf_frame::PixelFormat) -> nv::NV_ENC_BUFFER_FORMAT {
+        use nv::NV_ENC_BUFFER_FORMAT as F;
+        if self.chroma_444 {
+            return F::NV_ENC_BUFFER_FORMAT_YUV444;
+        }
+        match fmt {
+            pf_frame::PixelFormat::X2Rgb10 => F::NV_ENC_BUFFER_FORMAT_ARGB10,
+            pf_frame::PixelFormat::X2Bgr10 => F::NV_ENC_BUFFER_FORMAT_ABGR10,
+            _ if pf_zerocopy::nv12_enabled() => F::NV_ENC_BUFFER_FORMAT_NV12,
+            _ => F::NV_ENC_BUFFER_FORMAT_ARGB,
+        }
+    }
+
+    /// The fused convert: the worker writes `d`, cursor included, into ring slot `slot` — or
+    /// into the reframe staging slot, which the Lanczos pass then scales into the ring. One
+    /// GPU pass, no copy. A failure feeds the raw-dmabuf latch, so the next capture falls back
+    /// to the import path instead of looping here.
+    fn convert_raw(
+        &mut self,
+        captured: &CapturedFrame,
+        d: &DmabufFrame,
+        slot: usize,
+    ) -> Result<()> {
+        let fmt = slot_fmt_of(self.buffer_fmt);
+        let SlotSurface::Vk(dst) = &self.ring[slot].surface else {
+            bail!("NVENC (Linux): a raw dmabuf submit needs Vulkan input slots");
+        };
+        let dst = *dst;
+        let (target, src_size) = match &self.reframe {
+            Some(r) => (r.staging[slot], r.src),
+            None => (dst, (self.width, self.height)),
+        };
+        match self.convert_raw_inner(captured, d, fmt, target, src_size) {
+            Ok(()) => pf_zerocopy::note_raw_dmabuf_import_ok(),
+            Err(e) => {
+                pf_zerocopy::note_raw_dmabuf_import_failure("nvenc convert");
+                return Err(e).context("NVENC (Linux): fused convert");
+            }
+        }
+        if let Some(r) = &self.reframe {
+            let (crop, out) = (r.crop, r.out);
+            self.vk_blend
+                .as_mut()
+                .expect("a Vk ring implies the slot device")
+                .reframe(&target, &dst, fmt, crop, out)
+                .context("NVENC (Linux): reframe")?;
+        }
+        Ok(())
+    }
+
+    fn convert_raw_inner(
+        &mut self,
+        captured: &CapturedFrame,
+        d: &DmabufFrame,
+        fmt: SlotFormat,
+        target: VkSlotRef,
+        src_size: (u32, u32),
+    ) -> Result<()> {
+        if self.worker.as_ref().is_none_or(|w| w.dead()) {
+            self.worker =
+                Some(pf_zerocopy::Importer::new_for_capture().context("spawn the convert worker")?);
+            self.worker_slots.clear();
+            self.worker_cursor_serial = u64::MAX;
+        }
+        let vk = self
+            .vk_blend
+            .as_mut()
+            .ok_or_else(|| anyhow!("no Vulkan slot device"))?;
+        let worker = self.worker.as_mut().expect("ensured above");
+        if !self.worker_slots.contains(&target.id) {
+            let (fd, size) = vk.slot_fd(target.id)?;
+            worker.register_slot(target.id as u32, fd, size)?;
+            self.worker_slots.insert(target.id);
+        }
+        let cursor = match &captured.cursor {
+            Some(ov) if ov.visible && ov.w > 0 && ov.h > 0 && !ov.rgba.is_empty() => {
+                if self.worker_cursor_serial != ov.serial {
+                    worker.set_cursor(ov.serial, ov.w, ov.h, &ov.rgba)?;
+                    self.worker_cursor_serial = ov.serial;
+                }
+                Some(pf_zerocopy::CursorRect {
+                    x: ov.x,
+                    y: ov.y,
+                    w: ov.w,
+                    h: ov.h,
+                })
+            }
+            _ => None,
+        };
+        let src = pf_zerocopy::ConvertSrc {
+            fd: d.fd.as_raw_fd(),
+            fourcc: d.fourcc,
+            modifier: d.modifier,
+            offset: d.offset,
+            stride: d.stride,
+            width: captured.width,
+            height: captured.height,
+        };
+        let out = pf_zerocopy::ConvertOut {
+            mode: fmt.mode(),
+            width: src_size.0,
+            height: src_size.1,
+            pitch_w: (target.pitch / 4) as u32,
+            plane_rows: target.height,
+        };
+        worker.convert(&src, target.id as u32, &out, cursor)
+    }
+
     /// Device→device copy into the ring slot. `sync` blocks; `!sync` enqueues on the copy
     /// stream (stream-ordered submit — gate in [`Encoder::submit`]).
     fn copy_into_slot(&self, buf: &cuda::DeviceBuffer, slot: usize, sync: bool) -> Result<()> {
@@ -1893,11 +2026,14 @@ impl NvencCudaEncoder {
 
     /// One frame from a device buffer: session (re)init on a size or layout change, the copy
     /// into a ring slot, the cursor, then the encode call.
-    fn submit_device(&mut self, captured: &CapturedFrame, buf: &cuda::DeviceBuffer) -> Result<()> {
+    fn submit_device(&mut self, captured: &CapturedFrame, src: Source<'_>) -> Result<()> {
         self.maybe_engage_async();
         self.maybe_disengage_async();
         // Size or format change (NV12↔YUV444) re-inits.
-        let new_fmt = buffer_format(buf, captured.format);
+        let new_fmt = match src {
+            Source::Cuda(b) => buffer_format(b, captured.format),
+            Source::Dmabuf(_) => self.raw_buffer_format(captured.format),
+        };
         let input = (captured.width, captured.height);
         let size_changed = self.inited
             && match &self.reframe {
@@ -1943,7 +2079,11 @@ impl NvencCudaEncoder {
             self.bit_depth = if ten_bit_in { 10 } else { 8 };
             self.hdr = ten_bit_in;
             // FREXT only on genuine YUV444; NV12/RGB cannot reconstruct full chroma.
-            self.chroma_444 = self.chroma_444 && buf.yuv444;
+            self.chroma_444 = self.chroma_444
+                && match src {
+                    Source::Cuda(b) => b.yuv444,
+                    Source::Dmabuf(_) => true,
+                };
             // `init_session` publishes `encoder` before later fallible steps. A failure leaves
             // a live session with `inited == false`; the next submit would skip teardown and
             // leak. `teardown` keys off `encoder.is_null()`, so it cleans this half-built state.
@@ -1995,28 +2135,41 @@ impl NvencCudaEncoder {
         let ordered = base_ordered && (captured.cursor.is_none() || cursor_ordered);
         let t0 = std::time::Instant::now();
 
-        match &self.reframe {
-            // A reframe reads the staging slot on the Vulkan queue: the copy must have landed.
-            Some(r) => {
-                let (stage, fmt) = (r.staging[slot], slot_fmt_of(self.buffer_fmt));
-                self.copy_into(buf, stage.ptr, stage.pitch, u64::from(stage.height), true)?;
-                let (crop, out) = (r.crop, r.out);
-                let (vk, SlotSurface::Vk(dst)) = (self.vk_blend.as_mut(), &self.ring[slot].surface)
-                else {
-                    bail!("NVENC (Linux): a reframing session without Vulkan slots");
-                };
-                vk.expect("a Vk ring implies the slot device")
-                    .reframe(&stage, dst, fmt, crop, out)
-                    .context("NVENC (Linux): reframe")?;
+        // A held dmabuf goes through the worker's fused pass (cursor included); a CUDA buffer
+        // is copied in, reframed when the session scales, and the cursor blended after.
+        let fused_cursor = if let Source::Dmabuf(d) = src {
+            self.convert_raw(captured, d, slot)?;
+            true
+        } else {
+            let Source::Cuda(buf) = src else {
+                unreachable!("the dmabuf arm returned above")
+            };
+            match &self.reframe {
+                // A reframe reads the staging slot on the Vulkan queue: the copy must have landed.
+                Some(r) => {
+                    let (stage, fmt) = (r.staging[slot], slot_fmt_of(self.buffer_fmt));
+                    self.copy_into(buf, stage.ptr, stage.pitch, u64::from(stage.height), true)?;
+                    let (crop, out) = (r.crop, r.out);
+                    let (vk, SlotSurface::Vk(dst)) =
+                        (self.vk_blend.as_mut(), &self.ring[slot].surface)
+                    else {
+                        bail!("NVENC (Linux): a reframing session without Vulkan slots");
+                    };
+                    vk.expect("a Vk ring implies the slot device")
+                        .reframe(&stage, dst, fmt, crop, out)
+                        .context("NVENC (Linux): reframe")?;
+                }
+                None => self.copy_into_slot(buf, slot, !ordered)?,
             }
-            None => self.copy_into_slot(buf, slot, !ordered)?,
-        }
+            false
+        };
         let t_copy = t0.elapsed();
 
         // Blend into this slot's owned surface (cursor rect, never the compositor dmabuf).
         // Ordered: copy/dispatch/encode on-device via timeline. Else CUDA copy then
         // fence-waited dispatch, then encode. Failure drops the cursor, never the frame.
-        if let Some(ov) = &captured.cursor {
+        // A fused convert already carries the cursor.
+        if let (false, Some(ov)) = (fused_cursor, &captured.cursor) {
             // A reframed picture takes the pointer scaled and moved with it.
             let (cw, ch, cx, cy) = match &mut self.reframe {
                 Some(r) => {
@@ -2280,16 +2433,16 @@ impl NvencCudaEncoder {
 impl Encoder for NvencCudaEncoder {
     fn submit(&mut self, captured: &CapturedFrame) -> Result<()> {
         let uploaded = match &captured.payload {
-            FramePayload::Cuda(_) => None,
             FramePayload::Cpu(pixels) => Some(self.upload_cpu(captured, pixels)?),
+            _ => None,
+        };
+        let src = match (&captured.payload, &uploaded) {
+            (FramePayload::Cuda(b), _) => Source::Cuda(b),
+            (_, Some(b)) => Source::Cuda(b),
+            (FramePayload::Dmabuf(d), _) if self.raw_wanted => Source::Dmabuf(d),
             _ => bail!("Linux direct-NVENC needs a CUDA or CPU frame; got a dmabuf"),
         };
-        let buf = match (&captured.payload, &uploaded) {
-            (FramePayload::Cuda(b), _) => b,
-            (_, Some(b)) => b,
-            _ => unreachable!("the match above took every other payload"),
-        };
-        let result = self.submit_device(captured, buf);
+        let result = self.submit_device(captured, src);
         if let Some(b) = uploaded {
             self.upload = Some(b);
         }
