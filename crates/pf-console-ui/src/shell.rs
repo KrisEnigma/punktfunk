@@ -438,6 +438,11 @@ impl Shell {
         &self.library
     }
 
+    /// The screen on top of the stack.
+    pub(crate) fn top(&self) -> Option<&Screen> {
+        self.stack.last()
+    }
+
     /// Replace the stack (deep link, return-to-shelf). Cut, no transition:
     /// this is re-entry, not navigation the user watched.
     pub(crate) fn replace_stack(&mut self, stack: Vec<Screen>) {

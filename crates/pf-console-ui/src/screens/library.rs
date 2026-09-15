@@ -567,6 +567,14 @@ impl LibraryScreen {
         &self.host.fp_hex
     }
 
+    /// Whether this is `host`'s shelf: same row key and the same pin, if any.
+    pub(crate) fn shelf_of(&self, host: &HostRow) -> bool {
+        fn pin(h: &HostRow) -> Option<&str> {
+            h.pin.as_ref().map(|p| p.id.as_str())
+        }
+        self.host.key == host.key && pin(&self.host) == pin(host)
+    }
+
     /// A decoded poster, for the launch hold drawn over this shelf. The focused tile
     /// keeps drawing underneath, so its poster is never the one evicted.
     pub(crate) fn poster(&self, id: &str) -> Option<&Image> {

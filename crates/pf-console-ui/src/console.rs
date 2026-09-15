@@ -175,7 +175,12 @@ impl Console {
     }
 
     /// Replace the stack with `entry` (deep link, or return to the shelf a game launched from).
+    /// A return to the shelf already on top keeps it: the stack outlives the stream, and a
+    /// rebuilt shelf has no posters and nothing that fetches them again.
     pub fn navigate(&mut self, entry: ConsoleEntry) {
+        if already_showing(self.shell.top(), &entry) {
+            return;
+        }
         let stream = stream_intent(&entry);
         let stack = entry_stack(entry, self.shell.library());
         self.shell.replace_stack(stack);
@@ -227,6 +232,15 @@ fn entry_stack(entry: ConsoleEntry, library: &crate::library::LibraryShared) -> 
                 library.fetch_epoch(),
             )),
         ],
+    }
+}
+
+/// A [`ConsoleEntry::Library`] whose shelf is `top`. A `Stream` entry always re-roots:
+/// it carries a connect the caller expects to start.
+fn already_showing(top: Option<&Screen>, entry: &ConsoleEntry) -> bool {
+    match (top, entry) {
+        (Some(Screen::Library(lib)), ConsoleEntry::Library(host)) => lib.shelf_of(host),
+        _ => false,
     }
 }
 
@@ -289,5 +303,34 @@ mod tests {
                 [Screen::Home(_), Screen::Library(_)]
             ));
         }
+    }
+
+    /// Returning to the shelf on top keeps it (its posters survive the stream); another
+    /// host's shelf, a Stream entry, or a Home top re-roots as before.
+    #[test]
+    fn a_library_entry_for_the_shelf_on_top_is_a_no_op() {
+        let library = crate::library::LibraryShared::default();
+        let stack = entry_stack(ConsoleEntry::Library(Box::new(row())), &library);
+        let top = stack.last();
+        assert!(already_showing(
+            top,
+            &ConsoleEntry::Library(Box::new(row()))
+        ));
+        assert!(!already_showing(
+            top,
+            &ConsoleEntry::Stream(Box::new(row()))
+        ));
+        let other = HostRow {
+            key: "bb".into(),
+            ..row()
+        };
+        assert!(!already_showing(
+            top,
+            &ConsoleEntry::Library(Box::new(other))
+        ));
+        assert!(!already_showing(
+            stack.first(),
+            &ConsoleEntry::Library(Box::new(row()))
+        ));
     }
 }
