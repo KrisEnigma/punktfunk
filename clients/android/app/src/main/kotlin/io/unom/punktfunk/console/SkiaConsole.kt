@@ -42,9 +42,11 @@ import io.unom.punktfunk.kit.security.KnownHost
 import io.unom.punktfunk.kit.security.KnownHostStore
 import io.unom.punktfunk.kit.security.obtainIdentity
 import io.unom.punktfunk.models.ActiveSession
+import java.io.File
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
+import okhttp3.Cache
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONArray
@@ -93,7 +95,11 @@ object SkiaConsole {
     private val main = Handler(Looper.getMainLooper())
     private val ioPool = Executors.newCachedThreadPool { r -> Thread(r, "pf-console-io").apply { isDaemon = true } }
     private val artPool = Executors.newFixedThreadPool(3) { r -> Thread(r, "pf-console-art").apply { isDaemon = true } }
-    private val artHttp by lazy { OkHttpClient() }
+    /** One disk cache behind both art clients: the host proxy sends `Cache-Control` + `ETag`, a
+     *  CDN its own, and OkHttp honours either, so a shelf revisit is a 304 at most. Null before
+     *  `init`: no context, no cache, fetches still work. */
+    private val artCache: Cache? by lazy { appContext?.let { Cache(File(it.cacheDir, "art-http"), 64L shl 20) } }
+    private val artHttp by lazy { OkHttpClient.Builder().cache(artCache).build() }
     private var eventThread: Thread? = null
     private val running = AtomicBoolean(false)
 
@@ -1096,7 +1102,7 @@ object SkiaConsole {
     private fun fetchArt(candidates: List<String>, id: ClientIdentity, addr: String, fp: String): ByteArray? {
         for (url in candidates) {
             val client = if (url.contains(addr)) {
-                runCatching { io.unom.punktfunk.kit.library.mtlsHttpClient(id.certPem, id.privateKeyPem, addr, fp) }.getOrNull() ?: continue
+                runCatching { io.unom.punktfunk.kit.library.mtlsHttpClient(id.certPem, id.privateKeyPem, addr, fp, artCache) }.getOrNull() ?: continue
             } else artHttp
             val bytes = runCatching {
                 client.newCall(Request.Builder().url(url).build()).execute().use { resp ->
