@@ -240,7 +240,13 @@ machine. Punktfunk narrows it as far as it can:
   capability-limited `plugin-token`, not the full-admin `mgmt-token` — so a plugin can't register
   hooks or admit new devices. On Windows the runner's scheduled task runs as
   `NT AUTHORITY\LocalService`, **not** SYSTEM, and is granted read on exactly two files (that token
-  and the TLS pin). On Linux it runs as your desktop user, like the host.
+  and the TLS pin). On Linux it runs as your desktop user, so the systemd unit draws the same line
+  a different way: the runner starts with an empty home, and the only things mounted back into it
+  are that same token, that same pin, and the directories plugins actually work in — their own
+  packages, their own saved state, your scripts, and the game libraries a scanner reads. The
+  host's `mgmt-token` and its identity key are not among them. A plugin that needs to reach
+  somewhere else needs you to grant it, with
+  `systemctl --user edit punktfunk-scripting`.
 
 Install plugins only from sources you trust, and prefer Verified catalog entries. See
 [Plugins](/docs/plugins) for the install flow and the CLI.
