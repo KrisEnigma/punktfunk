@@ -755,11 +755,13 @@ fi
 %post web
 echo "punktfunk-web installed. Enable the console for your user:"
 echo "    systemctl --user enable --now punktfunk-web"
-echo "A login password is generated on first start — read it with:"
+echo "A login password is generated on first start. Read it once, before you sign in:"
 # From the 0600 file, NOT the journal: the journal is persistent and group-readable (adm /
-# systemd-journal on Debian-family, and this hint was copied around), so telling people to fish a
-# password out of it published the secret to every member of those groups (review 2026-08-05 L-18).
-echo "    cut -d= -f2- \${XDG_CONFIG_HOME:-\$HOME/.config}/punktfunk/web-password"
+# systemd-journal on Debian-family), so telling people to fish a password out of it published the
+# secret to every member of those groups. The read works until the console hashes the line.
+echo "    sed -n 's/^PUNKTFUNK_UI_PASSWORD=//p' \${XDG_CONFIG_HOME:-\$HOME/.config}/punktfunk/web-password"
+echo "After that the console keeps only a salted hash, so a forgotten password is reset: put a"
+echo "PUNKTFUNK_UI_PASSWORD=<your-password> line in that file and restart punktfunk-web."
 echo "Then open https://<host-ip>:47992"
 %endif
 

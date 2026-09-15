@@ -283,16 +283,17 @@ if [ "$WITH_WEB" = 1 ] && [ ! -f "$CONFIG/web.env" ]; then
     WEB_SECRET="$(LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom 2>/dev/null | head -c 32 || true)"
     # `umask 077` around the redirect, not `chmod 600` after it: the heredoc CREATES the file at
     # the ambient umask (0022 on a Deck ⇒ world-readable), so the console password and session
-    # secret existed group/world-readable for the window between the redirect and the chmod
-    # (2026-08-05 review L-19). Setting the mask first means the file is never readable at all.
-    # The chmod stays as the idempotent belt for a pre-existing file.
+    # secret existed group/world-readable for the window between the redirect and the chmod.
+    # Setting the mask first means the file is never readable at all. The chmod stays as the
+    # idempotent belt for a pre-existing file. The console swaps the clear password for a salted
+    # hash in this same file on the first sign-in, keeping PUNKTFUNK_UI_SECRET beside it.
     (umask 077; cat > "$CONFIG/web.env" <<EOF
 PUNKTFUNK_UI_PASSWORD=$WEB_PW
 PUNKTFUNK_UI_SECRET=$WEB_SECRET
 EOF
     )
     chmod 600 "$CONFIG/web.env"
-    ok "wrote web.env (generated login password)"
+    ok "wrote web.env (generated login password — read it before your first sign-in)"
 elif [ "$WITH_WEB" = 1 ] && [ -f "$CONFIG/web.env" ]; then
     # THE belt the comment above promises. It used to live inside the create-only branch, so it
     # only ever ran on files that had just been written 0600 anyway — every install that predates
@@ -303,7 +304,7 @@ elif [ "$WITH_WEB" = 1 ] && [ -f "$CONFIG/web.env" ]; then
         chmod 600 "$CONFIG/web.env"
         warn "web.env was group/world-readable — an older install wrote it at the default umask."
         warn "Tightened to 0600, but that does NOT un-expose the password it already leaked to every"
-        warn "local account. Rotate it: edit PUNKTFUNK_UI_PASSWORD in $CONFIG/web.env, then"
+        warn "local account. Reset it: put a PUNKTFUNK_UI_PASSWORD line in $CONFIG/web.env, then"
         warn "  systemctl --user restart punktfunk-web"
     else
         ok "web.env exists (login password unchanged, mode already 0600)"
@@ -486,7 +487,7 @@ Description=punktfunk management web console
 After=punktfunk-host.service
 
 [Service]
-ExecStart=$DISTROBOX enter $BOX -- bash -lc 'cd $SRC/web; set -a; . $CONFIG/mgmt-token; . $CONFIG/web.env; set +a; export PUNKTFUNK_MGMT_URL=https://127.0.0.1:$MGMT_PORT PORT=$WEB_PORT HOST=0.0.0.0 NITRO_PORT=$WEB_PORT NITRO_HOST=0.0.0.0 PUNKTFUNK_UI_TLS_CERT=$CONFIG/cert.pem PUNKTFUNK_UI_TLS_KEY=$CONFIG/key.pem PUNKTFUNK_UI_SECURE=1; exec bun .output/server/index.mjs'
+ExecStart=$DISTROBOX enter $BOX -- bash -lc 'cd $SRC/web; set -a; . $CONFIG/mgmt-token; . $CONFIG/web.env; set +a; export PUNKTFUNK_MGMT_URL=https://127.0.0.1:$MGMT_PORT PORT=$WEB_PORT HOST=0.0.0.0 NITRO_PORT=$WEB_PORT NITRO_HOST=0.0.0.0 PUNKTFUNK_UI_TLS_CERT=$CONFIG/cert.pem PUNKTFUNK_UI_TLS_KEY=$CONFIG/key.pem PUNKTFUNK_UI_SECURE=1 PUNKTFUNK_UI_PASSWORD_FILE=$CONFIG/web.env; exec bun .output/server/index.mjs'
 Restart=on-failure
 RestartSec=3
 

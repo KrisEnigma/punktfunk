@@ -32,10 +32,13 @@ ping -n 3 127.0.0.1 >nul 2>&1
 goto pfwait
 :pfready
 
-rem Both files are single KEY=VALUE lines: PUNKTFUNK_MGMT_TOKEN=... and PUNKTFUNK_UI_PASSWORD=... .
-rem Split on the first '=' and import each into the environment.
+rem Both files are single KEY=VALUE lines: PUNKTFUNK_MGMT_TOKEN=... and, in the password file,
+rem PUNKTFUNK_UI_PASSWORD=... until the console replaces it with PUNKTFUNK_UI_PASSWORD_HASH=... .
+rem Split on the first '=' and import each under whichever name it carries; the server strips the
+rem quotes the hash is stored in. PUNKTFUNK_UI_PASSWORD_FILE is the file the console rewrites.
 for /f "usebackq tokens=1* delims==" %%A in ("%TOKENFILE%") do set "%%A=%%B"
 if exist "%PWFILE%" for /f "usebackq tokens=1* delims==" %%A in ("%PWFILE%") do set "%%A=%%B"
+set "PUNKTFUNK_UI_PASSWORD_FILE=%PWFILE%"
 
 rem Fixed deployment wiring (the Windows analogue of scripts/punktfunk-web.service).
 set "PORT=47992"

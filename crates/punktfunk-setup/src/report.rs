@@ -15,7 +15,8 @@ use crate::seam::CommandRunner;
 use crate::ui::Reporter;
 
 /// Printing the password is one command, and it is the same one in the step that offers to
-/// generate it, in the outro, and in the docs.
+/// generate it, in the outro, and in the docs. It prints until the first sign-in only: the
+/// console then stores a salted hash, and a forgotten password is reset, not read.
 pub const PASSWORD_READ: &str =
     "sed -n 's/^PUNKTFUNK_UI_PASSWORD=//p' ~/.config/punktfunk/web-password";
 
@@ -170,8 +171,10 @@ fn next_steps(
             "  Console: https://{ip}:47992  (its certificate is this host's own)"
         ));
         let password = match choices.web_password {
-            Some(_) => format!("  Password: the one you typed — this prints it: {PASSWORD_READ}"),
-            None => format!("  Password — this prints it: {PASSWORD_READ}"),
+            Some(_) => "  Password: the one you typed".to_string(),
+            None => {
+                format!("  Password — this prints it, until you first sign in: {PASSWORD_READ}")
+            }
         };
         ui.line(&password);
     } else {

@@ -150,7 +150,7 @@ if [ -f "$CONFIG/web.env" ] && find "$CONFIG/web.env" -maxdepth 0 -perm /0077 2>
     chmod 600 "$CONFIG/web.env"
     warn "web.env was group/world-readable — an older install wrote it at the default umask."
     warn "Tightened to 0600, but that does NOT un-expose the password it already leaked to every"
-    warn "local account. Rotate it: edit PUNKTFUNK_UI_PASSWORD in $CONFIG/web.env, then"
+    warn "local account. Reset it: put a PUNKTFUNK_UI_PASSWORD line in $CONFIG/web.env, then"
     warn "  systemctl --user restart punktfunk-web"
 fi
 

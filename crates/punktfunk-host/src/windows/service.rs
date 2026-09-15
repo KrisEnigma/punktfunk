@@ -906,6 +906,35 @@ fn read_env_file_value(path: &Path) -> Option<String> {
     (!value.is_empty()).then(|| value.to_string())
 }
 
+/// The console password line as the env name it must keep plus its value. `web-password` carries
+/// `PUNKTFUNK_UI_PASSWORD_HASH` once the console has migrated it, and the clear-text key only
+/// until then — forwarding either under the other's name hands the console a hash to compare as a
+/// password. The value stays as written; the console strips the quotes the hash is stored in.
+fn read_password_env(path: &Path) -> Option<(&'static str, String)> {
+    let contents = std::fs::read_to_string(path).ok()?;
+    let mut hash = None;
+    let mut clear = None;
+    for line in contents.lines() {
+        let Some((key, value)) = line.trim().split_once('=') else {
+            continue;
+        };
+        let value = value.trim();
+        if value.is_empty() {
+            continue;
+        }
+        match key.trim() {
+            "PUNKTFUNK_UI_PASSWORD_HASH" => hash = Some(value.to_string()),
+            "PUNKTFUNK_UI_PASSWORD" => clear = Some(value.to_string()),
+            _ => {}
+        }
+    }
+    // Clear text wins, the rule the console's own compare follows: writing one back beside a hash
+    // is how a password is reset, and the console hashes it again on the next sign-in.
+    clear
+        .map(|v| ("PUNKTFUNK_UI_PASSWORD", v))
+        .or_else(|| hash.map(|v| ("PUNKTFUNK_UI_PASSWORD_HASH", v)))
+}
+
 /// This process's env plus `overrides` (case-insensitive win) as a double-NUL UTF-16 block.
 /// Same serialization as `interactive::merged_env_block`; the base is ours, not a user token.
 fn env_block_with(overrides: &[(&str, String)]) -> Vec<u16> {
@@ -933,10 +962,12 @@ fn spawn_web(cfg: &WebConfig, data: &Path, job: HANDLE) -> Result<Child> {
         .filter(|v| !v.trim().is_empty())
         .or_else(|| read_env_file_value(&data.join("mgmt-token")))
         .context("read mgmt-token")?;
+    let pw_path = data.join("web-password");
     let password = std::env::var("PUNKTFUNK_UI_PASSWORD")
         .ok()
         .filter(|v| !v.trim().is_empty())
-        .or_else(|| read_env_file_value(&data.join("web-password")));
+        .map(|v| ("PUNKTFUNK_UI_PASSWORD", v))
+        .or_else(|| read_password_env(&pw_path));
     // Env-over-file; `mgmt::publish_endpoint` rewrites the file each `serve`. Default 47990 is
     // last-resort — a Sunshine fork often owns that port as its web UI.
     let mgmt_url = std::env::var("PUNKTFUNK_MGMT_URL")
@@ -963,9 +994,15 @@ fn spawn_web(cfg: &WebConfig, data: &Path, job: HANDLE) -> Result<Child> {
         ),
         ("PUNKTFUNK_UI_SECURE", "1".into()),
         ("PUNKTFUNK_MGMT_TOKEN", token),
+        // The file the console rewrites when it turns a clear-text password into a salted hash.
+        // It is reached through this name, not %ProgramData%, so the console needs no path rules.
+        (
+            "PUNKTFUNK_UI_PASSWORD_FILE",
+            pw_path.to_string_lossy().into_owned(),
+        ),
     ];
-    if let Some(pw) = password {
-        overrides.push(("PUNKTFUNK_UI_PASSWORD", pw));
+    if let Some((key, pw)) = password {
+        overrides.push((key, pw));
     }
     let env = env_block_with(&overrides);
 
