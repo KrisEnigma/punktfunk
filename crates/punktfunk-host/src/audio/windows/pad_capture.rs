@@ -314,7 +314,25 @@ fn pad_capture_thread(
         };
         audio_client
             .initialize_client(&desired, &Direction::Capture, &mode)
-            .context("initialize pad loopback client")?;
+            .map_err(|e| {
+                // The engine configures the driver with the stamped 4-ch device format; a
+                // driver that refuses it fails every open here with UNSUPPORTED_FORMAT.
+                let mix = audio_client
+                    .get_mixformat()
+                    .map(|f| {
+                        format!(
+                            "{}ch/{}Hz/{}bit",
+                            f.get_nchannels(),
+                            f.get_samplespersec(),
+                            f.get_bitspersample()
+                        )
+                    })
+                    .unwrap_or_else(|_| "unknown".into());
+                anyhow!(
+                    "initialize pad loopback client (endpoint mix format {mix}, asked \
+                     {PAD_CHANNELS}ch/{SAMPLE_RATE}Hz): {e}"
+                )
+            })?;
         let h_event = audio_client.set_get_eventhandle().context("event handle")?;
         let capture_client = audio_client
             .get_audiocaptureclient()
