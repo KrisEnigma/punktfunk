@@ -18,6 +18,8 @@ pub mod egl;
 // Message body is generic; `proto` is this worker's vocabulary only.
 pub mod ipc;
 pub mod proto;
+#[cfg(test)]
+mod tiled_spike;
 pub mod vkslot;
 pub mod vulkan;
 pub mod worker;
