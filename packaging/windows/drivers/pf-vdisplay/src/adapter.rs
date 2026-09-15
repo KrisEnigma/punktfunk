@@ -62,7 +62,9 @@ pub fn is_seat_role() -> bool {
 /// Build the adapter caps (FP16/HDR-capable) and kick off the async adapter creation. Called from
 /// `EvtDeviceD0Entry`; idempotent across re-entrant D0 transitions.
 pub fn init_adapter(device: WDFDEVICE) -> NTSTATUS {
-    if adapter().is_some() {
+    // A D0 entry that lands while the first async init is in flight must not issue a second
+    // adapter; last-write-wins on `set_adapter` would leak the first.
+    if adapter().is_some() || INIT_PENDING.load(Ordering::Acquire) {
         return STATUS_SUCCESS;
     }
     dbglog!("[pf-vd] init_adapter");
