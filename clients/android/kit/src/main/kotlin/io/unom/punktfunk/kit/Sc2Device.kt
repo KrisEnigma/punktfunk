@@ -181,6 +181,20 @@ object Sc2Device {
         // [4..6] = disabled (0) — firmware emits calibrated signed i16 values
     }
 
+    /**
+     * Lizard mode back ON — the same settings write, value non-zero. The claim removes the pad
+     * from the OS input stack entirely, and lizard's kb/mouse is what navigates Android TV, so a
+     * capture restores it as it releases: the firmware watchdog would, but only after seconds of
+     * a dead pad.
+     */
+    val ENABLE_LIZARD: ByteArray = ByteArray(64).also {
+        it[0] = 0x01 // feature report id
+        it[1] = 0x87.toByte() // ID_SET_SETTINGS_VALUES
+        it[2] = 3 // one ControllerSetting {u8 num, u16 value}
+        it[3] = 9 // SETTING_LIZARD_MODE
+        it[4] = 1 // LIZARD_MODE_ON (u16 little-endian)
+    }
+
     const val LIZARD_REFRESH_MS = 3000L
 
     /** Wire mapping: SC2 button bit → punktfunk `Gamepad.BTN_*`, the inverse of the host's
