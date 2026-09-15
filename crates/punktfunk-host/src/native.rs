@@ -580,8 +580,8 @@ const HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10
 /// Capture-loss rebuild is 40 s; a cold pipeline-build can take ~10 s. 90 s leaves headroom.
 const STREAM_STOP_GRACE: std::time::Duration = std::time::Duration::from_secs(90);
 
-/// Audio/input join after close. Audio checks `stop` every ≤5 s; the input channel drops
-/// with the connection. This only catches a wedge.
+/// Audio/input join after close. Both poll `stop`: audio every ≤5 s, input every ≤4 ms.
+/// This only catches a wedge.
 const SIDE_THREAD_JOIN_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Resolves once `stop` has been set for [`STREAM_STOP_GRACE`].
@@ -1745,6 +1745,7 @@ pub(crate) async fn run_admitted(
     let input_tx_stream = input_tx.clone();
     let input_handle = {
         let conn = conn.clone();
+        let stop = stop.clone();
         let gamepad = welcome.gamepad;
         // Read HOST_CAP_PAD_AUDIO back off Welcome so the input thread cannot disagree.
         let pad_audio_on = welcome.host_caps & punktfunk_core::quic::HOST_CAP_PAD_AUDIO != 0;
@@ -1763,6 +1764,7 @@ pub(crate) async fn run_admitted(
                         pad_audio_on,
                         grants,
                         frame_map,
+                        stop,
                     )
                 }
             })
