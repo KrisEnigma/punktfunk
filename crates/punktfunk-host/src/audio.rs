@@ -255,7 +255,9 @@ mod windows;
 use self::windows as plat;
 // Flat names for the session, the devtests and the installer: `crate::audio::pad_endpoint`.
 #[cfg(target_os = "windows")]
-pub(crate) use self::windows::{audio_probe, devnode_cleanup, minted, pad_capture, pad_endpoint};
+pub(crate) use self::windows::{
+    audio_control, audio_probe, devnode_cleanup, minted, pad_capture, pad_endpoint,
+};
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "linux")]

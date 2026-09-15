@@ -24,6 +24,7 @@ const TITLES: Record<string, () => string> = {
 	uinput_access: () => m.diag_uinput_access_title(),
 	server_conflict: () => m.diag_server_conflict_title(),
 	vdisplay_driver: () => m.diag_vdisplay_driver_title(),
+	pad_audio: () => m.diag_pad_audio_title(),
 };
 
 /**

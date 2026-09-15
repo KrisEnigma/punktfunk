@@ -383,6 +383,66 @@ pub fn pad_endpoint(args: &[String]) -> Result<()> {
             pc::capture_probe(&endpoint_id, secs)
         }
         Some("status") => pe::print_status(idx),
+        // `--channels N`: set the endpoint's device format through the policy API. 2 breaks
+        // the pad's 4-channel graph on purpose, so `repair` can be watched putting it back.
+        Some("reshape") => {
+            let channels: u16 = args
+                .iter()
+                .skip_while(|a| *a != "--channels")
+                .nth(1)
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(4);
+            let endpoint_id = match endpoint_override {
+                Some(id) => id,
+                None => match pe::find(idx)? {
+                    Some(ep) if !ep.endpoint_id.is_empty() => ep.endpoint_id,
+                    _ => {
+                        println!("pad-endpoint reshape: pad {idx} has no endpoint — run `ensure`");
+                        return Ok(());
+                    }
+                },
+            };
+            let mask = if channels == 4 {
+                pc::PAD_CHANNEL_MASK
+            } else {
+                0x3
+            };
+            let samples = [
+                (16, 16, wasapi::SampleType::Int),
+                (32, 32, wasapi::SampleType::Float),
+            ];
+            crate::audio::audio_control::set_endpoint_format(
+                &endpoint_id,
+                channels,
+                48_000,
+                &[mask],
+                &samples,
+            )?;
+            println!("pad-endpoint reshape: {endpoint_id} device format set to {channels} ch");
+            Ok(())
+        }
+        // The startup ladder by hand: probe, policy-API reshape, re-mint, probe. `--remint`
+        // takes the re-mint branch outright, on a healthy endpoint too.
+        Some("repair") => match pe::find(idx)? {
+            Some(p) if !p.endpoint_id.is_empty() => {
+                let p = if args.iter().any(|a| a == "--remint") {
+                    pe::remint(&p)?
+                } else {
+                    pe::validate(p, true)
+                };
+                println!(
+                    "pad-endpoint repair: pad {} endpoint {} refuses_format={}",
+                    p.pad_index,
+                    p.endpoint_id,
+                    pe::refuses_format(p.pad_index)
+                );
+                Ok(())
+            }
+            _ => {
+                println!("pad-endpoint repair: pad {idx} has no endpoint — run `ensure`");
+                Ok(())
+            }
+        },
         // DEVICE_STATE_DISABLED. Host parks pads hidden: idle libScePad titles stall on a
         // visible endpoint. `tone`/`capture` need it shown first.
         Some(verb @ ("show" | "hide")) => {
@@ -402,7 +462,7 @@ pub fn pad_endpoint(args: &[String]) -> Result<()> {
         }
         _ => anyhow::bail!(
             "usage: punktfunk-host pad-endpoint \
-             <ensure|remove|status|tone|capture|show|hide> [--index N]"
+             <ensure|remove|status|repair|reshape|tone|capture|show|hide> [--index N]"
         ),
     }
 }

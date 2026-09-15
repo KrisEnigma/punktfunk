@@ -409,6 +409,7 @@
 	"diag_uinput_access_title": "Unterstützung für virtuelle Controller",
 	"diag_server_conflict_title": "Konkurrierender Streaming-Server",
 	"diag_vdisplay_driver_title": "Treiber für virtuelle Anzeige",
+	"diag_pad_audio_title": "Controller-Lautsprecher",
 	"logs_title": "Logs",
 	"logs_sources_label": "Quellen",
 	"logs_sources_none": "Keine Quelle ausgewählt — wähle oben mindestens eine aus.",

@@ -19,7 +19,7 @@ use wasapi::{Direction, SampleType, StreamMode, WaveFormat};
 pub const PAD_CHANNELS: u32 = 4;
 /// 4-ch pad layout (FL FR BL BR). Not `punktfunk_core::audio::wasapi_channel_mask`,
 /// which only speaks GameStream stereo/5.1/7.1.
-pub(super) const PAD_CHANNEL_MASK: u32 = 0x33;
+pub(crate) const PAD_CHANNEL_MASK: u32 = 0x33;
 const PAD_BLOCK_ALIGN: usize = PAD_CHANNELS as usize * 4;
 
 /// WASAPI loopback of one pad endpoint: interleaved 4-ch f32 at 48 kHz.
@@ -261,6 +261,97 @@ impl Drop for PadLoopbackCapturer {
     }
 }
 
+/// The streamer's shared-mode loopback open: 48 kHz 4-ch f32 with the pad's quad mask, the
+/// engine converting from whatever the endpoint mixes at. The error names the endpoint's mix
+/// format: the engine configures the driver with the stamped device format, and a driver that
+/// refuses it fails here with `AUDCLNT_E_UNSUPPORTED_FORMAT` whatever the client asks for.
+fn initialize_loopback(audio_client: &mut wasapi::AudioClient) -> Result<()> {
+    let desired = WaveFormat::new(
+        32,
+        32,
+        &SampleType::Float,
+        SAMPLE_RATE as usize,
+        PAD_CHANNELS as usize,
+        Some(PAD_CHANNEL_MASK),
+    );
+    let (default_period, _min) = audio_client.get_device_period().context("device period")?;
+    let mode = StreamMode::EventsShared {
+        autoconvert: true,
+        buffer_duration_hns: default_period,
+    };
+    audio_client
+        .initialize_client(&desired, &Direction::Capture, &mode)
+        .map_err(|e| {
+            let mix = audio_client
+                .get_mixformat()
+                .map(|f| {
+                    format!(
+                        "{}ch/{}Hz/{}bit",
+                        f.get_nchannels(),
+                        f.get_samplespersec(),
+                        f.get_bitspersample()
+                    )
+                })
+                .unwrap_or_else(|_| "unknown".into());
+            anyhow!(
+                "initialize pad loopback client (endpoint mix format {mix}, asked \
+                 {PAD_CHANNELS}ch/{SAMPLE_RATE}Hz): {e}"
+            )
+        })
+}
+
+/// The endpoint mixes at fewer channels than the pad has. The open still succeeds, since the
+/// engine upmixes for the capture, but a game sees a stereo speaker and no DualSense.
+#[derive(Debug)]
+pub(crate) struct MixFormatMismatch {
+    pub(crate) channels: u16,
+}
+
+impl std::fmt::Display for MixFormatMismatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "pad endpoint mixes at {} channels, the pad needs {PAD_CHANNELS}",
+            self.channels
+        )
+    }
+}
+
+impl std::error::Error for MixFormatMismatch {}
+
+/// Whether the endpoint takes the streamer's own open AND mixes at the pad's channel count.
+/// Same device, format and flags as the capture thread; nothing starts, and the client drops
+/// on return.
+pub(crate) fn probe_open(endpoint_id: &str) -> Result<()> {
+    wasapi::initialize_mta()
+        .ok()
+        .context("CoInitializeEx (MTA)")?;
+    let device = open_wasapi_device(endpoint_id)
+        .map_err(|e| anyhow!("open pad endpoint {endpoint_id}: {e:#}"))?;
+    let mut audio_client = device.get_iaudioclient().context("IAudioClient")?;
+    initialize_loopback(&mut audio_client)?;
+    let channels = audio_client
+        .get_mixformat()
+        .map(|f| f.get_nchannels())
+        .context("mix format after the open")?;
+    if u32::from(channels) != PAD_CHANNELS {
+        return Err(MixFormatMismatch { channels }.into());
+    }
+    Ok(())
+}
+
+/// `AUDCLNT_E_UNSUPPORTED_FORMAT` anywhere in the chain: the endpoint's own graph refuses the
+/// format, so a retry on this process changes nothing.
+pub(crate) fn is_unsupported_format(e: &anyhow::Error) -> bool {
+    format!("{e:#}").contains("0x88890008")
+}
+
+/// What a policy-API reshape to the pad's format can cure: a refused open, or an open that
+/// works at the wrong channel count.
+pub(crate) fn needs_reshape(e: &anyhow::Error) -> bool {
+    is_unsupported_format(e) || e.downcast_ref::<MixFormatMismatch>().is_some()
+}
+
 impl AudioCapturer for PadLoopbackCapturer {
     fn next_chunk(&mut self) -> Result<Vec<f32>> {
         match self.chunks.recv_timeout(Duration::from_secs(5)) {
@@ -299,40 +390,7 @@ fn pad_capture_thread(
         let device = open_wasapi_device(endpoint_id)
             .map_err(|e| anyhow!("open pad endpoint {endpoint_id}: {e:#}"))?;
         let mut audio_client = device.get_iaudioclient().context("IAudioClient")?;
-        let desired = WaveFormat::new(
-            32,
-            32,
-            &SampleType::Float,
-            SAMPLE_RATE as usize,
-            PAD_CHANNELS as usize,
-            Some(PAD_CHANNEL_MASK),
-        );
-        let (default_period, _min) = audio_client.get_device_period().context("device period")?;
-        let mode = StreamMode::EventsShared {
-            autoconvert: true,
-            buffer_duration_hns: default_period,
-        };
-        audio_client
-            .initialize_client(&desired, &Direction::Capture, &mode)
-            .map_err(|e| {
-                // The engine configures the driver with the stamped 4-ch device format; a
-                // driver that refuses it fails every open here with UNSUPPORTED_FORMAT.
-                let mix = audio_client
-                    .get_mixformat()
-                    .map(|f| {
-                        format!(
-                            "{}ch/{}Hz/{}bit",
-                            f.get_nchannels(),
-                            f.get_samplespersec(),
-                            f.get_bitspersample()
-                        )
-                    })
-                    .unwrap_or_else(|_| "unknown".into());
-                anyhow!(
-                    "initialize pad loopback client (endpoint mix format {mix}, asked \
-                     {PAD_CHANNELS}ch/{SAMPLE_RATE}Hz): {e}"
-                )
-            })?;
+        initialize_loopback(&mut audio_client)?;
         let h_event = audio_client.set_get_eventhandle().context("event handle")?;
         let capture_client = audio_client
             .get_audiocaptureclient()

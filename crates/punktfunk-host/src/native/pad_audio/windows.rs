@@ -44,6 +44,14 @@ pub(in crate::native) fn spawn(
         // Devnode-without-endpoint (`find`): refuse rather than spin open/backoff on an empty id.
         return None;
     }
+    if crate::audio::pad_endpoint::refuses_format(slot) {
+        tracing::warn!(
+            pad,
+            slot,
+            "pad endpoint refuses the 4-channel format — not streaming (pad_audio diagnostics row)"
+        );
+        return None;
+    }
     if ep.needs_aeb_kick {
         // Stamps stored but not served — DualSense identity never adopted. Opening anyway is
         // worse: AUTOCONVERTPCM succeeds on a wrong-format endpoint, so the stream looks
@@ -71,11 +79,26 @@ pub(in crate::native) fn spawn(
             let ticket = super::SHOWN.show(slot, || {
                 crate::audio::pad_endpoint::set_visibility(&vis_id, pad, true)
             });
+            // One repair per streamer: a refused format gets the policy-API ladder on the
+            // endpoint this thread has just shown, then one more open.
+            let repaired = AtomicBool::new(false);
             pad_audio_thread(
                 conn,
                 pad,
                 kinds,
-                move || crate::audio::pad_capture::PadLoopbackCapturer::open(&endpoint_id),
+                move || {
+                    use crate::audio::pad_capture::{is_unsupported_format, PadLoopbackCapturer};
+                    match PadLoopbackCapturer::open(&endpoint_id) {
+                        Err(e)
+                            if is_unsupported_format(&e)
+                                && !repaired.swap(true, Ordering::SeqCst) =>
+                        {
+                            crate::audio::pad_endpoint::repair_shown(slot, &endpoint_id);
+                            PadLoopbackCapturer::open(&endpoint_id)
+                        }
+                        r => r,
+                    }
+                },
                 stop_t,
             );
             // Skipped once a newer streamer shows this endpoint: hiding it now would disable
