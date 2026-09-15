@@ -48,13 +48,6 @@ mod theme;
 mod update;
 mod webtransport;
 
-/// `library::plugin_launch` tests inject a stub plugin.
-#[cfg(test)]
-pub(crate) use plugins::register_ui_for_test;
-/// Loopback credential this process already holds for a library plugin.
-/// Re-exported so these two names are the only `mgmt` surface the library side uses.
-pub(crate) use plugins::ui_credential;
-
 /// Default management port — next to the GameStream block (47984…48010).
 ///
 /// Sunshine's web UI is also 47990, so a Sunshine fork and a GameStream-off

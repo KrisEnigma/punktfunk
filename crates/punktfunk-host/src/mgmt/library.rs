@@ -471,7 +471,7 @@ pub(crate) async fn reconcile_provider_entries(
             return api_error(StatusCode::BAD_REQUEST, &e);
         }
     }
-    if let Err(e) = crate::library::validate_provider_payload(&inputs) {
+    if let Err(e) = crate::library::validate_provider_payload(&provider, &inputs) {
         return api_error(StatusCode::BAD_REQUEST, &e);
     }
     // Check every entry: one privileged field anywhere is one command the host would run.

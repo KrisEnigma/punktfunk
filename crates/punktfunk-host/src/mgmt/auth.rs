@@ -216,10 +216,10 @@ fn bearer(req: &Request) -> Option<&str> {
 /// Library writes are in because a provider reconciles its own entries; `prep` and
 /// `launch.kind == "command"` are refused in the handlers via [`AuthLane`].
 ///
-/// Route reachability is not launch isolation. `PUT /plugins/{}` lets this lane register any
-/// id with the loopback port the host will dial, and `launch.kind == "plugin"` runs whatever
-/// that listener answers. The runner is one process on one token, so this gate cannot tell
-/// which plugin is calling. See [`crate::library::ask_plugin_launch`].
+/// Route reachability is not plugin identity: the runner is one process on one token, so this
+/// gate cannot tell which plugin is calling and any holder may write another's registration.
+/// What that no longer buys is a command — an `exec` entry resolves against the manifest of the
+/// package that declared the provider id (`plugins::manifest`), not against the caller.
 pub(crate) fn plugin_may_access(method: &Method, path: &str) -> bool {
     // (method, path); `{}` is exactly one segment. Grouped as the route table is.
     const ALLOWED: &[(&Method, &str)] = &[
