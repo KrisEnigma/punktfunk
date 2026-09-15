@@ -101,6 +101,9 @@ struct Record {
     /// Newest claim id on this record. An older session compares to learn
     /// its game now belongs to somebody else ([`Claim::superseded`]).
     claim: u64,
+    /// The host is ending this launch's game ([`ending`]). Held until
+    /// [`ended`] or a newer claim; meanwhile a claim spawns, never adopts.
+    ending: bool,
 }
 
 impl Record {
@@ -115,6 +118,7 @@ impl Record {
             holders: 1,
             released_at: None,
             claim,
+            ending: false,
         }
     }
 }
@@ -122,11 +126,12 @@ impl Record {
 /// Pure: caller supplies liveness, clock, and window. Identity is the
 /// record's key ([`key_for`]), not checked here. Liveness wins when it
 /// has an opinion; [`Liveness::Unknown`] falls through to a live holder
-/// (teardown overlapping redial) or [`IN_FLIGHT_WINDOW`].
+/// (teardown overlapping redial) or [`IN_FLIGHT_WINDOW`]. A launch the
+/// host is ending ([`ending`]) never covers: its process is on the way out.
 fn covers(rec: &Record, live: Liveness, now: Instant, window: Duration) -> bool {
     // Never launched: nothing to reclaim, and inheriting the stamp would
     // filter out every process (none started after it).
-    if !rec.launched {
+    if !rec.launched || rec.ending {
         return false;
     }
     match live {
@@ -251,6 +256,25 @@ fn is_other_running(rec: &Record, fp: &str, keep_game_id: Option<&str>, live: Li
         && live == Liveness::Running
 }
 
+/// The host is ending this launch's game ([`crate::gamelease::terminate`]).
+/// Until [`ended`], a claim on the record spawns instead of adopting a
+/// process on its way out. The record is found by its proc slot, which a
+/// newer claim replaces, so one already owned by a later session is untouched.
+pub fn ending(procs: &LiveProcs) {
+    let mut recs = reg().records.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(r) = recs.iter_mut().find(|r| Arc::ptr_eq(&r.procs, procs)) {
+        r.ending = true;
+    }
+}
+
+/// The ladder is through: drop the record so the next claim starts the
+/// title. Same identity as [`ending`], so a record a newer session took
+/// over meanwhile stays that session's.
+pub fn ended(procs: &LiveProcs) {
+    let mut recs = reg().records.lock().unwrap_or_else(|e| e.into_inner());
+    recs.retain(|r| !Arc::ptr_eq(&r.procs, procs));
+}
+
 /// Decide this session's launch plan and claim the record.
 ///
 /// `fresh_stamp` is this session's [`crate::gamelease::launch_clock`],
@@ -314,6 +338,7 @@ pub fn claim(
         rec.stamp = fresh_stamp;
         rec.procs = Arc::new(Mutex::new(Vec::new()));
         rec.launched = false;
+        rec.ending = false;
         rec.holders += 1;
         rec.released_at = None;
         rec.claim = id;
@@ -450,6 +475,7 @@ mod tests {
             holders,
             released_at,
             claim: 1,
+            ending: false,
         }
     }
 
@@ -678,5 +704,57 @@ mod tests {
         assert!(!anon.superseded());
         anon.launched(); // no-op
         anon.abandon(); // no-op
+    }
+
+    /// A launch the host is ending never covers, whatever liveness says.
+    #[test]
+    fn a_launch_being_ended_never_covers() {
+        let now = Instant::now();
+        let mut r = rec(true, 1, None);
+        assert!(covers(&r, Liveness::Running, now, IN_FLIGHT_WINDOW));
+        r.ending = true;
+        for live in [Liveness::Running, Liveness::Unknown, Liveness::Gone] {
+            assert!(!covers(&r, live, now, IN_FLIGHT_WINDOW));
+        }
+    }
+
+    /// Ending a launch: a claim during the term ladder starts the title afresh, and once
+    /// the ladder is through the record is gone. A record a newer session took over in the
+    /// meantime is that session's, and its own reconnect still adopts.
+    #[test]
+    fn ending_a_launch_hands_the_title_to_the_next_claim() {
+        let (fp, app) = (Some("fp-ending"), Some("custom:ending"));
+        let first = claim(fp, app, false, Some(100.0));
+        first.launched();
+        let procs = first.procs().expect("recorded");
+        ending(&procs);
+        let second = claim(fp, app, false, Some(900.0));
+        assert!(
+            second.must_spawn(),
+            "a title being ended must start afresh, not adopt"
+        );
+        second.launched();
+        // The ladder finishing must not take the second session's record with it.
+        ended(&procs);
+        drop(second);
+        let third = claim(fp, app, false, Some(950.0));
+        assert!(
+            !third.must_spawn(),
+            "the second session's launch is the one to adopt"
+        );
+        third.abandon();
+        drop(first);
+
+        // Nobody in between: the record goes, and the next claim spawns.
+        let app = Some("custom:ending-alone");
+        let only = claim(fp, app, false, Some(100.0));
+        only.launched();
+        let procs = only.procs().expect("recorded");
+        ending(&procs);
+        ended(&procs);
+        drop(only);
+        let next = claim(fp, app, false, Some(900.0));
+        assert!(next.must_spawn());
+        next.abandon();
     }
 }

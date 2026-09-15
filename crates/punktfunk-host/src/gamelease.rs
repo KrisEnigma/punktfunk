@@ -148,6 +148,9 @@ pub struct LeaseShared {
     /// to start time. Never cleared: every read re-verifies via
     /// [`crate::procscan::Scanner::alive`], so a recycled pid reads as gone.
     spawned: Option<crate::procscan::ProcRef>,
+    /// This launch's registry slot ([`crate::launchreg::LiveProcs`]): [`terminate`]
+    /// marks the record ending, then drops it. `None` if unrecorded.
+    procs: Option<crate::launchreg::LiveProcs>,
     /// Asked to end: a second request is a no-op, and the watcher's exit is
     /// not the player quitting.
     terminating: AtomicBool,
@@ -318,6 +321,7 @@ pub fn open(req: LeaseRequest, on_exit: OnExit) -> GameLease {
         launch_stamp,
         child: Mutex::new(owned),
         spawned,
+        procs: procs.clone(),
         terminating: AtomicBool::new(false),
         created_ms: now_ms(),
         was_running: AtomicBool::new(false),
@@ -455,6 +459,7 @@ fn watch(
     let mut seen_since: Option<Instant> = None;
     loop {
         if cancelled() {
+            reap_later(child.take());
             return;
         }
         // Spawned pid gone (no handle, no exit status). "Quick" alone means
@@ -607,6 +612,7 @@ fn watch(
             if let Some(run) = run.as_mut() {
                 run.flush();
             }
+            reap_later(child.take());
             return;
         }
         if matches!(kind, LeaseKind::Child) {
@@ -839,10 +845,18 @@ fn terminate_blocking(shared: &LeaseShared) {
             );
         }
         LeaseKind::Child | LeaseKind::Matched | LeaseKind::Reported => {
+            // A claim that lands while the ladder runs starts the title afresh; the
+            // record goes once the ladder is through, so no claim adopts a corpse.
+            if let Some(p) = &shared.procs {
+                crate::launchreg::ending(p);
+            }
             #[cfg(target_os = "linux")]
             unix_term_ladder(shared);
             #[cfg(windows)]
             windows_term_ladder(shared);
+            if let Some(p) = &shared.procs {
+                crate::launchreg::ended(p);
+            }
         }
         LeaseKind::Untracked => {}
     }
@@ -901,8 +915,36 @@ fn start_secs(p: crate::procscan::ProcRef) -> f64 {
     p.start as f64 / per_sec
 }
 
-/// SIGTERM, wait, SIGKILL. Re-verify start time immediately before each
-/// signal ([`crate::procscan::Scanner::alive`]).
+/// The session left but the game runs on: wait for the child on a thread of
+/// its own so it never lingers as a zombie under the host. One thread per
+/// unwatched game, gone with it.
+#[cfg(any(target_os = "linux", windows))]
+fn reap_later(child: Option<std::process::Child>) {
+    let Some(mut c) = child else {
+        return;
+    };
+    let _ = std::thread::Builder::new()
+        .name("pf1-childwait".into())
+        .spawn(move || {
+            let _ = c.wait();
+        });
+}
+
+/// Whether the host-spawned child is gone, reaping it when it has exited.
+/// `waitpid` answers for our own child only: already reaped elsewhere
+/// ([`reap_later`], the watcher's `try_wait`), or never ours, is gone too.
+#[cfg(target_os = "linux")]
+fn reap_child(owned: Option<OwnedChild>) -> bool {
+    let Some(c) = owned else {
+        return true;
+    };
+    let mut status = 0;
+    // SAFETY: WNOHANG never blocks; the only write is the status word handed in.
+    unsafe { libc::waitpid(c.pid as i32, &mut status, libc::WNOHANG) != 0 }
+}
+
+/// SIGTERM, wait, SIGKILL, reap. Targets are fixed at entry and re-verified
+/// by start time before each signal ([`crate::procscan::Scanner::alive`]).
 #[cfg(target_os = "linux")]
 fn unix_term_ladder(shared: &LeaseShared) {
     let scanner = crate::procscan::Scanner::system();
@@ -922,8 +964,10 @@ fn unix_term_ladder(shared: &LeaseShared) {
         // as leader (`OwnedChild::group_leader`) — never the host's group.
         unsafe { libc::kill(target, sig) == 0 }
     };
-    // Matcher hits plus `reported_proc` (the only member for Reported).
-    let targets = || {
+    // Matcher hits plus `reported_proc` (the only member for Reported). Taken
+    // once: a process that starts after this point belongs to a session that
+    // claimed the title while the ladder ran, and must outlive it.
+    let targets = {
         let mut procs = scanner.find(&shared.spec, shared.launch_stamp);
         if let Some(p) = reported_proc(shared) {
             if !procs.iter().any(|q| q.pid == p.pid) {
@@ -933,15 +977,19 @@ fn unix_term_ladder(shared: &LeaseShared) {
         procs
     };
     let signal_matched = |sig: i32| -> usize {
-        // Re-scan and re-verify immediately; a recycle since last sweep is out.
+        // Re-verify immediately; a recycle since last sweep is out.
         scanner
-            .alive(&targets())
+            .alive(&targets)
             .into_iter()
             // SAFETY: as above, for a single pid just re-verified as adopted.
             .filter(|p| unsafe { libc::kill(p.pid as i32, sig) == 0 })
             .count()
     };
     let signal_all = |sig: i32| -> usize { usize::from(signal_child(sig)) + signal_matched(sig) };
+    // Reaped (or never ours), and the group it led, if any, empty too. A zombie
+    // still answers signal 0; `waitpid` is what tells exited from present.
+    let child_gone =
+        || reap_child(owned) && !(owned.is_some_and(|c| c.group_leader) && signal_child(0));
 
     let asked = signal_all(libc::SIGTERM);
     tracing::debug!(
@@ -953,10 +1001,7 @@ fn unix_term_ladder(shared: &LeaseShared) {
     let deadline = Instant::now() + TERM_GRACE;
     while Instant::now() < deadline {
         std::thread::sleep(POLL);
-        let still = scanner.alive(&targets()).len();
-        // Signal 0 probes existence; failure means the child/group is gone.
-        let child_gone = !signal_child(0);
-        if still == 0 && child_gone {
+        if scanner.alive(&targets).is_empty() && child_gone() {
             tracing::info!(title = %shared.game.title, "the game closed when asked");
             return;
         }
@@ -968,6 +1013,14 @@ fn unix_term_ladder(shared: &LeaseShared) {
         grace_s = TERM_GRACE.as_secs(),
         "the game did not close when asked — killed it"
     );
+    // Kill lands within milliseconds. Unreaped, the child would sit as a zombie
+    // the registry counted as running until the host exited.
+    for _ in 0..20 {
+        if child_gone() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
 }
 
 /// WM_CLOSE, wait, then terminate. No `Child` on Windows; fold in
@@ -993,7 +1046,9 @@ fn windows_term_ladder(shared: &LeaseShared) {
         procs
     };
 
-    let pids: Vec<u32> = live().into_iter().map(|p| p.pid).collect();
+    // Taken once: a process started after this belongs to a newer session (as on Unix).
+    let targets = live();
+    let pids: Vec<u32> = targets.iter().map(|p| p.pid).collect();
     if pids.is_empty() {
         tracing::info!(title = %shared.game.title, "the game is already gone — nothing to end");
         return;
@@ -1010,13 +1065,13 @@ fn windows_term_ladder(shared: &LeaseShared) {
     let deadline = Instant::now() + TERM_GRACE;
     while Instant::now() < deadline {
         std::thread::sleep(POLL);
-        if live().is_empty() {
+        if scanner.alive(&targets).is_empty() {
             tracing::info!(title = %shared.game.title, "the game closed when asked");
             return;
         }
     }
     // Fresh (pid, creation) before kill: Windows recycles pids quickly.
-    let remaining: Vec<u32> = live().into_iter().map(|p| p.pid).collect();
+    let remaining: Vec<u32> = scanner.alive(&targets).into_iter().map(|p| p.pid).collect();
     let killed = crate::game_term::kill(&remaining);
     tracing::warn!(
         title = %shared.game.title,
@@ -2000,5 +2055,33 @@ mod tests {
             Box::new(|| {}),
         );
         assert_eq!(lease.shared().state(), GameState::Running);
+    }
+
+    /// The ladder reaps the child it ended. Unreaped, a zombie answered signal 0, so the
+    /// ladder waited the whole grace, and it read as alive to the launch registry, which
+    /// then adopted a corpse on every relaunch until a host restart (#1065).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_term_ladder_reaps_the_child() {
+        let child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn sleep");
+        let pid = child.id();
+        let mut r = req("custom:reap", DetectSpec::default(), false);
+        r.child = Some((child, false));
+        let lease = open(r, Box::new(|| {}));
+        let shared = lease.shared();
+        drop(lease); // the session left; the watcher hands the child to a waiter
+        let started = Instant::now();
+        terminate_blocking(&shared);
+        assert!(
+            started.elapsed() < TERM_GRACE,
+            "sleep dies on SIGTERM; no grace to wait out"
+        );
+        let mut status = 0;
+        // SAFETY: probing our own dead child with WNOHANG; ECHILD (reaped) is the pass.
+        let r = unsafe { libc::waitpid(pid as i32, &mut status, libc::WNOHANG) };
+        assert_eq!(r, -1, "the child must have been reaped");
     }
 }

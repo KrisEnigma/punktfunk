@@ -224,13 +224,18 @@ impl Scanner {
         false
     }
 
-    /// `/proc/<pid>/stat` field 22 (`starttime`). `comm` is parenthesized and may contain spaces
-    /// and parentheses, so fields are counted from the last `)`: the next token is field 3 (`state`),
-    /// which puts `starttime` at index 19 of the remainder.
+    /// `/proc/<pid>/stat` field 22 (`starttime`), or `None` for a zombie: the entry outlives the
+    /// process until its parent waits, and every caller means "gone" by then. `comm` is
+    /// parenthesized and may contain spaces and parentheses, so fields are counted from the last
+    /// `)`: the next token is field 3 (`state`), which puts `starttime` at index 19 of the remainder.
     fn start_ticks(&self, dir_path: &Path) -> Option<u64> {
         let stat = std::fs::read_to_string(dir_path.join("stat")).ok()?;
         let tail = &stat[stat.rfind(')')? + 1..];
-        tail.split_whitespace().nth(19)?.parse().ok()
+        let mut fields = tail.split_whitespace();
+        if matches!(fields.next()?, "Z" | "X") {
+            return None;
+        }
+        fields.nth(18)?.parse().ok()
     }
 }
 
@@ -258,6 +263,7 @@ mod tests {
     struct FakeProc {
         pid: u32,
         start: u64,
+        state: &'static str,
         exe: Option<PathBuf>,
         cmdline: Vec<&'static str>,
         environ: Vec<&'static str>,
@@ -268,10 +274,15 @@ mod tests {
             Self {
                 pid,
                 start,
+                state: "S",
                 exe: None,
                 cmdline: Vec::new(),
                 environ: Vec::new(),
             }
+        }
+        fn zombie(mut self) -> Self {
+            self.state = "Z";
+            self
         }
         fn exe(mut self, p: impl Into<PathBuf>) -> Self {
             self.exe = Some(p.into());
@@ -299,7 +310,7 @@ mod tests {
             // `starttime` is field 22: after the last `)`, index 0 is `state` (field 3), so it lands at 19.
             // Comm is hostile on purpose (`evil ) name`) — naive splitting on spaces would get this wrong.
             let mut tail = vec!["0".to_string(); 20];
-            tail[0] = "S".to_string();
+            tail[0] = p.state.to_string();
             tail[19] = p.start.to_string();
             std::fs::write(
                 dir.join("stat"),
@@ -641,5 +652,29 @@ mod tests {
         let s = scanner(td.path());
         assert_eq!(s.now_stamp(), Some(4321.5));
         assert_eq!(s.start_ticks(&td.path().join("80")), Some(1234));
+    }
+
+    /// A killed child nobody has waited on keeps its `/proc` entry as a zombie. It must read
+    /// as gone everywhere: a registry that counted it adopted a corpse on every relaunch (#1065).
+    #[test]
+    fn a_zombie_is_gone() {
+        let td = fake_proc_root(
+            100.0,
+            &[
+                FakeProc::new(7, 100).exe("/games/x/run"),
+                FakeProc::new(8, 100).exe("/games/x/run").zombie(),
+            ],
+        );
+        let s = scanner(td.path());
+        let spec = DetectSpec {
+            exe: Some("/games/x/run".into()),
+            ..Default::default()
+        };
+        assert_eq!(pids(s.find(&spec, None)), vec![7]);
+        let both = [
+            ProcRef { pid: 7, start: 100 },
+            ProcRef { pid: 8, start: 100 },
+        ];
+        assert_eq!(pids(s.alive(&both)), vec![7]);
     }
 }
