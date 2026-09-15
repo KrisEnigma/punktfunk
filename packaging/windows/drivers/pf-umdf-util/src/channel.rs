@@ -71,6 +71,16 @@ impl Default for ChannelClient {
     }
 }
 
+/// What [`ChannelClient::adopt`] made of a delivery.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Adopt {
+    Adopted,
+    /// `MapViewOfFile` refused: transient, retried on the next pump.
+    Unmapped,
+    /// Wrong magic or pad index: the host's mistake, not retried.
+    Rejected,
+}
+
 impl ChannelClient {
     pub const fn new() -> ChannelClient {
         ChannelClient {
@@ -156,7 +166,13 @@ impl ChannelClient {
                 .compare_exchange(cur, seq, Ordering::SeqCst, Ordering::SeqCst)
                 .is_ok()
         {
-            self.adopt(cfg, boot.load_u64(BOOT_OFF_DATA_HANDLE, Ordering::Relaxed));
+            // A map that fails under quota pressure is transient: give the seq back so the next
+            // pump retries. A section that fails validation is the host's mistake, kept consumed.
+            if self.adopt(cfg, boot.load_u64(BOOT_OFF_DATA_HANDLE, Ordering::Relaxed))
+                == Adopt::Unmapped
+            {
+                self.consumed_seq.store(cur, Ordering::SeqCst);
+            }
         }
         self.data()
     }
@@ -165,17 +181,17 @@ impl ChannelClient {
     /// carries our magic AND our pad index). On success we own the handle (adopt-on-success) and
     /// close it — the view keeps the section alive. On validation failure the handle is
     /// deliberately NOT closed: a tampered value could name an unrelated handle in our own table.
-    fn adopt(&self, cfg: &ChannelConfig, value: u64) {
+    fn adopt(&self, cfg: &ChannelConfig, value: u64) -> Adopt {
         let Some(view) = MappedView::from_handle_value(value, cfg.data_size)
             .or_else(|| MappedView::from_handle_value(value, cfg.min_data_size))
         else {
             if value != 0 {
                 (cfg.log)(&format!(
-                    "[{}] delivered DATA handle 0x{value:x} did not map — ignoring",
+                    "[{}] delivered DATA handle 0x{value:x} did not map — retrying next pump",
                     cfg.tag
                 ));
             }
-            return;
+            return Adopt::Unmapped;
         };
         let magic = view.load_u32(0, Ordering::Relaxed);
         let idx = view.load_u32(cfg.pad_index_off, Ordering::Relaxed);
@@ -187,7 +203,7 @@ impl ChannelClient {
                 cfg.tag
             ));
             // `view` drops here → unmapped; the handle stays open (see above).
-            return;
+            return Adopt::Rejected;
         }
         // The value resolved to OUR pad's section, so it is the handle the host duplicated for us —
         // we own it; the (about-to-be-leaked) view keeps the section alive after the close.
@@ -197,5 +213,6 @@ impl ChannelClient {
             "[{}] sealed pad channel mapped (index {want})",
             cfg.tag
         ));
+        Adopt::Adopted
     }
 }
