@@ -502,6 +502,8 @@ export type GetLibrary200 = ReadonlyArray<OperatorGameEntry>
 export const GetLibrary200 = Schema.Array(OperatorGameEntry)
 export type GetLibrary401 = ApiError
 export const GetLibrary401 = ApiError
+export type GetLibraryArtParams = { readonly "If-None-Match"?: string | null }
+export const GetLibraryArtParams = Schema.Struct({ "If-None-Match": Schema.optionalKey(Schema.Union([Schema.String, Schema.Null])) })
 export type GetLibraryArt401 = ApiError
 export const GetLibraryArt401 = ApiError
 export type GetLibraryArt404 = ApiError
@@ -1304,9 +1306,11 @@ export const make = (
     }))
   ),
     "getLibraryArt": (id, kind, options) => HttpClientRequest.get(`/api/v1/library/art/${id}/${kind}`).pipe(
+    HttpClientRequest.setHeaders({ "If-None-Match": options?.params?.["If-None-Match"] ?? undefined }),
     withResponse(options?.config)(HttpClientResponse.matchStatus({
       "401": decodeError("GetLibraryArt401", GetLibraryArt401),
       "404": decodeError("GetLibraryArt404", GetLibraryArt404),
+      "304": () => Effect.void,
       orElse: unexpectedStatus
     }))
   ),
@@ -2009,9 +2013,10 @@ readonly "getLibrary": <Config extends OperationConfig>(options: { readonly para
 * Resolves `kind` (`portrait` | `hero` | `logo` | `header`) for a catalog id and returns
 * the local file bytes. Unknown id or kind is 404 so the client can try the next candidate.
 * Remote `http(s)` art is fetched by the client; this proxy exists for launcher cover
-* caches on the host disk.
+* caches on the host disk. The response carries `Cache-Control` and an `ETag` of the
+* bytes; a request whose `If-None-Match` names that tag gets 304 with no body.
 */
-readonly "getLibraryArt": <Config extends OperationConfig>(id: string, kind: string, options: { readonly config?: Config | undefined } | undefined) => Effect.Effect<WithOptionalResponse<void, Config>, HttpClientError.HttpClientError | SchemaError | PunktfunkError<"GetLibraryArt401", typeof GetLibraryArt401.Type> | PunktfunkError<"GetLibraryArt404", typeof GetLibraryArt404.Type>>
+readonly "getLibraryArt": <Config extends OperationConfig>(id: string, kind: string, options: { readonly params?: typeof GetLibraryArtParams.Encoded | undefined; readonly config?: Config | undefined } | undefined) => Effect.Effect<WithOptionalResponse<void, Config>, HttpClientError.HttpClientError | SchemaError | PunktfunkError<"GetLibraryArt401", typeof GetLibraryArt401.Type> | PunktfunkError<"GetLibraryArt404", typeof GetLibraryArt404.Type>>
   /**
 * A user-curated entry. The host assigns a stable id, returned in the body.
 */

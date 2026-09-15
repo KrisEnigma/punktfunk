@@ -1820,7 +1820,7 @@
           "library"
         ],
         "summary": "Stream one cover-art image for a library entry.",
-        "description": "Resolves `kind` (`portrait` | `hero` | `logo` | `header`) for a catalog id and returns\nthe local file bytes. Unknown id or kind is 404 so the client can try the next candidate.\nRemote `http(s)` art is fetched by the client; this proxy exists for launcher cover\ncaches on the host disk.",
+        "description": "Resolves `kind` (`portrait` | `hero` | `logo` | `header`) for a catalog id and returns\nthe local file bytes. Unknown id or kind is 404 so the client can try the next candidate.\nRemote `http(s)` art is fetched by the client; this proxy exists for launcher cover\ncaches on the host disk. The response carries `Cache-Control` and an `ETag` of the\nbytes; a request whose `If-None-Match` names that tag gets 304 with no body.",
         "operationId": "getLibraryArt",
         "parameters": [
           {
@@ -1840,6 +1840,18 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "name": "If-None-Match",
+            "in": "header",
+            "description": "An `ETag` from an earlier response",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
           }
         ],
         "responses": {
@@ -1848,6 +1860,9 @@
             "content": {
               "image/jpeg": {}
             }
+          },
+          "304": {
+            "description": "The tag in `If-None-Match` is current"
           },
           "401": {
             "description": "Missing or invalid credentials",
