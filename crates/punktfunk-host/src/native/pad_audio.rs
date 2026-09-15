@@ -39,6 +39,45 @@ mod plat {
 }
 pub(super) use plat::spawn;
 
+/// Newest streamer per OS slot, keyed by the endpoint it shows. A quiet capturer wakes up to
+/// 5 s after its stop, by which time the next session may be capturing the same endpoint; a
+/// hide then would disable it under that capture. So a streamer hides only while it is still
+/// the newest, and show/hide run under the slot's lock so they cannot interleave.
+#[cfg(any(target_os = "windows", test))]
+pub(super) struct ShowGen([std::sync::Mutex<u32>; punktfunk_core::input::MAX_PADS]);
+
+#[cfg(any(target_os = "windows", test))]
+impl ShowGen {
+    pub(super) const fn new() -> Self {
+        Self([const { std::sync::Mutex::new(0) }; punktfunk_core::input::MAX_PADS])
+    }
+
+    /// Run `show` as the slot's newest streamer; the returned generation is its ticket.
+    pub(super) fn show(&self, slot: u8, show: impl FnOnce()) -> u32 {
+        let mut newest = self.0[slot as usize]
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        *newest += 1;
+        show();
+        *newest
+    }
+
+    /// Run `hide` only if `ticket` is still the slot's newest streamer.
+    pub(super) fn hide_if_newest(&self, slot: u8, ticket: u32, hide: impl FnOnce()) -> bool {
+        let newest = self.0[slot as usize]
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if *newest != ticket {
+            return false;
+        }
+        hide();
+        true
+    }
+}
+
+#[cfg(any(target_os = "windows", test))]
+pub(super) static SHOWN: ShowGen = ShowGen::new();
+
 /// [`stop`](PadAudioHandle::stop) flags and joins; [`signal`](PadAudioHandle::signal) only flags
 /// so the input thread can overlap joins instead of serializing the ~5 s quiet-endpoint timeout.
 pub(super) struct PadAudioHandle {
@@ -90,5 +129,27 @@ mod tests {
         // provisioning legs are environment-dependent — not unit-tested here).
         assert!(!host_cap(0));
         assert!(!host_cap(punktfunk_core::quic::CLIENT_CAP_CURSOR));
+    }
+}
+
+#[cfg(test)]
+mod show_gen_tests {
+    use super::ShowGen;
+    use std::cell::Cell;
+
+    /// The old streamer wakes after the new one showed the endpoint: its hide must not run.
+    #[test]
+    fn a_superseded_streamer_leaves_the_endpoint_shown() {
+        let lease = ShowGen::new();
+        let hidden = Cell::new(0);
+        let old = lease.show(0, || {});
+        let new = lease.show(0, || {});
+        assert!(!lease.hide_if_newest(0, old, || hidden.set(hidden.get() + 1)));
+        assert_eq!(hidden.get(), 0, "a stale ticket ran the hide");
+        assert!(lease.hide_if_newest(0, new, || hidden.set(hidden.get() + 1)));
+        assert_eq!(hidden.get(), 1);
+        // Slots are independent, and the plain order still hides.
+        let other = lease.show(1, || {});
+        assert!(lease.hide_if_newest(1, other, || {}));
     }
 }

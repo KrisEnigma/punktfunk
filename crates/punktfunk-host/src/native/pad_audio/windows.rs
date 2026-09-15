@@ -68,7 +68,9 @@ pub(in crate::native) fn spawn(
             // Park HIDDEN with no pad attached: a visible idle "Wireless Controller" speaker
             // makes libScePad titles take the DualSense-haptics path against an unserviced
             // endpoint. Show only for this pad's lifetime; backoff absorbs audiosrv re-activate.
-            crate::audio::pad_endpoint::set_visibility(&vis_id, pad, true);
+            let ticket = super::SHOWN.show(slot, || {
+                crate::audio::pad_endpoint::set_visibility(&vis_id, pad, true)
+            });
             pad_audio_thread(
                 conn,
                 pad,
@@ -76,7 +78,11 @@ pub(in crate::native) fn spawn(
                 move || crate::audio::pad_capture::PadLoopbackCapturer::open(&endpoint_id),
                 stop_t,
             );
-            crate::audio::pad_endpoint::set_visibility(&vis_id, pad, false);
+            // Skipped once a newer streamer shows this endpoint: hiding it now would disable
+            // it under that streamer's capture (`ShowGen`).
+            super::SHOWN.hide_if_newest(slot, ticket, || {
+                crate::audio::pad_endpoint::set_visibility(&vis_id, pad, false)
+            });
         }) {
         Ok(join) => Some(PadAudioHandle {
             stop,
