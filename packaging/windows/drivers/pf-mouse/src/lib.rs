@@ -349,10 +349,12 @@ extern "C" fn evt_timer(timer: WDFTIMER) {
         let st = request.copy_to_output(&report);
         request.complete(st);
     } else {
-        // A malformed publish (host bug / torn first write): don't feed hidclass garbage — repend
-        // by completing nothing this tick. The request was already retrieved, so complete it with
-        // the last good report instead of dropping it on the floor.
-        let report = INPUT_REPORT.lock().map(|g| *g).unwrap_or(NEUTRAL_REPORT);
+        // A malformed publish (host bug / torn first write): the request is already retrieved,
+        // so answer with the last good report, its relative wheel and pan zeroed — replayed,
+        // they would scroll twice.
+        let mut report = INPUT_REPORT.lock().map(|g| *g).unwrap_or(NEUTRAL_REPORT);
+        report[6] = 0;
+        report[7] = 0;
         let st = request.copy_to_output(&report);
         request.complete(st);
     }
