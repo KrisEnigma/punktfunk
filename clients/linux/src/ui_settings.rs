@@ -917,10 +917,10 @@ fn gamescope_session() -> bool {
         || pf_client_core::gamescope::under_gamescope()
 }
 
-type ChangedFn = Rc<RefCell<Vec<Box<dyn Fn(u32)>>>>;
+type ChangedFn = Rc<RefCell<Vec<Rc<dyn Fn(u32)>>>>;
 
 /// The weak half of a [`ChangedFn`], held by [`RowRestore`].
-type ChangedWeak = std::rc::Weak<RefCell<Vec<Box<dyn Fn(u32)>>>>;
+type ChangedWeak = std::rc::Weak<RefCell<Vec<Rc<dyn Fn(u32)>>>>;
 
 /// A titled single-choice preference row. On a desktop this is a stock popover
 /// [`adw::ComboRow`]; under gamescope (see [`gamescope_session`]) it becomes an activatable
@@ -963,7 +963,10 @@ impl ChoiceRow {
             let (sel, chg) = (selected.clone(), changed.clone());
             row.connect_selected_notify(move |r| {
                 if sel.replace(r.selected()) != r.selected() {
-                    for f in chg.borrow().iter() {
+                    // Cloned out first: a handler may park the list (`restore_selected`),
+                    // which needs the cell free while the loop runs.
+                    let fns: Vec<Rc<dyn Fn(u32)>> = chg.borrow().clone();
+                    for f in &fns {
                         f(r.selected());
                     }
                 }
@@ -1083,8 +1086,9 @@ impl ChoiceRow {
             // the combo branch gets for free — a per-row Reset reverts through here, and the
             // rows whose caption or visibility follow this one are updated by these handlers.
             if moved {
-                let fns = self.changed.borrow();
-                for f in fns.iter() {
+                // Cloned out first, for the same reason as the combo notify above.
+                let fns: Vec<Rc<dyn Fn(u32)>> = self.changed.borrow().clone();
+                for f in &fns {
                     f(i);
                 }
             }
@@ -1092,7 +1096,7 @@ impl ChoiceRow {
     }
 
     fn connect_changed(&self, f: impl Fn(u32) + 'static) {
-        self.changed.borrow_mut().push(Box::new(f));
+        self.changed.borrow_mut().push(Rc::new(f));
     }
 
     /// A handle for putting this row's selection back from inside its own handler. The Rc
@@ -2763,5 +2767,34 @@ mod tests {
                 .as_deref(),
             Some("combo caption")
         );
+    }
+
+    /// A handler that puts the row back (`restore_selected`, behind "New preset…") runs
+    /// inside the dispatch loop, so the loop must not keep the handler list borrowed while
+    /// it runs — that was a "RefCell already borrowed" abort (#1070). Both modes.
+    #[test]
+    #[ignore = "needs a Wayland/X display"]
+    fn choice_row_handler_may_restore_selection() {
+        assert!(gtk::init().is_ok() && adw::init().is_ok(), "no display");
+        let dialog = adw::PreferencesDialog::new();
+        for inline in [true, false] {
+            let row = ChoiceRow::new(&dialog, inline, "Editing", "sub", &["Global", "New…"]);
+            let restore = row.restorer();
+            let fired = Rc::new(Cell::new(0u32));
+            let f = fired.clone();
+            row.connect_changed(move |i| {
+                f.set(f.get() + 1);
+                if i == 1 {
+                    restore_selected(&restore, 0);
+                }
+            });
+            row.set_selected(1);
+            assert_eq!(fired.get(), 1, "inline={inline}: the handler ran once");
+            assert_eq!(
+                row.selected(),
+                0,
+                "inline={inline}: restored without a re-dispatch"
+            );
+        }
     }
 }
