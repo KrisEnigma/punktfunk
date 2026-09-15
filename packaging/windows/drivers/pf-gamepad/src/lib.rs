@@ -158,7 +158,7 @@ static DS_FEATURE_FIRMWARE: [u8; 64] = [ // 0x20 firmware info; bytes 44..46 = u
 ];
 
 // ---- DualShock 4 v2 assets (served when the host stamps device_type=1) ----
-// Sony DualShock 4 v2 USB HID report descriptor (507 bytes), verbatim from inject/dualshock4.rs.
+// DualShock 4 v2 USB report descriptor (507 bytes), verbatim from dualshock4_proto.rs.
 #[rustfmt::skip]
 static DS4_RDESC: [u8; 507] = [
     0x05, 0x01, 0x09, 0x05, 0xA1, 0x01, 0x85, 0x01, 0x09, 0x30, 0x09, 0x31,
@@ -210,27 +210,23 @@ static DS4_RDESC: [u8; 507] = [
 static DS4_FEATURE_PAIRING: [u8; 16] = [ // 0x12 pairing info (MAC at bytes 1..7)
     0x12, 0x01, 0x00, 0xEF, 0xBE, 0xAD, 0xDE, 0x08, 0x25, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 ];
-// 0x02 IMU calibration. A consumer (SDL's `SDL_hidapi_ps4`, or `hid-playstation` when this pad
-// is read on Linux) DERIVES its motion scale from these words rather than assuming one: gyro
-// resolution = (|pitch_plus| + |pitch_minus|) / (speed_plus + speed_minus) LSB per °/s, accel
-// resolution = (acc_plus - acc_minus) / 2 LSB per g. So this blob is where the wire contract
-// (20 LSB/°·s, 10000 LSB/g) is declared on the DS4 device type, and it must state exactly what
-// the wire delivers — the pre-2026-08 values (±16 / speed 32 / ±8192) declared 0.5 LSB/°·s and
-// 8192 LSB/g, i.e. every DS4 session read gyro 40× too fast and accel 1.22× hot.
-// Mirrors inject/proto/dualshock4_proto.rs DS4_FEATURE_CALIBRATION; this WDK workspace can't
-// depend on pf-inject, so pf-inject's `motion_contract` test parses THIS file and re-derives the
-// units from it. Keep the two in sync.
+// 0x02 IMU calibration. SDL and hid-playstation DERIVE motion scale from these words:
+// gyro = (|pitch+| + |pitch-|) / (speed+ + speed-) LSB per °/s, accel = (acc+ - acc-) / 2
+// LSB per g. Must state the wire contract (20 LSB/°·s, 10000 LSB/g). Byte copy of
+// dualshock4_proto.rs; motion_contract parses THIS file and re-derives the units.
 #[rustfmt::skip]
 static DS4_FEATURE_CALIBRATION: [u8; 37] = [
     0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x27, 0xF0, 0xD8, 0x10, 0x27, 0xF0, 0xD8, 0x10,
     0x27, 0xF0, 0xD8, 0xF4, 0x01, 0xF4, 0x01, 0x10, 0x27, 0xF0, 0xD8, 0x10, 0x27, 0xF0, 0xD8, 0x10,
     0x27, 0xF0, 0xD8, 0x00, 0x00,
 ];
+// 0xa3 firmware/build info: hw_version le16 at [35] = 0xA000, fw_version at [41] = 0x0100.
+// Byte copy of dualshock4_proto.rs (motion_contract pins it).
 #[rustfmt::skip]
-static DS4_FEATURE_FIRMWARE: [u8; 49] = [ // 0xa3 firmware/build info
+static DS4_FEATURE_FIRMWARE: [u8; 49] = [
     0xA3, 0x41, 0x75, 0x67, 0x20, 0x20, 0x33, 0x20, 0x32, 0x30, 0x31, 0x33, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x30, 0x37, 0x3A, 0x30, 0x31, 0x3A, 0x31, 0x32, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0xA0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0xA0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00,
 ];
 
@@ -593,6 +589,11 @@ const NEUTRAL_REPORT: [u8; 64] = {
     r[4] = 0x80; // RY
     // r[5]=L2, r[6]=R2 = 0; r[7] = seq counter = 0
     r[8] = 0x08; // buttons[0]: low nibble = dpad hat (8 = neutral), high nibble = face buttons (0)
+    // Touch contacts lifted (bit 7). SDL keys touch on that bit alone, so a zero byte is a
+    // finger held at (0, 0) until the host attaches.
+    r[33] = 0x80;
+    r[37] = 0x80;
+    r[53] = 0x0A; // battery: discharging, full — zero reads as ~5 %
     r
 };
 // Neutral DualShock 4 input report 0x01: sticks centered (0x80); the dpad hat is in byte 5 (low
@@ -605,6 +606,10 @@ const DS4_NEUTRAL_REPORT: [u8; 64] = {
     r[3] = 0x80; // RX
     r[4] = 0x80; // RY
     r[5] = 0x08; // buttons[0]: low nibble = dpad hat (8 = neutral), high nibble = face buttons (0)
+    r[30] = 0x1B; // status: cable + battery 11 = wired, full — zero reads as 0 % on battery
+    r[33] = 1; // one touch frame, both contacts lifted (bit 7) — see NEUTRAL_REPORT
+    r[35] = 0x80;
+    r[39] = 0x80;
     r
 };
 // Neutral Steam Deck input frame (unnumbered): header [0x01, 0x00, ID_CONTROLLER_DECK_STATE=0x09,
@@ -1400,8 +1405,8 @@ fn on_get_string(request: &Request) -> NTSTATUS {
     let devtype = device_type();
     dbglog!("[pf-gamepad] GET_STRING id=0x{string_id:04x} (raw 0x{id_val:08x}) devtype={devtype}");
     let s: String = match string_id {
+        // DualShock 4 v2 (09CC) reports the SIE name too; "Sony Computer" was the v1 (05C4).
         0 | 0x000e => match devtype {
-            1 => "Sony Computer Entertainment".into(),
             3 | 7 => "Valve Software".into(),
             4..=6 => "Microsoft".into(),
             _ => "Sony Interactive Entertainment".into(),
