@@ -856,6 +856,7 @@ fn run_inner(mut opts: SessionOpts, mut mode: ModeCtl) -> Result<Option<Outcome>
                     }
                 }
                 Event::KeyDown {
+                    keycode,
                     scancode: Some(sc),
                     keymod,
                     repeat: false,
@@ -864,8 +865,11 @@ fn run_inner(mut opts: SessionOpts, mut mode: ModeCtl) -> Result<Option<Outcome>
                     let chord = keymod.intersects(Mod::LCTRLMOD | Mod::RCTRLMOD)
                         && keymod.intersects(Mod::LALTMOD | Mod::RALTMOD)
                         && keymod.intersects(Mod::LSHIFTMOD | Mod::RSHIFTMOD);
-                    use sdl3::keyboard::Scancode;
-                    if chord && sc == Scancode::Q {
+                    use sdl3::keyboard::{Keycode, Scancode};
+                    // The letter the layout prints on the key (AZERTY's Q sits on Scancode::A),
+                    // or the physical position for a layout that has no such letter.
+                    let key = |k: Keycode, s: Scancode| keycode == Some(k) || sc == s;
+                    if chord && key(Keycode::Q, Scancode::Q) {
                         if let Some(cap) = stream.as_mut().and_then(|s| s.capture.as_mut()) {
                             if cap.captured() {
                                 cap.release(true);
@@ -893,7 +897,7 @@ fn run_inner(mut opts: SessionOpts, mut mode: ModeCtl) -> Result<Option<Outcome>
                     }
                     // Mouse model flip. Applies immediately when engaged; a released
                     // stream just changes what the next engage does.
-                    if chord && sc == Scancode::M {
+                    if chord && key(Keycode::M, Scancode::M) {
                         if let Some(st) = stream.as_mut() {
                             let mut flipped = false;
                             if let Some(cap) = st.capture.as_mut() {
@@ -926,7 +930,7 @@ fn run_inner(mut opts: SessionOpts, mut mode: ModeCtl) -> Result<Option<Outcome>
                         }
                         continue;
                     }
-                    if chord && sc == Scancode::D {
+                    if chord && key(Keycode::D, Scancode::D) {
                         if let Some(st) = &mut stream {
                             tracing::info!("chord: disconnect");
                             st.request_quit();
@@ -934,14 +938,14 @@ fn run_inner(mut opts: SessionOpts, mut mode: ModeCtl) -> Result<Option<Outcome>
                         }
                         continue;
                     }
-                    if chord && sc == Scancode::S {
+                    if chord && key(Keycode::S, Scancode::S) {
                         bump_stats_tier(&mut stats_verbosity, &mut stream);
                         tracing::info!(tier = ?stats_verbosity, "chord: stats verbosity");
                         continue;
                     }
                     // Quick-action ring at the window centre (a locked pointer has no
                     // position worth opening at).
-                    if chord && sc == Scancode::O {
+                    if chord && key(Keycode::O, Scancode::O) {
                         if let (Some(o), true) = (overlay.as_mut(), stream.is_some()) {
                             let (pw, ph) = window.size_in_pixels();
                             o.ring_input(RingInput::Toggle {
@@ -954,7 +958,7 @@ fn run_inner(mut opts: SessionOpts, mut mode: ModeCtl) -> Result<Option<Outcome>
                     // Mic mute — per session, never persisted. The uplink keeps running;
                     // only sending stops. A session with no mic says so instead of
                     // swallowing the chord.
-                    if chord && sc == Scancode::V {
+                    if chord && key(Keycode::V, Scancode::V) {
                         if let Some(st) = &stream {
                             match st.handle.mic.toggle() {
                                 Some(muted) => tracing::info!(muted, "chord: microphone mute"),
