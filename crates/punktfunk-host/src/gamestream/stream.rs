@@ -254,6 +254,7 @@ fn run(
                 compositor: Some(compositor),
                 route: gamescope_route.clone(),
                 isolation: None,
+                audio_sink: Default::default(),
             },
         );
         tracing::info!(

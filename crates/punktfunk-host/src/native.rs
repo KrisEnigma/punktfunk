@@ -1883,6 +1883,8 @@ pub(crate) async fn run_admitted(
     }
 
     // Mode-conflict admission: later clients see this identity + mode + stop (and may `steal`).
+    // The audio thread publishes the sink it captures here, for a joiner to tap.
+    let audio_sink: Arc<std::sync::Mutex<Option<String>>> = Default::default();
     let _live_guard = {
         let id = conn.peer_fingerprint();
         let label = id
@@ -1909,6 +1911,7 @@ pub(crate) async fn run_admitted(
                 isolation: isolation.clone(),
                 #[cfg(not(target_os = "linux"))]
                 isolation: None,
+                audio_sink: audio_sink.clone(),
             },
         )
     };
@@ -1929,15 +1932,32 @@ pub(crate) async fn run_admitted(
             channels,
             audio_plane.layout,
         );
-        // Isolated session captures its own named sink; `None` is the shared path.
+        // Isolated session captures its own named sink; `None` is the shared path. A joiner
+        // taps the owner's sink either way: its isolated one, or the one the owner published.
         #[cfg(target_os = "linux")]
         let iso_sink = isolation.as_ref().and_then(|i| i.sink.clone());
         #[cfg(not(target_os = "linux"))]
-        let iso_sink = None;
+        let iso_sink: Option<String> = None;
+        let sink = iso_sink.or_else(|| {
+            joined
+                .as_ref()
+                .and_then(|(d, _)| d.audio_sink.lock().unwrap().clone())
+        });
+        let published = audio_sink.clone();
         std::thread::Builder::new()
             .name("punktfunk1-audio".into())
             .spawn(move || {
-                audio_thread(conn, stop, cap, channels, budget, audio_plane, iso_sink, join_live)
+                audio_thread(
+                    conn,
+                    stop,
+                    cap,
+                    channels,
+                    budget,
+                    audio_plane,
+                    sink,
+                    join_live,
+                    published,
+                )
             })
             .map_err(|e| tracing::warn!(error = %e, "audio thread spawn failed — session continues without audio"))
             .ok()
