@@ -84,9 +84,12 @@ impl ksni::Tray for HostTray {
         vec![dot_icon(22, rgb), dot_icon(48, rgb)]
     }
 
+    // Bars that pin tray items key on this title (Noctalia 4.x), so it never changes;
+    // the live status goes in the description, where the SNI spec puts detail.
     fn tool_tip(&self) -> ksni::ToolTip {
         ksni::ToolTip {
-            title: self.status.headline(),
+            title: self.title(),
+            description: self.status.headline(),
             ..Default::default()
         }
     }
