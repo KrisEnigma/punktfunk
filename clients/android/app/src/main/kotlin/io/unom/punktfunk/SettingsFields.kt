@@ -26,15 +26,6 @@ internal object SettingsFields {
             overlay({ it.hz }, { o, v -> o.copy(hz = v) }), prefsKey = "hz"),
         // Qualifiers on the safe-area resolution. `android.` keys, so they ride the console
         // document's `Settings::extra` rather than needing a row in the shared shell.
-        field("safeAreaClearCorners", "android.safe_area_clear_corners", BoolKind,
-            { it.safeAreaClearCorners }, { s, v -> s.copy(safeAreaClearCorners = v) },
-            prefsKey = "safe_area_clear_corners"),
-        field("safeAreaLeftPx", "android.safe_area_left_px", IntKind,
-            { it.safeAreaLeftPx }, { s, v -> s.copy(safeAreaLeftPx = v) },
-            prefsKey = "safe_area_left_px"),
-        field("safeAreaRightPx", "android.safe_area_right_px", IntKind,
-            { it.safeAreaRightPx }, { s, v -> s.copy(safeAreaRightPx = v) },
-            prefsKey = "safe_area_right_px"),
         field("bitrateKbps", "bitrate_kbps", IntKind, { it.bitrateKbps }, { s, v -> s.copy(bitrateKbps = v) },
             overlay({ it.bitrateKbps }, { o, v -> o.copy(bitrateKbps = v) })),
         field("renderScale", "render_scale", DoubleKind, { it.renderScale }, { s, v -> s.copy(renderScale = v) },

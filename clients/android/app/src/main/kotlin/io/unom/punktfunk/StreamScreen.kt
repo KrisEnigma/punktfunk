@@ -569,7 +569,7 @@ fun StreamScreen(session: ActiveSession, onSessionEnded: (SessionEndReason) -> U
     // side, so the box it lands in is the safe rectangle rather than the whole width: a hole on one
     // side would otherwise sit over a picture centred in the other. Absolute, not start/end — the
     // cutout's sides are physical, and an RTL layout must not swap them.
-    val safe = if (initialSettings.width == SAFE_AREA_MODE) displaySafeInsets(context, initialSettings) else null
+    val safe = if (initialSettings.width == SAFE_AREA_MODE) displaySafeInsets(context) else null
     Column(modifier = Modifier.fillMaxSize().background(Color.Black).onSizeChanged { rootSize = it }) {
         Box(
             modifier = Modifier
