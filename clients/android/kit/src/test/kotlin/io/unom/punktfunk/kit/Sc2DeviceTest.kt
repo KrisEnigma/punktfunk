@@ -204,6 +204,29 @@ class Sc2DeviceTest {
     }
 
     @Test
+    fun `a rumble frame lands on the offsets the host reads back`() {
+        // `triton_proto::parse_triton_rumble` reads left.speed at 4 and right.speed at 7 of a
+        // 10-byte frame — the gain byte between them is what makes the two offsets uneven.
+        val frame = Sc2Device.rumbleFrame(0x1234, 0x5678)
+        assertEquals(10, frame.size)
+        assertEquals(0x80, frame[0].toInt() and 0xFF)
+        assertEquals(0x34, frame[4].toInt() and 0xFF)
+        assertEquals(0x12, frame[5].toInt() and 0xFF)
+        assertEquals(0x78, frame[7].toInt() and 0xFF)
+        assertEquals(0x56, frame[8].toInt() and 0xFF)
+        // Zero speeds are the stop frame: same id and intensity, both motors at rest.
+        val stop = Sc2Device.rumbleFrame(0, 0)
+        assertEquals(0x80, stop[0].toInt() and 0xFF)
+        assertArrayEquals(ByteArray(6), stop.copyOfRange(4, 10))
+        // Full length declared, so the BLE leg writes all nine payload bytes to B5.
+        val write = Sc2Device.outputWrite(frame)!!
+        assertEquals("100f6cb5-1735-4313-b402-38567131e5f3", write.charUuid)
+        assertEquals(9, write.payload.size)
+        // And the USB leg coalesces it, because a level supersedes the level before it.
+        assertEquals(OutReportQueue.KEY_RUMBLE, Sc2Device.outputCoalesceKey(frame))
+    }
+
+    @Test
     fun `an output write drops an old host's 64-byte padding`() {
         // Current hosts pre-trim each frame; an older one pads to 64 B. The write must carry
         // exactly the declared stripped length either way.

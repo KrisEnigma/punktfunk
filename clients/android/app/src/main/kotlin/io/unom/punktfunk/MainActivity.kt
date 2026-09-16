@@ -511,6 +511,12 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    /**
+     * Buzz the captured SC2's own grip motors — the rumble test for a pad the input stack cannot
+     * see, so [testRumble] has no `InputDevice` to reach for. False when nothing is captured.
+     */
+    fun testSc2Rumble(): Boolean = sc2Menu?.testRumble() == true
+
     /** Release the menu-time SC2 capture (backgrounded / stream taking over). Idempotent. */
     fun stopSc2MenuNav() {
         sc2Menu?.stop()

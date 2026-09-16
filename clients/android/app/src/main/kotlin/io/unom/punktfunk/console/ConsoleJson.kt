@@ -304,6 +304,8 @@ internal object ConsoleJson {
         val pref: Int,
         val detail: String,
         val forwarded: Boolean,
+        /** Its own transport can buzz it — without this the console's row reads "No rumble". */
+        val rumble: Boolean,
     )
 
     /**
@@ -356,7 +358,7 @@ internal object ConsoleJson {
                     .put("steam_virtual", false)
                     .put("detail", e.detail)
                     .put("forwarded", e.forwarded)
-                    .put("rumble", false)
+                    .put("rumble", e.rumble)
                     .put("battery", JSONObject.NULL),
             )
         }
