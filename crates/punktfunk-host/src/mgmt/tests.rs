@@ -2385,8 +2385,8 @@ async fn display_settings_surface() {
     );
 }
 
-/// `/host/settings`: a PATCH stores, `null` resets, a refused value writes nothing and names
-/// the setting, and an env value locks a row while the console's value survives underneath.
+/// `/host/settings`: a PATCH stores, `null` resets, and a refused value writes nothing and names
+/// the setting. Env beating the store is `pf-host-config`'s test, against a fake environment.
 /// Uses only restart-class rows, so a concurrent session test never sees a changed value.
 #[allow(clippy::await_holding_lock)]
 #[tokio::test]
@@ -2457,19 +2457,6 @@ async fn host_settings_surface() {
         true,
         "a refused patch writes nothing"
     );
-
-    // SAFETY: `dir` holds CONFIG_DIR_TEST_LOCK; only this test sets the variable, and the host
-    // name is read at startup, which no test in this binary runs.
-    unsafe { std::env::set_var("PUNKTFUNK_HOST_NAME", "Pinned") };
-    pf_host_config::reload();
-    let (_, body) = send(&app, get_req("/api/v1/host/settings")).await;
-    let name = row(&body, "host_name");
-    assert_eq!(name["value"], "Pinned");
-    assert_eq!(name["source"], "env");
-    assert_eq!(name["origin"], "PUNKTFUNK_HOST_NAME");
-    assert_eq!(name["stored"], "Den");
-    // SAFETY: as above.
-    unsafe { std::env::remove_var("PUNKTFUNK_HOST_NAME") };
 
     let (status, body) = send(
         &app,

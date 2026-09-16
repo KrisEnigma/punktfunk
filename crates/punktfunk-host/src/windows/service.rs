@@ -296,9 +296,6 @@ fn run_service() -> Result<()> {
     // Before the warner thread: `load_host_env` mutates the process env; the warner's child
     // snapshots it.
     load_host_env();
-    // SAFETY: still single-threaded, as for `load_host_env` above. Tells the host child a
-    // restart request is answered (`crate::power::RESTART_EXIT_CODE`).
-    unsafe { std::env::set_var("PUNKTFUNK_SERVICE_CHILD", "1") };
 
     // Own thread: `Get-NetConnectionProfile` is slow and must not delay the host.
     std::thread::spawn(warn_if_public_network);
@@ -570,7 +567,13 @@ unsafe fn spawn_host(
     let _ = unsafe { CreateEnvironmentBlock(&mut env_block, Some(primary), false) };
     // SAFETY: `env_block` is either still null (the call above failed) or the double-null-terminated
     // UTF-16 block `CreateEnvironmentBlock` just wrote — exactly the two states the helper accepts.
-    let merged = unsafe { crate::interactive::merged_env_block(env_block as *const u16, false) };
+    let mut merged =
+        unsafe { crate::interactive::merged_env_block(env_block as *const u16, false) };
+    // Tells the host a restart request is answered (`crate::power::RESTART_EXIT_CODE`). The block
+    // ends in its terminating NUL; the entry goes before it.
+    merged.pop();
+    merged.extend("PUNKTFUNK_SERVICE_CHILD=1".encode_utf16());
+    merged.extend([0, 0]);
     if !env_block.is_null() {
         // SAFETY: `env_block` is the live block from the call above, destroyed exactly once and not
         // read after — `merged` owns its own copy of the parsed entries.
