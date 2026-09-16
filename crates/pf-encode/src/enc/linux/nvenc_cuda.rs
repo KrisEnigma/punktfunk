@@ -384,6 +384,27 @@ fn stream_ordered_requested() -> bool {
         .unwrap_or(true)
 }
 
+/// The raw frame the fused pass last converted, and the ring slot holding the result.
+/// `cursor` is what the pass baked in — see [`cursor_mark`].
+#[derive(Clone, Copy)]
+struct LastRaw {
+    pts_ns: u64,
+    fd: i32,
+    slot: usize,
+    cursor: Option<(u64, i32, i32)>,
+}
+
+/// The cursor state the fused pass burns into a slot: the bitmap's serial and where it landed.
+/// `serial` bumps only when the bitmap changes, so a position-only move needs `x`/`y` too.
+/// `None` when nothing is drawn — same gate the convert uses.
+fn cursor_mark(captured: &CapturedFrame) -> Option<(u64, i32, i32)> {
+    captured
+        .cursor
+        .as_ref()
+        .filter(|ov| ov.visible && ov.w > 0 && ov.h > 0 && !ov.rgba.is_empty())
+        .map(|ov| (ov.serial, ov.x, ov.y))
+}
+
 /// In-flight bitstream for the retrieve thread. Pointer as `usize`; the thread is joined
 /// before the session is destroyed.
 struct RetrieveJob {
@@ -745,9 +766,8 @@ pub struct NvencCudaEncoder {
     worker: Option<pf_zerocopy::Importer>,
     worker_slots: HashSet<usize>,
     worker_cursor_serial: u64,
-    /// The last raw frame converted (`pts_ns`, fd) and the ring slot holding it: a repeat is
-    /// cloned from there instead of converted again.
-    last_raw: Option<(u64, i32, usize)>,
+    /// The last raw frame the fused pass converted, and where it landed.
+    last_raw: Option<LastRaw>,
     /// The worker's convert timeline in CUDA: each pass's value is waited on the copy stream
     /// before NVENC maps the slot.
     convert_sem: Option<cuda::ExternalSemaphore>,
@@ -1838,12 +1858,23 @@ impl NvencCudaEncoder {
             None => (dst, (self.width, self.height)),
         };
         // A repeat of the frame just converted (the source produced nothing new) is cloned
-        // from its slot: one copy, no second worker round trip.
-        let key = (captured.pts_ns, d.fd.as_raw_fd());
-        if let Some((pts, fd, prev)) = self.last_raw {
-            if (pts, fd) == key && prev != slot && prev < self.ring.len() {
+        // from its slot: one copy, no second worker round trip. The pass bakes the pointer in,
+        // so a cursor that moved over a still source is a different picture and must convert.
+        let mark = LastRaw {
+            pts_ns: captured.pts_ns,
+            fd: d.fd.as_raw_fd(),
+            slot,
+            cursor: cursor_mark(captured),
+        };
+        if let Some(last) = self.last_raw {
+            if last.pts_ns == mark.pts_ns
+                && last.fd == mark.fd
+                && last.cursor == mark.cursor
+                && last.slot != slot
+                && last.slot < self.ring.len()
+            {
                 let rows = fmt.rows(self.height) as usize;
-                let (src, dst_s) = (&self.ring[prev].surface, &self.ring[slot].surface);
+                let (src, dst_s) = (&self.ring[last.slot].surface, &self.ring[slot].surface);
                 cuda::copy_surface_to_surface(
                     src.ptr(),
                     dst_s.ptr(),
@@ -1852,7 +1883,7 @@ impl NvencCudaEncoder {
                     !ordered,
                 )
                 .context("NVENC (Linux): clone the repeat slot")?;
-                self.last_raw = Some((pts, fd, slot));
+                self.last_raw = Some(mark);
                 return Ok(());
             }
         }
@@ -1885,7 +1916,7 @@ impl NvencCudaEncoder {
                 .reframe(&target, &dst, fmt, crop, out)
                 .context("NVENC (Linux): reframe")?;
         }
-        self.last_raw = Some((key.0, key.1, slot));
+        self.last_raw = Some(mark);
         Ok(())
     }
 
