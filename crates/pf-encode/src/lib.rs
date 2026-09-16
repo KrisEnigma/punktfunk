@@ -696,6 +696,7 @@ pub fn linux_nvenc_raw_dmabuf_ok() -> bool {
         !linux_zero_copy_is_vaapi()
             && pf_zerocopy::nvenc_raw_enabled()
             && !pf_zerocopy::raw_dmabuf_import_disabled()
+            && pf_zerocopy::fused_convert_available()
     }
     #[cfg(not(feature = "nvenc"))]
     {

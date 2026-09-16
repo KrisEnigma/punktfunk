@@ -82,6 +82,32 @@ pub fn nvenc_raw_enabled() -> bool {
     std::env::var("PUNKTFUNK_NVENC_RAW").as_deref() != Ok("0")
 }
 
+/// Can this box run the fused convert at all? Asks a worker to export the convert timeline,
+/// which builds the whole pipeline (modifier import, timeline export, the shader) and so answers
+/// the same question the first frame would — before a session is committed to the raw lane.
+///
+/// Cached: the answer is a property of the driver, not of a session. `false` keeps capture on the
+/// import path from the start instead of failing the first session that reaches the convert.
+pub fn fused_convert_available() -> bool {
+    static OK: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *OK.get_or_init(|| {
+        if !nvenc_raw_enabled() {
+            return false;
+        }
+        let probe = Importer::new_for_capture().and_then(|mut i| i.convert_timeline().map(|_| ()));
+        match probe {
+            Ok(()) => true,
+            Err(e) => {
+                tracing::info!(
+                    error = %format!("{e:#}"),
+                    "fused convert unavailable on this box — capture keeps the import path"
+                );
+                false
+            }
+        }
+    })
+}
+
 pub fn nv12_enabled() -> bool {
     flag_opt("PUNKTFUNK_NV12").unwrap_or(true)
 }
