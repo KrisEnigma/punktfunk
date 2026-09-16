@@ -1424,7 +1424,12 @@ pub fn backend_carries_sdr10() -> bool {
 }
 #[cfg(target_os = "linux")]
 pub fn backend_carries_sdr10() -> bool {
-    cfg!(feature = "nvenc") && !linux_zero_copy_is_vaapi()
+    // Direct NVENC only, and only when capture is packed RGB. With `PUNKTFUNK_NV12` on (the
+    // default) the tiled path hands NVENC an 8-bit NV12 surface a 10-bit session refuses, so
+    // 10-bit SDR needs `PUNKTFUNK_NV12=0`; otherwise we would negotiate 10-bit and degrade.
+    cfg!(feature = "nvenc")
+        && linux_resolved_backend() == LinuxBackend::Nvenc
+        && !pf_zerocopy::nv12_enabled()
 }
 #[cfg(not(any(target_os = "windows", target_os = "linux")))]
 pub fn backend_carries_sdr10() -> bool {

@@ -513,14 +513,23 @@ fn buffer_format(buf: &cuda::DeviceBuffer, fmt: pf_frame::PixelFormat) -> nv::NV
 
 /// Encode depth and HDR verdict for one capture format.
 ///
-/// Packed 10-bit input is the compositor's HDR surface: BT.2020 PQ. An 8-bit capture under a
-/// 10-bit session is SDR-10 — NVENC reads the 8-bit surface and writes a 10-bit stream under
-/// BT.709 (`inputPixelBitDepthMinus8` stays 0). HDR never follows depth alone.
-fn depth_and_hdr(ten_bit_in: bool, depth_asked: u8) -> (u8, bool) {
-    if ten_bit_in {
+/// Packed 10-bit input is the compositor's HDR surface: BT.2020 PQ. An 8-bit capture reaches a
+/// 10-bit SDR stream only through NVENC's 8→10, which takes PACKED RGB (`ARGB`); a planar 8-bit
+/// surface (NV12/YUV444) fails `register_resource` in a 10-bit session, so it stays 8-bit. HDR
+/// never follows depth alone.
+fn depth_and_hdr(fmt: nv::NV_ENC_BUFFER_FORMAT, depth_asked: u8) -> (u8, bool) {
+    if is_ten_bit_input(fmt) {
         return (10, true);
     }
-    (if depth_asked >= 10 { 10 } else { 8 }, false)
+    let packed_rgb8 = fmt == nv::NV_ENC_BUFFER_FORMAT::NV_ENC_BUFFER_FORMAT_ARGB;
+    (
+        if depth_asked >= 10 && packed_rgb8 {
+            10
+        } else {
+            8
+        },
+        false,
+    )
 }
 
 /// Packed 10-bit RGB input. Bit depth and HDR follow the capture format, not negotiation.
@@ -1951,10 +1960,19 @@ impl NvencCudaEncoder {
                 (self.width, self.height) = r.out;
             }
             self.buffer_fmt = new_fmt;
-            // HDR follows the input; depth also takes the session's ask, so an 8-bit SDR
-            // capture still reaches a 10-bit stream.
-            let ten_bit_in = is_ten_bit_input(new_fmt);
-            (self.bit_depth, self.hdr) = depth_and_hdr(ten_bit_in, self.depth_asked);
+            // Depth and HDR from the capture format: a packed-RGB 8-bit surface reaches a
+            // 10-bit SDR stream; a planar 8-bit one (NV12/YUV444) stays 8-bit rather than
+            // failing the 10-bit session.
+            let (depth, hdr) = depth_and_hdr(new_fmt, self.depth_asked);
+            if self.depth_asked >= 10 && depth < 10 {
+                tracing::warn!(
+                    format = ?captured.format,
+                    "Linux direct-NVENC: 10-bit negotiated but the capture is a planar 8-bit \
+                     surface NVENC can't feed a 10-bit session — encoding 8-bit SDR (the stream \
+                     is labelled to match)"
+                );
+            }
+            (self.bit_depth, self.hdr) = (depth, hdr);
             // FREXT only on genuine YUV444; NV12/RGB cannot reconstruct full chroma.
             self.chroma_444 = self.chroma_444 && buf.yuv444;
             // `init_session` publishes `encoder` before later fallible steps. A failure leaves
@@ -2795,16 +2813,24 @@ mod tests {
         unsafe { std::env::remove_var(key) };
     }
 
-    /// Wrong NVENC format for packed 2:10:10:10 is silently 8-bit `ARGB` with channels shifted.
-    /// An 8-bit capture under a 10-bit session encodes SDR-10, not 8-bit, and never HDR.
-    /// Packed 10-bit input still means BT.2020 PQ.
+    /// SDR-10 rides NVENC's 8→10, which takes packed RGB (`ARGB`) only. A planar 8-bit surface
+    /// (NV12/YUV444) stays 8-bit — feeding it a 10-bit session fails `register_resource`, the
+    /// real-capture regression this guards. Packed 10-bit input is HDR (BT.2020 PQ) regardless.
     #[test]
-    fn an_eight_bit_capture_still_reaches_a_ten_bit_stream() {
-        assert_eq!(depth_and_hdr(false, 10), (10, false));
-        assert_eq!(depth_and_hdr(false, 8), (8, false));
-        assert_eq!(depth_and_hdr(true, 10), (10, true));
-        // A 10-bit surface outranks an 8-bit ask: the capture is already PQ.
-        assert_eq!(depth_and_hdr(true, 8), (10, true));
+    fn depth_and_hdr_needs_packed_rgb_for_ten_bit() {
+        use nv::NV_ENC_BUFFER_FORMAT as F;
+        assert_eq!(depth_and_hdr(F::NV_ENC_BUFFER_FORMAT_ARGB, 10), (10, false));
+        assert_eq!(depth_and_hdr(F::NV_ENC_BUFFER_FORMAT_ARGB, 8), (8, false));
+        assert_eq!(depth_and_hdr(F::NV_ENC_BUFFER_FORMAT_NV12, 10), (8, false));
+        assert_eq!(
+            depth_and_hdr(F::NV_ENC_BUFFER_FORMAT_YUV444, 10),
+            (8, false)
+        );
+        assert_eq!(depth_and_hdr(F::NV_ENC_BUFFER_FORMAT_ARGB10, 8), (10, true));
+        assert_eq!(
+            depth_and_hdr(F::NV_ENC_BUFFER_FORMAT_ABGR10, 10),
+            (10, true)
+        );
     }
 
     #[test]
@@ -3446,13 +3472,11 @@ mod tests {
         println!("nvenc_cuda HDR10 cursor blend: {aus} AUs, slot fmt X2Rgb10");
     }
 
-    /// Hardware: an SDR desktop's 8-bit capture under a 10-bit session encodes a 10-bit
-    /// stream, BT.709, no PQ. The streams land in `PUNKTFUNK_SMOKE_DIR` for `ffprobe`:
-    /// each must read `yuv420p10le` with bt709 tags.
-    ///
-    /// The 4:4:4 arm is the boundary: NVENC takes packed RGB into a 10-bit session but
-    /// refuses a planar 8-bit surface, which is what Linux 4:4:4 capture delivers. That
-    /// refusal is why `sdr10_fits` keeps a Linux 4:4:4 session at 8-bit.
+    /// Hardware: a packed-RGB 8-bit capture under a 10-bit session encodes a 10-bit stream,
+    /// BT.709, no PQ (the `.obu`/`.h265` land in `PUNKTFUNK_SMOKE_DIR` for `ffprobe`: each must
+    /// read `yuv420p10le` bt709). The planar arms are the regression guard: real Linux capture
+    /// is NV12 (and 4:4:4 is planar YUV444), which NVENC refuses in a 10-bit session — the
+    /// encoder must degrade those to 8-bit rather than fail `register_resource`.
     ///
     /// `cargo test -p pf-encode --features nvenc --lib nvenc_cuda_sdr10 -- --ignored --nocapture`
     #[test]
@@ -3515,41 +3539,65 @@ mod tests {
             );
         }
 
-        // The boundary: a planar 8-bit surface in a 10-bit session. NVENC refuses to register
-        // it, so the host must not negotiate this shape.
-        pf_zerocopy::cuda::make_current().expect("shared CUDA context current");
-        let mut enc = NvencCudaEncoder::open(
-            Codec::H265,
-            PixelFormat::Yuv444,
-            W,
-            H,
-            60,
-            40_000_000,
-            true,
-            10,
-            ChromaFormat::Yuv444,
-            false,
-            4,
-        )
-        .expect("open NVENC CUDA 4:4:4 SDR-10 session");
-        let frame = CapturedFrame {
-            provenance: Default::default(),
-            width: W,
-            height: H,
-            pts_ns: 0,
-            format: PixelFormat::Yuv444,
-            payload: FramePayload::Cuda(
-                DeviceBuffer::alloc_yuv444(W, H).expect("alloc YUV444 device buffer"),
+        // Regression guard: a planar 8-bit capture (real Linux default is NV12; 4:4:4 is
+        // planar YUV444) under a 10-bit-negotiated session must degrade to 8-bit and encode,
+        // never fail register_resource and end the video.
+        for (label, fmt, chroma, alloc) in [
+            (
+                "nv12",
+                PixelFormat::Nv12,
+                ChromaFormat::Yuv420,
+                DeviceBuffer::alloc_nv12 as fn(u32, u32) -> anyhow::Result<DeviceBuffer>,
             ),
-            cursor: None,
-        };
-        let refused = enc.submit_indexed(&frame, 0).is_err();
-        println!("nvenc_cuda SDR-10 yuv444 refused={refused}");
-        assert!(
-            refused,
-            "NVENC now takes planar 8-bit input at 10-bit — `sdr10_fits` can drop its Linux \
-             4:4:4 arm"
-        );
+            (
+                "yuv444",
+                PixelFormat::Yuv444,
+                ChromaFormat::Yuv444,
+                DeviceBuffer::alloc_yuv444 as fn(u32, u32) -> anyhow::Result<DeviceBuffer>,
+            ),
+        ] {
+            pf_zerocopy::cuda::make_current().expect("shared CUDA context current");
+            let mut enc = NvencCudaEncoder::open(
+                Codec::H265,
+                fmt,
+                W,
+                H,
+                60,
+                40_000_000,
+                true,
+                10,
+                chroma,
+                false,
+                4,
+            )
+            .expect("open planar SDR-10 session");
+            let mut aus = 0usize;
+            for i in 0..4u32 {
+                let frame = CapturedFrame {
+                    provenance: Default::default(),
+                    width: W,
+                    height: H,
+                    pts_ns: u64::from(i) * 16_666_667,
+                    format: fmt,
+                    payload: FramePayload::Cuda(alloc(W, H).expect("alloc planar device buffer")),
+                    cursor: None,
+                };
+                enc.submit_indexed(&frame, i).unwrap_or_else(|e| {
+                    panic!("{label}: planar submit must degrade, not fail: {e:#}")
+                });
+                while let Some(_au) = enc.poll().expect("poll") {
+                    aus += 1;
+                }
+            }
+            enc.flush().ok();
+            assert_eq!(
+                enc.bit_depth, 8,
+                "{label}: a planar 8-bit capture must degrade to 8-bit"
+            );
+            assert!(!enc.hdr, "{label}: SDR");
+            assert!(aus > 0, "{label}: no AUs");
+            println!("nvenc_cuda SDR-10 {label}: degraded to 8-bit, {aus} AUs (no crash)");
+        }
     }
 
     /// Hardware: HEVC FREXT YUV444 (stacked-plane copy NV12 does not exercise).
