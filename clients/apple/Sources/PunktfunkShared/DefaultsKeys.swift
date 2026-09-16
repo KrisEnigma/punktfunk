@@ -385,8 +385,8 @@ extension Notification.Name {
     /// the intent lives in PunktfunkShared and can't reach the app's `SessionModel` directly.
     public static let punktfunkEndActiveSession = Notification.Name("io.unom.punktfunk.end-active-session")
 
-    /// Posted by the Connect App Intent (Siri/Shortcuts) with a `punktfunk://` URL as `object`:
-    /// the app routes it through the SAME `.onOpenURL` handler a widget tap uses (one router, one
-    /// set of guards). The intent uses `openAppWhenRun`, so the app is foregrounded to receive it.
+    /// Posted by the Connect App Intent (Siri/Shortcuts) with a `punktfunk://` URL as an `NSURL`
+    /// `object`: one window routes it through the SAME `.onOpenURL` handler a widget tap uses. The
+    /// intent uses `openAppWhenRun`, so the app is foregrounded to receive it.
     public static let punktfunkOpenDeepLink = Notification.Name("io.unom.punktfunk.open-deep-link")
 }

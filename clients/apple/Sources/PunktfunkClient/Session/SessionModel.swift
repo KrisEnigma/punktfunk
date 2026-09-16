@@ -134,7 +134,12 @@ final class SessionModel: ObservableObject {
     /// satisfies both and the abandoned attempt can land first.
     private var connectSeq = 0
     /// The host this session is for (a value copy; identity = id).
-    @Published private(set) var activeHost: StoredHost?
+    @Published private(set) var activeHost: StoredHost? {
+        didSet { Self.activeHosts[ObjectIdentifier(self)] = activeHost?.id }
+    }
+    /// Every window's dialing or live host. A host replaces a second session from this device,
+    /// so a connect to one already live elsewhere would end that window's stream.
+    private static var activeHosts: [ObjectIdentifier: StoredHost.ID] = [:]
     /// The library entry this session was launched with (`connect(launchID:)`), or nil if the user
     /// just connected to the host's desktop. Kept because where the client should go when the
     /// session ends depends on where it came FROM: a title launched out of the library belongs back
@@ -379,6 +384,11 @@ final class SessionModel: ObservableObject {
                  requestAccess: Bool = false,
                  onUnreachable: (@MainActor () -> Void)? = nil) {
         guard phase == .idle else { return }
+        guard !Self.activeHosts.contains(where: { $0.key != ObjectIdentifier(self) && $0.value == host.id })
+        else {
+            errorMessage = "\(host.displayName) is already streaming in another window."
+            return
+        }
         connectSeq += 1
         let attempt = connectSeq
         phase = .connecting

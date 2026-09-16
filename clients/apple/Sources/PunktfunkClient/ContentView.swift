@@ -108,6 +108,7 @@ struct ContentView: View {
     @State private var macDestination: MacDestination = .hosts
     /// What a host window hands over: this window streams, browses, wakes and pairs for it.
     @ObservedObject private var hostRouter = MacHostRouter.shared
+    @Environment(\.openWindow) private var openWindow
     /// `.key` while this window is the one in front.
     @Environment(\.controlActiveState) private var controlActiveState
     #endif
@@ -170,10 +171,14 @@ struct ContentView: View {
     /// Which host that is, when several are paired. Empty until somebody picks one; with exactly
     /// one paired host the default is derived and this stays empty.
     @AppStorage(DefaultsKey.defaultHost) private var defaultHostID = ""
-    /// The start screen is a once-per-process decision. Set by `applyStartScreen` and by
-    /// `handleDeepLink`, so whichever of the two fires first on a cold start wins and the other
-    /// stands down.
-    @State private var startApplied = false
+    /// The start screen is a once-per-process decision, so a second window never re-runs it. Set
+    /// by `applyStartScreen` and by `handleDeepLink`, so whichever fires first on a cold start
+    /// wins and the other stands down.
+    @MainActor private static var startApplied = false
+    #if os(macOS)
+    /// The intent link a window already took, so every other window lets it be.
+    @MainActor private static weak var takenLink: NSURL?
+    #endif
     /// Background keep-alive (Settings → General, iOS-only). Default OFF (today's freeze-on-background
     /// is the default). When on, backgrounding a live session keeps audio + the connection alive and
     /// drops video, auto-disconnecting after `backgroundTimeoutMinutes`.
@@ -448,7 +453,18 @@ struct ContentView: View {
         // tvOS too, and an intent that posts to nobody would be a shortcut that silently does
         // nothing.
         .onReceive(NotificationCenter.default.publisher(for: .punktfunkOpenDeepLink)) { note in
-            if let url = note.object as? URL { handleDeepLink(url) }
+            guard let link = note.object as? NSURL else { return }
+            #if os(macOS)
+            // Every window hears it: the front one takes it now, another only if none did.
+            let wait: TimeInterval = controlActiveState == .key ? 0 : 0.25
+            DispatchQueue.main.asyncAfter(deadline: .now() + wait) {
+                guard Self.takenLink !== link else { return }
+                Self.takenLink = link
+                handleDeepLink(link as URL)
+            }
+            #else
+            handleDeepLink(link as URL)
+            #endif
         }
         .onChange(of: model.phase) { _, phase in
             switch phase {
@@ -760,19 +776,33 @@ struct ContentView: View {
         Binding(get: { gamepadUIActive ? libraryTarget : nil }, set: { libraryTarget = $0 })
     }
 
-    /// Run a host window's pending request here, unless another main window took it first.
+    /// Run a host window's pending request here, unless another main window took it first. A
+    /// connect or a pairing needs an idle window: a busy one leaves it to an idle one, then opens
+    /// a window of its own for it.
     private func takeHostRequest() {
-        guard let request = hostRouter.take() else { return }
+        guard let request = hostRouter.pending else { return }
+        switch request {
+        case .connect, .pair:
+            guard !model.isBusy else {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+                    if hostRouter.claimOpening(request) { openWindow(id: PunktfunkClientApp.mainSceneID) }
+                }
+                return
+            }
+        case .browse, .wake:
+            break
+        }
+        _ = hostRouter.take()
         func saved(_ id: StoredHost.ID) -> StoredHost? { store.hosts.first { $0.id == id } }
         switch request {
         case .connect(let id, let selection):
-            if let host = saved(id), !model.isBusy { connect(host, preset: selection) }
+            if let host = saved(id) { connect(host, preset: selection) }
         case .browse(let id):
             if let host = saved(id) { libraryTarget = LibraryTarget(host: host) }
         case .wake(let id):
             if let host = saved(id) { wakeOnly(host) }
         case .pair(let id):
-            if let host = saved(id), !model.isBusy { pairingTarget = host }
+            if let host = saved(id) { pairingTarget = host }
         }
     }
     #endif
@@ -859,7 +889,7 @@ struct ContentView: View {
         // `.onOpenURL` and `.onAppear` have no guaranteed order. Claiming the once-per-process
         // slot here is symmetric with `applyStartScreen`, so either order is benign — if the
         // start already opened a shelf, the link's own rules take over from there.
-        startApplied = true
+        Self.startApplied = true
         let link: DeepLink
         do {
             link = try DeepLink(url: url)
@@ -1818,9 +1848,9 @@ struct ContentView: View {
     /// auto-connect or any live session (`phase`), a library already open, or a confirmation
     /// waiting for an answer.
     private func applyStartScreen() {
-        guard !startApplied, model.phase == .idle, libraryTarget == nil, deepLinkConfirm == nil
+        guard !Self.startApplied, model.phase == .idle, libraryTarget == nil, deepLinkConfirm == nil
         else { return }
-        startApplied = true
+        Self.startApplied = true
         let start = StartScreen.resolve(
             startIn: startInRaw, defaultHost: defaultHostID, hosts: store.hosts)
         guard let host = start.host else { return }
