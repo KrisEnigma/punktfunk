@@ -16,19 +16,6 @@ data class Settings(
     val width: Int = 0,
     val height: Int = 0,
     val hz: Int = 0,
-    /**
-     * Fold the rounded corners into the [SAFE_AREA_MODE] inset. Off: a corner of radius `r` clips a
-     * quarter-circle out of each end of the top and bottom rows, and clearing it costs `r` on every
-     * row. On is for a HUD that lives in a corner.
-     */
-    val safeAreaClearCorners: Boolean = false,
-    /**
-     * Replace the probed left/right inset of [SAFE_AREA_MODE] with this many pixels;
-     * [SafeArea.AUTO_INSET] (the default) keeps what the display reports. The escape hatch for a
-     * phone whose [DisplayCutout] does not describe what the glass actually covers.
-     */
-    val safeAreaLeftPx: Int = SafeArea.AUTO_INSET,
-    val safeAreaRightPx: Int = SafeArea.AUTO_INSET,
     val bitrateKbps: Int = 0,
     /**
      * Render-resolution multiplier: the client asks the host to render/encode at `chosen mode ×
@@ -463,9 +450,6 @@ object SafeArea {
     /** The host rejects odd dimensions and anything under 320 px wide (`validate_dimensions`). */
     const val MIN_WIDTH = 320
 
-    /** A stored per-side override meaning "whatever the display reports" — the default. */
-    const val AUTO_INSET = -1
-
     /**
      * [nativeWidth] less [left] and [right], even-floored and clamped to the host's floor. A hole
      * on one side costs the picture that side only: charging both spends 127 px of a OnePlus 9 Pro
@@ -483,53 +467,24 @@ object SafeArea {
     fun offsetX(nativeWidth: Int, left: Int, right: Int): Int =
         left.coerceAtLeast(0)
             .coerceAtMost((nativeWidth - insetWidth(nativeWidth, left, right)).coerceAtLeast(0))
-
-    /**
-     * The two sides to clear, from what the display reported and what [s] says about it: the
-     * corner radius joins only on the opt-in, and a typed override replaces its own side outright.
-     */
-    fun resolve(cutLeft: Int, cutRight: Int, corner: Int, s: Settings): SafeInsets {
-        var left = cutLeft
-        var right = cutRight
-        if (s.safeAreaClearCorners) {
-            left = maxOf(left, corner)
-            right = maxOf(right, corner)
-        }
-        if (s.safeAreaLeftPx >= 0) left = s.safeAreaLeftPx
-        if (s.safeAreaRightPx >= 0) right = s.safeAreaRightPx
-        return SafeInsets(left, right, corner)
-    }
 }
 
-/**
- * What a landscape stream must clear on this display, in the window's own pixels.
- *
- * [left]/[right] are the cutout's two sides, read separately whenever the rotation in hand is a
- * landscape one and as one symmetric value otherwise — a portrait probe knows how big the housing
- * is but not which side it will land on. [corner] is the largest rounded-corner radius, reported
- * whether or not it is folded in: it is what "Clear rounded corners" would add to each side.
- */
-data class SafeInsets(val left: Int, val right: Int, val corner: Int)
+/** What a landscape stream must clear on this display: the cutout's two sides, in window pixels. */
+data class SafeInsets(val left: Int, val right: Int)
 
 /**
- * What this display's housing costs a landscape stream, per side, under [s].
+ * What this display's housing costs a landscape stream, per side.
  *
  * [DisplayCutout] is rotation-aware: in a landscape rotation the housing sits on `left`/`right` and
  * the two are read as they are. A portrait probe reports the same housing on `top`/`bottom` with
  * both horizontal insets zero — that says how big it is, not which side it will land on, so the
- * reading goes on both sides as it always did.
- *
- * Rounded corners are reported but NOT folded in unless [Settings.safeAreaClearCorners] asks. A
- * full-height picture needs exactly `r` of clearance at a corner of radius `r`, and paying that on
- * every row for two small arcs is a trade only some HUDs want.
- * [Settings.safeAreaLeftPx]/[Settings.safeAreaRightPx] replace a side outright, for a phone this
- * probe reads wrong.
+ * reading goes on both sides. Rounded corners are not charged: clearing a corner of radius `r`
+ * costs `r` on every row to uncover two small arcs.
  */
-fun displaySafeInsets(context: Context, s: Settings): SafeInsets {
+fun displaySafeInsets(context: Context): SafeInsets {
     val display = probeDisplay(context)
     var left = 0
     var right = 0
-    var corner = 0
     if (display != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
         display.cutout?.let { cut ->
             if (maxOf(cut.safeInsetLeft, cut.safeInsetRight) > 0) {
@@ -542,17 +497,7 @@ fun displaySafeInsets(context: Context, s: Settings): SafeInsets {
             }
         }
     }
-    if (display != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-        for (position in intArrayOf(
-            android.view.RoundedCorner.POSITION_TOP_LEFT,
-            android.view.RoundedCorner.POSITION_TOP_RIGHT,
-            android.view.RoundedCorner.POSITION_BOTTOM_LEFT,
-            android.view.RoundedCorner.POSITION_BOTTOM_RIGHT,
-        )) {
-            display.getRoundedCorner(position)?.let { corner = maxOf(corner, it.radius) }
-        }
-    }
-    return SafeArea.resolve(left, right, corner, s)
+    return SafeInsets(left, right)
 }
 
 /**
@@ -560,9 +505,9 @@ fun displaySafeInsets(context: Context, s: Settings): SafeInsets {
  * landscape `(width, height, hz)`. Same height and refresh as [nativeDisplayMode]; only the width
  * moves, and the stream screen places the narrower picture at the left inset rather than centred.
  */
-fun safeDisplayMode(context: Context, s: Settings): Triple<Int, Int, Int> {
+fun safeDisplayMode(context: Context): Triple<Int, Int, Int> {
     val (w, h, hz) = nativeDisplayMode(context)
-    val i = displaySafeInsets(context, s)
+    val i = displaySafeInsets(context)
     return Triple(SafeArea.insetWidth(w, i.left, i.right), h, hz)
 }
 
@@ -608,7 +553,7 @@ fun displaySupportsHdr(context: Context): Boolean {
  */
 fun Settings.effectiveMode(context: Context): Triple<Int, Int, Int> {
     val base = if (width == SAFE_AREA_MODE && height == SAFE_AREA_MODE) {
-        safeDisplayMode(context, this)
+        safeDisplayMode(context)
     } else {
         nativeDisplayMode(context)
     }

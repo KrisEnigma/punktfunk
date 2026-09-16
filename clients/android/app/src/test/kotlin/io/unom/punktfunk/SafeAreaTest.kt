@@ -23,32 +23,6 @@ class SafeAreaTest {
     }
 
     @Test
-    fun cornersAreOptInAndATypedInsetWins() {
-        val auto = Settings()
-        // Corner radius 28 is reported but not charged: the hole alone decides.
-        assertEquals(SafeInsets(127, 0, 28), SafeArea.resolve(127, 0, 28, auto))
-        // …until the opt-in, which lifts the side that has nothing else on it.
-        assertEquals(
-            SafeInsets(127, 28, 28),
-            SafeArea.resolve(127, 0, 28, auto.copy(safeAreaClearCorners = true)),
-        )
-        // A typed override replaces its own side and leaves the other alone.
-        assertEquals(
-            SafeInsets(0, 0, 28),
-            SafeArea.resolve(127, 0, 28, auto.copy(safeAreaLeftPx = 0)),
-        )
-        assertEquals(
-            SafeInsets(127, 40, 28),
-            SafeArea.resolve(127, 0, 28, auto.copy(safeAreaRightPx = 40)),
-        )
-        // …and outranks the corner opt-in, which is the point of an escape hatch.
-        assertEquals(
-            SafeInsets(10, 28, 28),
-            SafeArea.resolve(127, 0, 28, auto.copy(safeAreaClearCorners = true, safeAreaLeftPx = 10)),
-        )
-    }
-
-    @Test
     fun insetsEachSideAndStaysHostValid() {
         // A punch-hole phone: 2400 px wide, 96 px of unsafe edge per side → 2208.
         assertEquals(2400 - 96 * 2, SafeArea.insetWidth(2400, 96, 96))
