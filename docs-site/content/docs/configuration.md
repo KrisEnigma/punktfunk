@@ -294,8 +294,8 @@ table, where client and host read the *same* variable name for their own half of
 | `PUNKTFUNK_VRR_FIFO` | `1` | Force the display mode used to follow a **variable-refresh (VRR / FreeSync / G-Sync)** screen, on graphics drivers too old to offer the modern one. You almost certainly don't need this: where the driver supports the modern mode — which is what **Follow variable refresh rate** in [client settings](/docs/client-settings#video) uses — following the panel is already automatic and costs almost nothing. On an older driver the only way to follow the panel is a mode that measured roughly 27 ms *worse* on a fixed-refresh screen, so it stays off unless you ask for it, and it's only worth asking if you genuinely have a VRR screen and play fullscreen. Check the Detailed [stats overlay](/docs/stats): `vrr yes` means the panel really is following the stream. Linux and Windows clients. |
 | `PUNKTFUNK_PRESENT_DEBUG` | `1` | Log the presenter's own 1-second summary (display mode, buffer drops, pacing counters) every second, even when nothing is going wrong. Without it the line appears only when there is something to report. |
 | `PUNKTFUNK_ABR_PROBE_KBPS` | kbps, e.g. `90000` | The startup link-capacity probe's burst target. By default it's derived from the session — twice what your resolution, refresh rate and codec could plausibly use, which is the most the climb ceiling is ever allowed to reach — and capped at 2 Gbps. Lower it further on links the burst shouldn't slam, or when the measured ceiling comes out wrong for your setup. |
-| `PUNKTFUNK_ABR_PROBE` | `0` | Skip the startup link-capacity probe entirely. The adaptive-bitrate climb ceiling then stays at the negotiated starting rate — a blunt instrument; prefer `PUNKTFUNK_ABR_MAX_MBPS`. |
-| `PUNKTFUNK_ABR_MAX_MBPS` | Mbps, e.g. `300` | Hard cap on the adaptive bitrate's climb ceiling, whatever the startup probe measured. The escape hatch when adaptive sessions keep climbing past what your client's **decoder** can sustain (periodic hitch + "receive backlog stopped draining" in the client log). An explicit bitrate setting still bypasses ABR entirely. |
+| `PUNKTFUNK_ABR_PROBE` | `0` | Skip the startup link-capacity probe entirely. The adaptive-bitrate climb ceiling then stays at the negotiated starting rate — a blunt instrument; prefer **Bitrate → Adaptive, at most N**, which names the ceiling and skips the probe for the same reason. |
+| `PUNKTFUNK_ABR_MAX_MBPS` | Mbps, e.g. `300` | Hard cap on the adaptive bitrate's climb ceiling, whatever the startup probe measured, and on the rate the session starts at. The same thing **Bitrate → Adaptive, at most N** in [client settings](/docs/client-settings#video) now sets per host and per preset — reach for this one only from a script or a fleet whose settings file you don't own, since it overrides that setting for the run. |
 
 ## Bitrate
 
@@ -307,7 +307,9 @@ the GameStream/Moonlight plane, keep the historical meaning: the number programs
 overheads ride on top.) To find a good value:
 
 - **Native clients (Apple, Linux, Windows, Android):** use the built-in **speed test**, from a
-  host's menu, or its host page on Apple. It measures your link, suggests a bitrate, and applies it.
+  host's menu, or its host page on Apple. It measures your link and suggests a bitrate. On Android
+  it applies that as **Bitrate → Adaptive, at most N**, so the session keeps adapting under the
+  number it measured.
 - **Moonlight:** set the bitrate in Moonlight's settings. Start moderate and raise it.
 
 ## Multiple devices at once

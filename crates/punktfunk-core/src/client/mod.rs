@@ -587,6 +587,9 @@ impl NativeClient {
             compositor,
             gamepad,
             bitrate_kbps,
+            // No ABR limit: this entry point predates the setting, so Automatic
+            // means "whatever the link proves", as it always did.
+            0,
             video_caps,
             audio_channels,
             // 0/0 = unspecified, so `Hello` stays pre-hi-res. Explicit 48 000/16 would mean
@@ -630,6 +633,11 @@ impl NativeClient {
         compositor: CompositorPref,
         gamepad: GamepadPref,
         bitrate_kbps: u32,
+        // "Adapt, but never above N" in kbps; `0` = no limit. Meaningful only while
+        // `bitrate_kbps` is 0 (Automatic), and `PUNKTFUNK_ABR_MAX_MBPS` still overrides it.
+        // The ceiling binds the negotiated start too, so a 12 Mbps cap never emits a
+        // 20 Mbps second.
+        abr_max_kbps: u32,
         video_caps: u8,
         audio_channels: u8,
         audio_rate_hz: u32,
@@ -761,6 +769,7 @@ impl NativeClient {
                     compositor,
                     gamepad,
                     bitrate_kbps,
+                    abr_max_kbps,
                     video_caps,
                     audio_channels,
                     audio_rate_hz,
