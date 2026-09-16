@@ -64,8 +64,8 @@ impl VoiceRoute {
         if fresh.is_empty() {
             return;
         }
-        tracing::info!(pids = ?fresh, "voice-chat apps pinned to the host output");
         if run_helper(&["set", &target, &csv(&fresh)]) {
+            tracing::info!(pids = ?fresh, "voice-chat apps pinned to the host output");
             self.pinned.extend(fresh);
         }
     }
