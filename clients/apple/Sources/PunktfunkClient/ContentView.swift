@@ -137,11 +137,11 @@ struct ContentView: View {
     /// one; a configured blob overrides each.
     private var ringConfig: OverlayConfig {
         #if os(macOS)
-        OverlayConfig.parse(SessionSettings.current.overlayActions, platform: .desktop)
+        OverlayConfig.parse(model.settings.overlayActions, platform: .desktop)
         #elseif os(tvOS)
-        OverlayConfig.parse(SessionSettings.current.overlayActions, platform: .tv)
+        OverlayConfig.parse(model.settings.overlayActions, platform: .tv)
         #else
-        OverlayConfig.parse(SessionSettings.current.overlayActions)
+        OverlayConfig.parse(model.settings.overlayActions)
         #endif
     }
     #if !os(macOS)
@@ -360,11 +360,12 @@ struct ContentView: View {
         .onChange(of: statsVerbosityRaw) { _, raw in
             model.setStatsVerbosity(StatsVerbosity(rawValue: raw) ?? .normal)
         }
-        // The in-stream cycle (⌃⌥⇧S, the three-finger tap, the Stream menu) is session-local:
-        // it moves only this session's tier, never the stored one.
+        // The in-stream cycle (⌃⌥⇧S, the three-finger tap, a pad chord) moves only the session
+        // it names, never the stored tier.
         .onReceive(NotificationCenter.default.publisher(for: .punktfunkStatsCycled)) { note in
-            guard let raw = note.userInfo?["tier"] as? String else { return }
-            model.setStatsVerbosity(StatsVerbosity(rawValue: raw) ?? .normal)
+            guard let conn = model.connection, note.object == nil || note.object as AnyObject === conn
+            else { return }
+            model.cycleStats()
         }
         #if os(iOS) || os(tvOS)
         // Coming back to the app re-arms the LAN browse. The home's `onAppear`/`onDisappear` do
@@ -517,6 +518,7 @@ struct ContentView: View {
             micAvailable: model.micAvailable,
             micMuted: model.micMuted,
             toggleMicMute: { model.toggleMicMute() },
+            cycleStats: { model.cycleStats() },
             disconnect: { model.disconnect() }))
         // ⌃⌥⇧A fired while input was CAPTURED (InputCapture's chord path posts it — the menu's
         // identical equivalent can't reach a captured stream). Same toggle either way.
@@ -1389,7 +1391,7 @@ struct ContentView: View {
                 // scrim owns every finger while it is up. Mounted only while shown (tenet 1).
                 .overlay {
                     if captureEnabled, model.virtualPadShown, let pad = model.virtualPad {
-                        VirtualPadLayer(config: OverlayConfig.parse(SessionSettings.current.overlayActions).pad,
+                        VirtualPadLayer(config: OverlayConfig.parse(model.settings.overlayActions).pad,
                                         wire: pad)
                     }
                 }
@@ -1447,16 +1449,16 @@ struct ContentView: View {
         RingActions(
             endStream: { [weak model] in model?.disconnect() },
             disconnectLinger: { [weak model] in model?.disconnect(deliberate: false) },
-            touchMode: { TouchInputMode.current },
+            touchMode: { TouchInputMode.current(conn.settings) },
             cycleTouchMode: {
                 // Passthrough is skipped toward a host that drops contacts (§5.4).
                 let order: [TouchInputMode] = conn.hostSupportsTouch ? [.trackpad, .pointer, .touch] : [.trackpad, .pointer]
-                let i = order.firstIndex(of: TouchInputMode.current) ?? 0
+                let i = order.firstIndex(of: TouchInputMode.current(conn.settings)) ?? 0
                 TouchInputMode.sessionOverride = order[(i + 1) % order.count]
             },
             keyboard: { NotificationCenter.default.post(name: .punktfunkShowSoftKeyboard, object: nil) },
             stats: { [model] in model.statsVerbosity },
-            cycleStats: { StatsVerbosity.cycle() },
+            cycleStats: { [model] in model.cycleStats() },
             micAvailable: { [model] in model.micAvailable },
             micMuted: { [model] in model.micMuted },
             toggleMic: { [model] in model.toggleMicMute() },

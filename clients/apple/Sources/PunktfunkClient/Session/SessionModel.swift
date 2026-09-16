@@ -149,8 +149,8 @@ final class SessionModel: ObservableObject {
     /// shelf to reopen. The view layer consumes it and sets it back to nil.
     @Published var returnToLibrary: LibraryTarget?
     /// The settings THIS session runs on — the globals with its preset overlaid, resolved once at
-    /// connect (design/client-settings-profiles.md §4.2). Also mirrored into `SessionSettings` for
-    /// the readers that live in PunktfunkKit and can't see this model.
+    /// connect (design/client-settings-profiles.md §4.2). The connection carries the same value
+    /// for the readers that live in PunktfunkKit and can't see this model.
     @Published private(set) var settings = EffectiveSettings()
     /// The stats-overlay tier for this session: the resolved one at connect, then whatever the
     /// live cycle surfaces (⌃⌥⇧S, the three-finger tap) move it to. Separate from the @AppStorage
@@ -364,9 +364,9 @@ final class SessionModel: ObservableObject {
     /// its own instructions.
     /// `effective` is the whole stream mode + input/audio configuration for this session, already
     /// resolved from the globals and the session's preset by the caller — the ONE place that
-    /// resolution happens (§4.4). It is latched into `SessionSettings` here so the kit-side
-    /// readers (the presenter, the input paths, the match-window follower) see the same values
-    /// this connect asked the host for, instead of re-reading the globals mid-session.
+    /// resolution happens (§4.4). The connection carries it, so the kit-side readers (the
+    /// presenter, the input paths, the match-window follower) see the values this connect asked
+    /// the host for, instead of re-reading the globals mid-session.
     func connect(to host: StoredHost, effective: EffectiveSettings,
                  gamepad: PunktfunkConnection.GamepadType = .auto,
                  launchID: String? = nil,
@@ -392,7 +392,6 @@ final class SessionModel: ObservableObject {
         errorMessage = nil
         settings = effective
         statsVerbosity = StatsVerbosity(rawValue: effective.statsVerbosity) ?? .normal
-        SessionSettings.begin(effective)
         #if os(iOS)
         // An attached monitor shows the picture (StreamViewController), so its size and rate win.
         let mode = ExternalDisplay.streamMode(effective) ?? effective.streamMode
@@ -529,7 +528,8 @@ final class SessionModel: ObservableObject {
                 // Delegated approval: the host holds this connect open until the operator approves
                 // it (~180 s) — outwait that window so a slow approval still lands here. Normal
                 // connects keep the snappy default.
-                timeoutMs: requestAccess ? 185_000 : 10_000) }
+                timeoutMs: requestAccess ? 185_000 : 10_000,
+                settings: effective) }
             await MainActor.run { [weak self] in
                 guard let self else { return }
                 // The user may have abandoned this attempt (window closed, another host
@@ -542,9 +542,6 @@ final class SessionModel: ObservableObject {
                     if case .success(let conn) = result {
                         Task.detached { conn.close() } // joins Rust threads — off-main
                     }
-                    // A LATER connect has already latched its own settings; only release the
-                    // latch when nothing took over, or this would blank the live session's.
-                    if self.phase == .idle { SessionSettings.end() }
                     return
                 }
                 switch result {
@@ -578,7 +575,6 @@ final class SessionModel: ObservableObject {
                         self.phase = .idle
                         self.activeHost = nil
                         self.revealStream() // no stream is coming; the hold must not outlive the dial
-                        SessionSettings.end() // no session, so nothing may keep its settings latched
                         self.errorMessage = "\(host.displayName) is not paired yet. "
                             + "Pair with its PIN before streaming."
                     }
@@ -591,7 +587,6 @@ final class SessionModel: ObservableObject {
                     // otherwise nothing here does. It would sit over the home screen until the
                     // next session, and on tvOS it makes the host grid unfocusable behind it.
                     self.revealStream()
-                    SessionSettings.end() // the dial failed — back to the plain globals
                     if case PunktfunkClientError.rejected(let rejection) = error {
                         // The host answered and stated its reason (declined / approval timed
                         // out / busy / versions differ) — show that, and never wake-retry a
@@ -709,7 +704,7 @@ final class SessionModel: ObservableObject {
     /// injection — the same fallback `StreamLayerUIView` applies to the fingers themselves.
     private func noteTouchFallback(_ conn: PunktfunkConnection) {
         #if os(iOS)
-        guard TouchInputMode.current == .touch, !conn.hostSupportsTouch else { return }
+        guard TouchInputMode.current(conn.settings) == .touch, !conn.hostSupportsTouch else { return }
         touchFallbackNotice = true
         touchHintTimer?.cancel()
         touchHintTimer = Task { [weak self] in
@@ -835,16 +830,17 @@ final class SessionModel: ObservableObject {
         return "\(s) s"
     }
 
-    /// Follow a live stats-overlay cycle (⌃⌥⇧S, the three-finger tap, the Stream menu). Those
-    /// surfaces write the GLOBAL setting as they always have; this moves the session's own tier
-    /// with it, so cycling still works in a session a preset put on a different tier.
+    /// Move this session's overlay tier: a Settings change to the stored tier, or `cycleStats`.
+    /// The stored tier stays what the next session starts at.
     func setStatsVerbosity(_ tier: StatsVerbosity) {
         guard statsVerbosity != tier else { return }
         statsVerbosity = tier
         settings.statsVerbosity = tier.rawValue
-        SessionSettings.setStatsVerbosity(tier.rawValue)
         renderHud()
     }
+
+    /// Advance this session's overlay one tier (⌃⌥⇧S, the three-finger tap, the Stream menu).
+    func cycleStats() { setStatsVerbosity(statsVerbosity.next()) }
 
     /// The user confirmed the fingerprint: returns it for pinning and enters streaming.
     func confirmTrust() -> Data? {
@@ -870,9 +866,6 @@ final class SessionModel: ObservableObject {
         // What this host has up is about to change, so the cards must ask again rather than wait
         // out the cache's TTL naming the game the user just left.
         if let host = activeHost { NowPlayingStore.shared.invalidate(host) }
-        // Release the session's resolved settings: from here every reader falls back to the plain
-        // globals, which is exactly what they saw before presets existed.
-        SessionSettings.end()
         // No-op when this session never reached `.streaming` (a refused/aborted connect).
         displaySleepGuard.release()
         // Drop any armed background keep-alive (incl. the timeout that just fired us).

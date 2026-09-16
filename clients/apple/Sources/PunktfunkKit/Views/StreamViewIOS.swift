@@ -304,7 +304,7 @@ public final class StreamViewController: StreamViewControllerBase {
     /// tier G — this device's input hardware — so no preset can move it); defaults to on when
     /// unset. iPad-only — gated again in `prefersPointerLocked`.
     private var pointerCaptureEnabled: Bool {
-        SessionSettings.current.pointerCapture
+        connection?.settings.pointerCapture ?? true
     }
 
     /// Whether the pointer should be CAPTURED right now: iPad, capture engaged, and the user
@@ -450,6 +450,7 @@ public final class StreamViewController: StreamViewControllerBase {
         // prior session (stop() doesn't clear it). Otherwise a stale `true` could later
         // re-engage capture on a foreground that the new session never asked for.
         wasCapturedOnResign = false
+        streamView.settings = connection.settings
         // The letterbox must follow an accepted requestMode() mid-stream, so this stays a live
         // read — but behind a short TTL: the pencil path maps every coalesced sample through
         // here (≤8 per event at panel rate, main thread), and a per-sample FFI read re-takes
@@ -626,10 +627,9 @@ public final class StreamViewController: StreamViewControllerBase {
         // default keeps the explicit mode.
         let follower = MatchWindowFollower(
             connection: connection,
-            enabled: SessionSettings.current.matchWindow,
-            renderScale: SessionSettings.current.renderScale,
-            maxDimension: RenderScale.maxDimension(
-                codec: SessionSettings.current.codec))
+            enabled: connection.settings.matchWindow,
+            renderScale: connection.settings.renderScale,
+            maxDimension: RenderScale.maxDimension(codec: connection.settings.codec))
         follower.onResizeTarget = onResizeTarget
         matchFollower = follower
         // A monitor attached before the session starts shows the picture from the first frame.
@@ -814,7 +814,7 @@ public final class StreamViewController: StreamViewControllerBase {
     private func applyDisplayCriteriaIfNeeded() {
         guard let manager = view.window?.avDisplayManager, let connection,
               manager.preferredDisplayCriteria == nil,
-              SessionSettings.current.hdrEnabled,
+              connection.settings.hdrEnabled,
               connection.isHDR
         else { return }
         let mode = connection.currentMode()
@@ -855,7 +855,7 @@ public final class StreamViewController: StreamViewControllerBase {
     /// Aspect-fit the stage-2 metal sublayer to the surface showing the picture — this view, or
     /// an attached monitor — at that surface's render scale (see SessionPresenter.layout).
     private func layoutMetalLayer() {
-        videoLayer.videoGravity = SessionPresenter.gravity
+        videoLayer.videoGravity = SessionPresenter.gravity(VideoFit(name: connection?.settings.videoFit))
         #if os(iOS)
         if onExternal {
             let scale = externalVideo.traitCollection.displayScale
@@ -914,7 +914,7 @@ public final class StreamViewController: StreamViewControllerBase {
     /// refresh, or the session's own mode back on the phone. Skipped when it already streams that.
     private func requestSurfaceMode() {
         guard let connection else { return }
-        let settings = SessionSettings.current
+        let settings = connection.settings
         let target = (onExternal ? ExternalDisplay.streamMode(settings) : nil) ?? settings.streamMode
         let live = connection.currentMode()
         guard live.width != target.width || live.height != target.height
@@ -1164,6 +1164,10 @@ final class StreamLayerUIView: UIView {
 
     /// Reads the LIVE negotiated mode in pixels (the touch/pointer coordinate space).
     var currentHostMode: (() -> CGSize)?
+    /// The live session's settings, set when it starts.
+    var settings = EffectiveSettings() {
+        didSet { touchMouse.invertScroll = settings.invertScroll }
+    }
     /// Direct fingers / Pencil → wire events: real touches in passthrough mode, or the
     /// touch-driven mouse events (`TouchMouse`) in the trackpad/pointer modes.
     var onTouchEvent: ((PunktfunkInputEvent) -> Void)?
@@ -1325,7 +1329,7 @@ final class StreamLayerUIView: UIView {
     /// Route direct fingers by the touch-input model, latched for the whole gesture:
     /// passthrough → real wire touches; trackpad/pointer → the TouchMouse gesture engine.
     private func forwardFingers(_ touches: Set<UITouch>, kind: TouchKind) {
-        var mode = fingerRoute ?? TouchInputMode.current
+        var mode = fingerRoute ?? TouchInputMode.current(settings)
         if mode == .touch, !touchPassthroughEnabled { mode = .trackpad }
         fingerRoute = mode
         switch mode {
@@ -1436,7 +1440,7 @@ final class StreamLayerUIView: UIView {
         guard let hostMode = currentHostMode?(), hostMode.width > 0, hostMode.height > 0
         else { return nil }
         let s = traitCollection.displayScale > 0 ? traitCollection.displayScale : UIScreen.main.scale
-        let placement = VideoFit(name: SessionSettings.current.videoFit).place(
+        let placement = VideoFit(name: settings.videoFit).place(
             view: (Int((bounds.width * s).rounded()), Int((bounds.height * s).rounded())),
             frame: (Int(hostMode.width), Int(hostMode.height)))
         guard !placement.isEmpty else { return nil }

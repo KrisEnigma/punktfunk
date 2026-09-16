@@ -351,8 +351,8 @@ extension Notification.Name {
     public static let punktfunkReleaseCapture = Notification.Name("io.unom.punktfunk.release-capture")
     /// The quick-action ring's Keyboard slot: summon the stream view's soft keyboard (iOS).
     public static let punktfunkShowSoftKeyboard = Notification.Name("io.unom.punktfunk.show-soft-keyboard")
-    /// The live stats tier moved (`userInfo["tier"]`, a `StatsVerbosity` raw value). Posted by
-    /// `StatsVerbosity.cycle`; the session view follows it without touching the stored default.
+    /// Asks a session to advance its stats tier; `object` is its connection, nil for every session.
+    /// Posted by `StatsVerbosity.requestCycle`. The stored default does not move.
     public static let punktfunkStatsCycled = Notification.Name("io.unom.punktfunk.stats-cycled")
 
     /// Posted by the session view when the quick-action ring opens (`object` is a Bool `NSNumber`).

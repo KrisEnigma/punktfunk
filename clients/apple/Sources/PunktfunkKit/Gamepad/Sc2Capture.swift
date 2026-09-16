@@ -405,9 +405,7 @@ public final class Sc2Capture {
                     switch event {
                     case .ringChord: self.onRingChord?()
                     case .nav(let nav): self.onRingNav?(nav)
-                    // Straight to the shared tier default, like GamepadCapture: every reader
-                    // observes `StatsVerbosity` through @AppStorage, so nothing wires back.
-                    case .statsChord: StatsVerbosity.cycle()
+                    case .statsChord: StatsVerbosity.requestCycle(for: self.connection)
                     }
                 }
             }

@@ -364,12 +364,9 @@ public final class InputCapture {
             // as flagsChanged, which this monitor never sees, so it was already forwarded as
             // VK_LWIN/VK_RWIN (or Alt, under the Windows modifier layout) when it went down.
             //
-            // The two cheap conditions are repeated in front of the call on purpose: off-session,
-            // `SessionSettings.current` re-reads the whole defaults suite, and this monitor sees
-            // every keystroke the app receives — including the ones typed into the host list.
             if self.forwarding, flags.contains(.command), Self.forwardsCommandChord(
                 keyCode: event.keyCode, flags: flags, forwarding: self.forwarding,
-                inhibitShortcuts: SessionSettings.current.inhibitShortcuts
+                inhibitShortcuts: self.connection.settings.inhibitShortcuts
             ) {
                 if let vk = Self.keyCodeToVK[event.keyCode] { self.sendCommandChordKey(vk) }
                 return nil
@@ -501,10 +498,10 @@ public final class InputCapture {
     /// The single wire boundary for a key event. Every `.key` send funnels through here so the
     /// active location-based modifier layout is applied in exactly one place while all internal
     /// press/release bookkeeping (`pressedVKs`, `cmdKeysDown`, `resolveModifier`'s `isDown`) stays on
-    /// the physical VK. Read live from the setting so a mid-session change (rare) takes on the next
-    /// key without re-arming capture. Non-modifier VKs pass through untouched.
+    /// the physical VK. The layout is the session's. Non-modifier VKs pass through untouched.
     private func emitKey(_ vk: UInt32, down: Bool) {
-        connection.send(.key(Self.applyModifierLayout(vk, ModifierLayout.current), down: down))
+        let layout = ModifierLayout(rawValue: connection.settings.modifierLayout) ?? .mac
+        connection.send(.key(Self.applyModifierLayout(vk, layout), down: down))
     }
 
     /// Release any held MOUSE buttons host-side, leaving keyboard state untouched. Used when
@@ -754,7 +751,7 @@ public final class InputCapture {
     /// failure mode to design against. Installed on the main run loop on purpose: a hung main thread
     /// trips the tap's timeout and macOS disables it, handing the keyboard back.
     private func installSystemKeyTap() {
-        guard systemKeyTap == nil, SessionSettings.current.inhibitShortcuts, AXIsProcessTrusted()
+        guard systemKeyTap == nil, connection.settings.inhibitShortcuts, AXIsProcessTrusted()
         else { return }
         let mask = (1 << CGEventType.keyDown.rawValue) | (1 << CGEventType.keyUp.rawValue)
         let callback: CGEventTapCallBack = { _, type, event, userInfo in
@@ -968,7 +965,7 @@ public final class InputCapture {
         // which sends straight to the connection and reads the same setting itself. Residuals are
         // accumulated AFTER inversion so a direction change between events doesn't strand a
         // fractional remainder of the old sign.
-        let invert = SessionSettings.current.invertScroll
+        let invert = connection.settings.invertScroll
         let dx = invert ? -rawDx : rawDx
         let dy = invert ? -rawDy : rawDy
         let fy = dy + residualScrollY

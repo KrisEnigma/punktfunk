@@ -533,10 +533,7 @@ public final class GamepadCapture {
             // forward (the chord is a local overlay change, not an input the host must not see).
             if was & Self.statsChord != Self.statsChord,
                newButtons & Self.statsChord == Self.statsChord {
-                // Straight to the shared tier default, like TouchMouse's three-finger tap: every
-                // reader (the HUD, the Settings pickers, the live session) observes it through
-                // @AppStorage, so no wiring back to the app is needed.
-                StatsVerbosity.cycle()
+                StatsVerbosity.requestCycle(for: connection)
             }
         }
         for (i, v) in newAxes.enumerated() where v != slot.axes[i] {
