@@ -28,9 +28,10 @@ pub(super) fn align_up(v: u64, a: u64) -> u64 {
 /// `Ok((x_offset, y_offset))` is the chroma-siting bits the session must be created with
 /// (preferred available bit per axis). `Err` is the first missing requirement.
 ///
-/// `ten_bit` + `src_fmt` describe the planned session: HDR needs the BT.2020 model and the
-/// 10-bit packed-RGB `src_fmt` as an encode-source format. An EFC that cannot do HDR returns
-/// `Err` and the session takes the compute CSC.
+/// `ten_bit` (depth) + `hdr` (colour) + `src_fmt` describe the planned session: HDR wants the
+/// BT.2020 model, SDR the BT.709 one at either depth; the 10-bit packed-RGB `src_fmt` is HDR's
+/// encode source. An EFC that cannot serve the wanted model returns `Err` and the session takes
+/// the compute CSC.
 #[allow(clippy::too_many_arguments)]
 pub(super) unsafe fn probe_rgb_direct(
     instance: &ash::Instance,
@@ -39,6 +40,7 @@ pub(super) unsafe fn probe_rgb_direct(
     codec_op: vk::VideoCodecOperationFlagsKHR,
     av1: bool,
     ten_bit: bool,
+    hdr: bool,
     src_fmt: vk::Format,
 ) -> Result<(u32, u32), &'static str> {
     use crate::vk_av1_encode as av1b;
@@ -62,8 +64,8 @@ pub(super) unsafe fn probe_rgb_direct(
     if feat.video_encode_rgb_conversion == vk::FALSE {
         return Err("no-feature");
     }
-    // Caps under the rgb-chained profile: colour math must match the compute CSC
-    // (`rgb2yuv.comp` 709-narrow / `rgb2yuv10.comp` 2020-narrow). Same chain every consumer presents.
+    // Caps under the rgb-chained profile: colour math must match the compute CSC (`rgb2yuv.comp`
+    // 709 / `rgb2yuv10.comp` 2020 / `rgb2yuv10_709.comp` 709 at ten bits). Depth-only profile here.
     let mut ps = RgbProfileStack::new(codec_op, ten_bit);
     let profile = *ps.wire(av1);
     let mut rgb_caps = vrgb::VideoEncodeRgbConversionCapabilitiesVALVE {
@@ -103,9 +105,9 @@ pub(super) unsafe fn probe_rgb_direct(
             None
         }
     };
-    let want_model = rgb_model_for(ten_bit);
+    let want_model = rgb_model_for(hdr);
     if rgb_caps.rgb_models & want_model == 0 || rgb_caps.rgb_ranges & vrgb::RANGE_NARROW == 0 {
-        return Err(if ten_bit {
+        return Err(if hdr {
             "no-2020-narrow"
         } else {
             "no-709-narrow"
@@ -139,10 +141,10 @@ pub(super) unsafe fn probe_rgb_direct(
         .iter()
         .any(|p| p.format == src_fmt && p.image_tiling == vk::ImageTiling::DRM_FORMAT_MODIFIER_EXT)
     {
-        return Err(if ten_bit {
-            "no-rgb10-modifier-tiling"
-        } else {
+        return Err(if src_fmt == vk::Format::B8G8R8A8_UNORM {
             "no-bgra-modifier-tiling"
+        } else {
+            "no-rgb10-modifier-tiling"
         });
     }
     Ok((x_offset, y_offset))
@@ -255,11 +257,12 @@ mod direct_planes_tests {
     }
 }
 
-/// EFC colour model for this depth (709 SDR / 2020 HDR) — the same matrices the compute-CSC
-/// shaders use, so encode-src and SPS/sequence-header colour signalling stay interchangeable.
-pub(super) fn rgb_model_for(ten_bit: bool) -> u32 {
+/// EFC colour model for this session (2020 HDR / 709 SDR, at either depth) — the same matrices the
+/// compute-CSC shaders use, so encode-src and SPS/sequence-header colour signalling stay
+/// interchangeable. Keyed on colour, not depth: 10-bit SDR is BT.709 (`rgb2yuv10_709.comp`).
+pub(super) fn rgb_model_for(hdr: bool) -> u32 {
     use crate::vk_valve_rgb as vrgb;
-    if ten_bit {
+    if hdr {
         vrgb::MODEL_YCBCR_2020
     } else {
         vrgb::MODEL_YCBCR_709
@@ -665,9 +668,11 @@ pub(super) unsafe fn build_parameters_h265(
     rw: u32,
     rh: u32,
     quality_level: u32,
-    // Main10 + BT.2020/PQ. Must match the profile the session was created with
+    // Depth (Main vs Main10). Must match the profile the session was created with
     // (`open_inner`'s `ten_bit`); a Main SPS on a Main10 session mislabels the samples.
     ten_bit: bool,
+    // Colour (BT.709 vs BT.2020 PQ), independent of depth: 10-bit SDR is Main10 under BT.709.
+    hdr: bool,
 ) -> Result<(vk::VideoSessionParametersKHR, Vec<u8>)> {
     use ash::vk::native as hh;
     let mut ptl: hh::StdVideoH265ProfileTierLevel = std::mem::zeroed();
@@ -715,8 +720,8 @@ pub(super) unsafe fn build_parameters_h265(
         sps.conf_win_bottom_offset = (h - rh) / 2; // 4:2:0 SubHeightC = 2
     }
 
-    // VUI names the CSC: 709 limited 8-bit, or 2020-NCL + PQ 10-bit (samples arrive PQ;
-    // the matrix does not touch transfer). Omit it and decoders guess colorimetry.
+    // VUI names the CSC: 709 limited (SDR at either depth), or 2020-NCL + PQ (HDR; samples arrive
+    // PQ, the matrix does not touch transfer). Omit it and decoders guess colorimetry.
     // `vui` must outlive `create_video_session_parameters_khr` — `sps_arr` copies the pointer.
     let mut vui: hh::StdVideoH265SequenceParameterSetVui = std::mem::zeroed();
     vui.flags.set_video_signal_type_present_flag(1);
@@ -724,7 +729,7 @@ pub(super) unsafe fn build_parameters_h265(
     vui.flags.set_colour_description_present_flag(1);
     vui.video_format = 5; // unspecified — the CICP triplet below is what matters
                           // CICP: 1 = BT.709, 9 = BT.2020 primaries / 2020-NCL matrix, 16 = SMPTE 2084.
-    let (prim, trc, mat) = if ten_bit { (9, 16, 9) } else { (1, 1, 1) };
+    let (prim, trc, mat) = if hdr { (9, 16, 9) } else { (1, 1, 1) };
     vui.colour_primaries = prim;
     vui.transfer_characteristics = trc;
     vui.matrix_coeffs = mat;
@@ -882,6 +887,7 @@ fn av1_sequence_header_obu(
     order_hint_bits_minus_1: u32,
     seq_level_idx: u32,
     ten_bit: bool,
+    hdr: bool,
 ) -> Vec<u8> {
     let mut w = Av1BitWriter::new();
     w.put(0, 3); // seq_profile = MAIN
@@ -923,11 +929,7 @@ fn av1_sequence_header_obu(
     w.bit(ten_bit as u32); // high_bitdepth -> BitDepth = 10
     w.bit(0); // mono_chrome
     w.bit(1); // color_description_present_flag
-    let (prim, trc, mat) = if ten_bit {
-        (9u32, 16u32, 9u32)
-    } else {
-        (1, 1, 1)
-    };
+    let (prim, trc, mat) = if hdr { (9u32, 16u32, 9u32) } else { (1, 1, 1) };
     w.put(prim, 8); // color_primaries         (1 = BT.709, 9 = BT.2020)
     w.put(trc, 8); // transfer_characteristics (1 = BT.709, 16 = SMPTE 2084)
     w.put(mat, 8); // matrix_coefficients      (1 = BT.709, 9 = BT.2020 NCL)
@@ -961,9 +963,11 @@ pub(super) unsafe fn build_parameters_av1(
     max_level: ash::vk::native::StdVideoAV1Level,
     sb128: bool,
     quality_level: u32,
-    // Must match the profile the session was created with (`open_inner`'s `ten_bit`)
+    // Depth. Must match the profile the session was created with (`open_inner`'s `ten_bit`)
     // and the OBU packed below.
     ten_bit: bool,
+    // Colour (BT.709 vs BT.2020 PQ), independent of depth: 10-bit SDR is AV1 10-bit under BT.709.
+    hdr: bool,
 ) -> Result<(vk::VideoSessionParametersKHR, Vec<u8>, Vec<u8>)> {
     use crate::vk_av1_encode as av1;
     use ash::vk::native as hh;
@@ -983,7 +987,7 @@ pub(super) unsafe fn build_parameters_av1(
     cc.BitDepth = if ten_bit { 10 } else { 8 };
     cc.subsampling_x = 1;
     cc.subsampling_y = 1;
-    let (prim, trc, mat) = if ten_bit {
+    let (prim, trc, mat) = if hdr {
         (
             hh::StdVideoAV1ColorPrimaries_STD_VIDEO_AV1_COLOR_PRIMARIES_BT_2020,
             hh::StdVideoAV1TransferCharacteristics_STD_VIDEO_AV1_TRANSFER_CHARACTERISTICS_SMPTE_2084,
@@ -1067,6 +1071,7 @@ pub(super) unsafe fn build_parameters_av1(
         order_hint_bits_minus_1,
         seq_level_idx,
         ten_bit,
+        hdr,
     );
     let mut keyframe_prefix = td.clone();
     keyframe_prefix.extend_from_slice(&seq_obu);
@@ -1171,7 +1176,7 @@ mod tests {
         // 1920×1080 → 10/10 frame-size bits. Level 8 exercises seq_tier; sb128 both ways
         // because it sits above color_config.
         for (sb128, level) in [(false, 8u32), (true, 5u32)] {
-            let obu = av1_sequence_header_obu(sb128, 10, 10, 1919, 1079, 7, level, false);
+            let obu = av1_sequence_header_obu(sb128, 10, 10, 1919, 1079, 7, level, false, false);
             let (depth10, described, cp, tc, mc, range) = read_color_config(&obu, 10, 10, level);
             assert_eq!(depth10, 0, "high_bitdepth (8-bit session)");
             assert_eq!(
@@ -1187,12 +1192,12 @@ mod tests {
         }
     }
 
-    /// 10-bit session must signal BT.2020 + PQ with `high_bitdepth` set. That bit sits
+    /// 10-bit HDR must signal BT.2020 + PQ with `high_bitdepth` set. That bit sits
     /// before the CICP bytes in `color_config()`, so a miss phases every field after it.
     #[test]
     fn av1_sequence_header_signals_bt2020_pq_at_10_bit() {
         for (sb128, level) in [(false, 8u32), (true, 5u32)] {
-            let obu = av1_sequence_header_obu(sb128, 10, 10, 1919, 1079, 7, level, true);
+            let obu = av1_sequence_header_obu(sb128, 10, 10, 1919, 1079, 7, level, true, true);
             let (depth10, described, cp, tc, mc, range) = read_color_config(&obu, 10, 10, level);
             assert_eq!(depth10, 1, "high_bitdepth (sb128={sb128})");
             assert_eq!(described, 1, "color_description_present_flag");
@@ -1200,6 +1205,24 @@ mod tests {
                 (cp, tc, mc),
                 (9, 16, 9),
                 "CICP BT.2020 primaries / SMPTE 2084 transfer / BT.2020-NCL matrix"
+            );
+            assert_eq!(range, 0, "color_range = studio/limited swing");
+        }
+    }
+
+    /// 10-bit SDR: `high_bitdepth` set but BT.709 CICP, not BT.2020/PQ. The colour axis is
+    /// independent of depth (`rgb2yuv10_709.comp` performs the 709 matrix at ten bits).
+    #[test]
+    fn av1_sequence_header_signals_bt709_at_10_bit() {
+        for (sb128, level) in [(false, 8u32), (true, 5u32)] {
+            let obu = av1_sequence_header_obu(sb128, 10, 10, 1919, 1079, 7, level, true, false);
+            let (depth10, described, cp, tc, mc, range) = read_color_config(&obu, 10, 10, level);
+            assert_eq!(depth10, 1, "high_bitdepth (sb128={sb128})");
+            assert_eq!(described, 1, "color_description_present_flag");
+            assert_eq!(
+                (cp, tc, mc),
+                (1, 1, 1),
+                "CICP BT.709 primaries/transfer/matrix at 10-bit"
             );
             assert_eq!(range, 0, "color_range = studio/limited swing");
         }

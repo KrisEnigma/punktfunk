@@ -66,6 +66,9 @@ const CSC_SPV: &[u8] = include_bytes!("rgb2yuv.spv");
 /// 10-bit HDR twin (`rgb2yuv10.comp`): 2:10:10:10 PQ/BT.2020 RGB → 10-bit 4:2:0, BT.2020 NCL.
 /// Separate module: storage-image FORMAT (`r8`/`rg8` vs `r16`/`rg16`) is layout, not specializable.
 const CSC10_SPV: &[u8] = include_bytes!("rgb2yuv10.spv");
+/// 10-bit SDR twin (`rgb2yuv10_709.comp`): same 10-bit store as [`CSC10_SPV`], BT.709 matrix. For a
+/// Main10 / AV1-10 session that stays SDR — an 8-bit RGB capture widened to a 10-bit 709 stream.
+const CSC10_709_SPV: &[u8] = include_bytes!("rgb2yuv10_709.spv");
 /// Cursor-overlay texture (px). Larger than any pointer; actual `w×h` uploads top-left and the
 /// shader push-constant bounds sampling, so one allocation covers every cursor.
 const CURSOR_MAX: u32 = 256;
@@ -669,9 +672,12 @@ pub struct VulkanVideoEncoder {
     /// read past its extent. CSC/RGB paths keep app-aligned SPS (coded extent 64×16); an
     /// undersized direct source on those paths is an OOB-read class.
     native_nv12: bool,
-    /// 10-bit (HDR) session. Every profile chain rebuilt after `open` must present the same
-    /// depth, so it is carried here rather than re-derived.
+    /// 10-bit session (HDR or 10-bit SDR). Every profile chain rebuilt after `open` must present
+    /// the same depth, so it is carried here rather than re-derived.
     ten_bit: bool,
+    /// HDR colour (BT.2020 PQ) vs BT.709 (SDR at either depth). Independent of `ten_bit`: a 10-bit
+    /// SDR session has `ten_bit` set and `is_hdr` clear. A rebuilt session must keep the colour.
+    is_hdr: bool,
     /// Row-based intra refresh is enabled on the session and its device. `None` = unavailable.
     intra_refresh: Option<IntraRefreshCaps>,
     /// Wave in flight, if any. Set at frame-build, read by the record paths for that same
@@ -719,12 +725,17 @@ impl VulkanVideoEncoder {
         fps: u32,
         bitrate_bps: u64,
         cursor_blend: bool,
+        // Negotiated depth. A 10-bit SDR session captures an 8-bit surface, so `format` is not
+        // 10-bit and the depth must come from here; HDR is 10-bit by its packed/P010 format.
+        bit_depth: u8,
     ) -> Result<Self> {
         // A producer's own planar picture: NV12 at eight bits, P010 at ten.
         let native_nv12 = matches!(format, PixelFormat::Nv12 | PixelFormat::P010);
-        // Packed 10-bit PQ/BT.2020, or P010. Dispatcher already consulted `probe_encode_caps`;
-        // the profile query inside open re-checks.
-        let ten_bit = format.is_hdr_rgb10() || format == PixelFormat::P010;
+        // Colour: HDR is BT.2020 PQ, keyed on the packed-10/P010 capture format. Dispatcher already
+        // consulted `probe_encode_caps`; the profile query inside open re-checks.
+        let is_hdr = format.is_hdr_rgb10() || format == PixelFormat::P010;
+        // Depth: HDR, or a 10-bit SDR session on an 8-bit capture (`bit_depth == 10`, BT.709).
+        let ten_bit = is_hdr || bit_depth >= 10;
         // RGB-direct needs the captured format as the session picture format. BGRA default is
         // only for CPU-only layouts, which never reach that arm.
         let src_rgb_fmt = pixel_to_vk(format).unwrap_or(vk::Format::B8G8R8A8_UNORM);
@@ -746,6 +757,7 @@ impl VulkanVideoEncoder {
             want_rgb,
             native_nv12,
             ten_bit,
+            is_hdr,
             src_rgb_fmt,
         )
     }
@@ -761,11 +773,21 @@ impl VulkanVideoEncoder {
         bitrate_bps: u64,
         want_rgb: bool,
     ) -> Result<Self> {
-        Self::open_opts_depth(codec, width, height, fps, bitrate_bps, want_rgb, false)
+        Self::open_opts_depth(
+            codec,
+            width,
+            height,
+            fps,
+            bitrate_bps,
+            want_rgb,
+            false,
+            false,
+        )
     }
 
-    /// [`open_opts`](Self::open_opts) with bit depth explicit. A 10-bit session takes the packed
-    /// 2:10:10:10 source the HDR capture negotiates (`xRGB_210LE` → `A2R10G10B10_UNORM_PACK32`).
+    /// [`open_opts`](Self::open_opts) with depth and colour explicit. HDR takes the packed
+    /// 2:10:10:10 source the capture negotiates (`xRGB_210LE` → `A2R10G10B10_UNORM_PACK32`); SDR
+    /// (8- or 10-bit) takes the 8-bit BGRA source and, at ten bits, encodes Main10/AV1-10 as 709.
     #[cfg(test)]
     pub(crate) fn open_opts_depth(
         codec: Codec,
@@ -775,6 +797,7 @@ impl VulkanVideoEncoder {
         bitrate_bps: u64,
         want_rgb: bool,
         ten_bit: bool,
+        is_hdr: bool,
     ) -> Result<Self> {
         Self::open_opts_inner(
             codec,
@@ -785,7 +808,8 @@ impl VulkanVideoEncoder {
             want_rgb,
             false,
             ten_bit,
-            if ten_bit {
+            is_hdr,
+            if is_hdr {
                 vk::Format::A2R10G10B10_UNORM_PACK32
             } else {
                 vk::Format::B8G8R8A8_UNORM
@@ -803,6 +827,7 @@ impl VulkanVideoEncoder {
         want_rgb: bool,
         native_nv12: bool,
         ten_bit: bool,
+        is_hdr: bool,
         src_rgb_fmt: vk::Format,
     ) -> Result<Self> {
         if !matches!(codec, Codec::H265 | Codec::Av1) {
@@ -827,6 +852,7 @@ impl VulkanVideoEncoder {
                 want_rgb,
                 native_nv12,
                 ten_bit,
+                is_hdr,
                 src_rgb_fmt,
             )
         }
@@ -843,8 +869,10 @@ impl VulkanVideoEncoder {
         bitrate: u64,
         want_rgb: bool,
         native_nv12: bool,
-        // Not `hdr`: this fn already binds that name to the parameter-set header bytes below.
         ten_bit: bool,
+        // Colour axis (BT.2020 PQ vs BT.709). Named `is_hdr`, not `hdr`: this fn binds `hdr` to the
+        // parameter-set header bytes below, which would shadow it at the CSC-shader pick.
+        is_hdr: bool,
         src_rgb_fmt: vk::Format,
     ) -> Result<Self> {
         use super::vk_av1_encode as av1b;
@@ -899,7 +927,16 @@ impl VulkanVideoEncoder {
         let rgb_probe = if native_nv12 {
             Err("not-probed(native NV12 source selected)")
         } else {
-            probe_rgb_direct(&instance, &vq_inst, pd, codec_op, av1, ten_bit, src_rgb_fmt)
+            probe_rgb_direct(
+                &instance,
+                &vq_inst,
+                pd,
+                codec_op,
+                av1,
+                ten_bit,
+                is_hdr,
+                src_rgb_fmt,
+            )
         };
         let rgb_cfg: Option<RgbDirect> = match (&rgb_probe, want_rgb) {
             (Ok((x, y)), true) => {
@@ -1222,7 +1259,7 @@ impl VulkanVideoEncoder {
         let mut rgb_sci = vrgb::VideoEncodeSessionRgbConversionCreateInfoVALVE {
             s_type: vrgb::stype(vrgb::ST_SESSION_CREATE_INFO),
             p_next: std::ptr::null(),
-            rgb_model: rgb_model_for(ten_bit),
+            rgb_model: rgb_model_for(is_hdr),
             rgb_range: vrgb::RANGE_NARROW,
             x_chroma_offset: rgb_cfg.as_ref().map_or(0, |c| c.x_offset),
             y_chroma_offset: rgb_cfg.as_ref().map_or(0, |c| c.y_offset),
@@ -1334,6 +1371,7 @@ impl VulkanVideoEncoder {
                 av1_superblock128,
                 quality_level,
                 ten_bit,
+                is_hdr,
             )?
         } else {
             let (p, hdr) = build_parameters_h265(
@@ -1347,6 +1385,7 @@ impl VulkanVideoEncoder {
                 rh,
                 quality_level,
                 ten_bit,
+                is_hdr,
             )?;
             (p, hdr, Vec::new())
         };
@@ -1389,10 +1428,11 @@ impl VulkanVideoEncoder {
             None,
         )?;
         guard.sampler = sampler;
-        let spv = ash::util::read_spv(&mut std::io::Cursor::new(if ten_bit {
-            CSC10_SPV
-        } else {
-            CSC_SPV
+        // 8-bit is 709; 10-bit splits by colour — BT.2020 PQ for HDR, BT.709 for SDR-10.
+        let spv = ash::util::read_spv(&mut std::io::Cursor::new(match (ten_bit, is_hdr) {
+            (true, true) => CSC10_SPV,
+            (true, false) => CSC10_709_SPV,
+            (false, _) => CSC_SPV,
         }))?;
         let shader =
             device.create_shader_module(&vk::ShaderModuleCreateInfo::default().code(&spv), None)?;
@@ -1579,6 +1619,7 @@ impl VulkanVideoEncoder {
             reframe: None,
             native_nv12,
             ten_bit,
+            is_hdr,
             intra_refresh,
             wave: None,
             pending_bitrate: None,
@@ -3973,6 +4014,7 @@ impl Encoder for VulkanVideoEncoder {
                 false,
                 false,
                 self.ten_bit,
+                self.is_hdr,
                 vk::Format::B8G8R8A8_UNORM,
             )?;
         }
@@ -4627,7 +4669,8 @@ mod tests {
         };
         let (w, h) = (env_dim("PF_SMOKE_W", 256), env_dim("PF_SMOKE_H", 256));
         let mut enc =
-            match VulkanVideoEncoder::open_opts_depth(codec, w, h, 60, 10_000_000, rgb, true) {
+            match VulkanVideoEncoder::open_opts_depth(codec, w, h, 60, 10_000_000, rgb, true, true)
+            {
                 Ok(e) => e,
                 Err(e) => {
                     eprintln!("run_smoke_10bit({codec:?}, rgb={rgb}): open declined — {e:#}");
@@ -4695,6 +4738,74 @@ mod tests {
     fn vulkan_smoke_rgb_10bit() {
         if let Some(aus) = run_smoke_10bit(Codec::H265, true) {
             dump_smoke(&aus, "rgb.10bit.h265");
+        }
+    }
+
+    /// 10-bit SDR twin of [`run_smoke_10bit`]: a Main10 / AV1-10 session fed an 8-bit BGRA capture
+    /// (`bit_depth == 10`, HDR off) — `rgb2yuv10_709.comp` widens 8→10 under BT.709. `None` = the
+    /// device declined the 10-bit profile.
+    fn run_smoke_10bit_sdr(codec: Codec) -> Option<Vec<crate::EncodedFrame>> {
+        let env_dim = |k: &str, d: u32| {
+            std::env::var(k)
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(d)
+        };
+        let (w, h) = (env_dim("PF_SMOKE_W", 256), env_dim("PF_SMOKE_H", 256));
+        // ten_bit + SDR: an 8-bit capture at depth 10. want_rgb=false forces the compute CSC (the
+        // 709 10-bit shader), the path a composited-cursor desktop always takes.
+        let mut enc = match VulkanVideoEncoder::open_opts_depth(
+            codec, w, h, 60, 10_000_000, false, true, false,
+        ) {
+            Ok(e) => e,
+            Err(e) => {
+                eprintln!("run_smoke_10bit_sdr({codec:?}): open declined — {e:#}");
+                return None;
+            }
+        };
+        assert!(enc.ten_bit, "a 10-bit session must report 10-bit");
+        let colors = [
+            [40u8, 40, 200, 255],
+            [40, 200, 40, 255],
+            [200, 40, 40, 255],
+            [200, 200, 40, 255],
+            [40, 200, 200, 255],
+            [200, 40, 200, 255],
+            [120, 200, 80, 255],
+            [80, 120, 200, 255],
+        ];
+        let mut aus: Vec<crate::EncodedFrame> = Vec::new();
+        for (i, c) in colors.iter().enumerate() {
+            enc.submit_indexed(&cpu_frame(w, h, i as u64 * 16_666_667, *c), i as u32)
+                .expect("submit");
+            while let Some(au) = enc.poll().expect("poll") {
+                aus.push(au);
+            }
+        }
+        enc.flush().expect("flush");
+        while let Some(au) = enc.poll().expect("poll") {
+            aus.push(au);
+        }
+        assert_eq!(aus.len(), colors.len(), "one AU per submitted frame");
+        assert!(aus[0].keyframe, "frame 0 must be IDR");
+        Some(aus)
+    }
+
+    /// HEVC Main10 SDR through the compute CSC (BT.709 at ten bits).
+    #[test]
+    #[ignore = "needs a real VK_KHR_video_encode_h265 device with a 10-bit profile"]
+    fn vulkan_smoke_10bit_sdr() {
+        if let Some(aus) = run_smoke_10bit_sdr(Codec::H265) {
+            dump_smoke(&aus, "10bit.sdr.h265");
+        }
+    }
+
+    /// AV1 10-bit SDR — the AMD/Intel path VAAPI cannot serve.
+    #[test]
+    #[ignore = "needs a real VK_KHR_video_encode_av1 device with a 10-bit profile"]
+    fn vulkan_smoke_10bit_sdr_av1() {
+        if let Some(aus) = run_smoke_10bit_sdr(Codec::Av1) {
+            dump_smoke(&aus, "10bit.sdr.obu");
         }
     }
 
