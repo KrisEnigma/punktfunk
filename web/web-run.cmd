@@ -42,7 +42,9 @@ set "PUNKTFUNK_UI_PASSWORD_FILE=%PWFILE%"
 
 rem Fixed deployment wiring (the Windows analogue of scripts/punktfunk-web.service).
 set "PORT=47992"
-set "HOST=0.0.0.0"
+rem No HOST line: the server binds 127.0.0.1 unless PUNKTFUNK_UI_BIND says otherwise (host.env on
+rem an installed box). Set it here to reach this dev console from another device.
+rem set "PUNKTFUNK_UI_BIND=0.0.0.0"
 set "PUNKTFUNK_MGMT_URL=https://127.0.0.1:47990"
 rem ...unless the host published a different one. `serve` writes mgmt-endpoint in the same single
 rem KEY=VALUE form as the token above, carrying the port it ACTUALLY bound - so a host moved off
