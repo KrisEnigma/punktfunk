@@ -831,6 +831,7 @@ pub(super) fn input_thread(
     let mut pad_streams = PadAudioSlots::new();
     // Per-pad motion cadence, always on. Summarized at `info` on session end.
     let mut motion_cadence = super::motion_cadence::MotionCadence::new();
+    let mut pad_uplink = super::pad_uplink::PadUplink::new(std::time::Instant::now());
     let mut pad_state = [PadState::default(); MAX_WIRE_PADS];
     let mut pad_mask = 0u16;
     // Last applied snapshot seq (`None` until first). Older seq must not roll held state back.
@@ -886,6 +887,14 @@ pub(super) fn input_thread(
             pads.feedback_poll_interval()
         };
         let arrived = rx.recv_timeout(poll);
+        if let Some(w) = pad_uplink.take_window(std::time::Instant::now()) {
+            tracing::info!(
+                updates = w.updates,
+                lost = w.lost,
+                max_gap_ms = w.max_gap_ms,
+                "controller uplink"
+            );
+        }
         // Any arrival, before grant tests: a denied event still means a person is
         // here, so drop a standing suspend veto (`sleep_inhibit`).
         if arrived.is_ok() {
@@ -937,6 +946,19 @@ pub(super) fn input_thread(
                         use punktfunk_core::input::GamepadSnapshot;
                         if let Some(snap) = GamepadSnapshot::from_event(&ev) {
                             let idx = snap.pad as usize;
+                            if let Some(g) =
+                                pad_uplink.note(idx, snap.seq, std::time::Instant::now())
+                            {
+                                tracing::warn!(
+                                    pad = g.pad,
+                                    silence_ms = g.silence_ms,
+                                    lost = g.lost,
+                                    "controller updates stopped reaching the host — lost: \
+                                     updates the client sent that never arrived. lost near \
+                                     silence_ms / 100 = the path dropped them; 0 = the client \
+                                     sent none"
+                                );
+                            }
                             if idx < MAX_WIRE_PADS
                                 && GamepadSnapshot::seq_newer(snap.seq, pad_seq[idx])
                             {
@@ -966,6 +988,7 @@ pub(super) fn input_thread(
                             && punktfunk_core::input::GamepadSnapshot::seq_newer(seq, pad_seq[idx])
                         {
                             pad_seq[idx] = Some(seq);
+                            pad_uplink.forget(idx);
                             if pad_mask & (1 << idx) != 0 {
                                 pad_mask &= !(1 << idx);
                                 pad_state[idx] = PadState::default();

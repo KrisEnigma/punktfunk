@@ -52,6 +52,8 @@ mod pad_audio;
 mod input;
 /// Per-pad motion inter-arrival ([`motion_cadence::MotionCadence`]), logged at session end.
 mod motion_cadence;
+/// Controller updates reaching the host ([`pad_uplink::PadUplink`]): the client → host link.
+mod pad_uplink;
 use input::{input_thread, ClientInput};
 
 mod handshake;

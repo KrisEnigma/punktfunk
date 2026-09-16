@@ -251,6 +251,7 @@ impl DataPump {
         let mut standing_lat = StandingLatency::new();
         // A hole's two causes told apart: silence at the socket vs. this thread away from it.
         let mut rx_gap = super::rx_gap::RxGap::new(Instant::now());
+        let mut ingress_since = (Instant::now(), session.stats());
         while !pump_shutdown.load(Ordering::SeqCst) {
             // Reloaded every iteration so a mid-stream re-sync hits the
             // next frame's latency math.
@@ -294,6 +295,20 @@ impl DataPump {
                      this thread's longest absence from the socket meanwhile. Near-equal = \
                      this client stalled; unpolled small = nothing arrived, the path or the host"
                 );
+            }
+            let elapsed = ingress_since.0.elapsed();
+            if elapsed >= super::rx_gap::IngressWindow::PERIOD {
+                let w = super::rx_gap::IngressWindow::between(&ingress_since.1, &st, elapsed);
+                tracing::info!(
+                    packets = w.packets,
+                    video_kbps = w.video_kbps,
+                    fec_repaired = w.fec_repaired,
+                    frames_dropped = w.frames_dropped,
+                    rejected = w.rejected,
+                    max_gap_ms = rx_gap.take_max_silence().as_millis() as u64,
+                    "wire ingress"
+                );
+                ingress_since = (Instant::now(), st);
             }
             frames_dropped.store(st.frames_dropped, Ordering::Relaxed);
             fec_recovered.store(st.fec_recovered_shards, Ordering::Relaxed);
