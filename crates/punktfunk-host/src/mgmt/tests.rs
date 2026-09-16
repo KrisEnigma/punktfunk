@@ -3556,6 +3556,7 @@ fn a_recorded_launch_credits_its_run_to_the_library_stats() {
             workspace: None,
             #[cfg(target_os = "linux")]
             window_stage: None,
+            outcome: None,
         },
         Box::new(|| {}),
     );

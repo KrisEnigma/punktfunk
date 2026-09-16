@@ -2076,6 +2076,7 @@ mod tests {
                 workspace: None,
                 #[cfg(target_os = "linux")]
                 window_stage: None,
+                outcome: None,
             },
             Box::new(|| {
                 EXITS.fetch_add(1, Ordering::SeqCst);
@@ -2320,6 +2321,7 @@ mod tests {
                 workspace: None,
                 #[cfg(target_os = "linux")]
                 window_stage: None,
+                outcome: None,
             },
             Box::new(|| {
                 EXITS.fetch_add(1, Ordering::SeqCst);
