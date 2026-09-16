@@ -109,8 +109,9 @@ pub struct OutputFormat {
     /// 10-bit HDR: IDD-push FP16 → `P010` (or `Rgb10a2` for 4:4:4). `false` = 8-bit SDR.
     pub hdr: bool,
     /// 10-bit SDR (`bit_depth == 10`, HDR off). Windows IDD-push expands BGRA 8→10 into
-    /// [`PixelFormat::Rgb10a2Sdr`] so NVENC encodes Main10 under BT.709 VUI. Mutually
-    /// exclusive with `hdr`. Ignored on Linux (no SDR-10 chain; handshake never offers it).
+    /// [`PixelFormat::Rgb10a2Sdr`]; on Linux it makes the pipewire capturer keep packed RGB
+    /// (skip the NV12 convert) so direct-NVENC can widen 8→10. NVENC encodes Main10 under
+    /// BT.709 VUI. Mutually exclusive with `hdr`.
     pub ten_bit_sdr: bool,
     /// Full-chroma 4:4:4: capturer must not subsample. Windows IDD-push passes BGRA through
     /// (skip BGRA→NV12) so NVENC CSCs to 4:4:4 under the VUI matrix. Linux forces CPU RGB

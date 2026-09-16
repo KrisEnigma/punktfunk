@@ -1432,12 +1432,10 @@ pub fn backend_carries_sdr10() -> bool {
 }
 #[cfg(target_os = "linux")]
 pub fn backend_carries_sdr10() -> bool {
-    // Direct NVENC only, and only when capture is packed RGB. With `PUNKTFUNK_NV12` on (the
-    // default) the tiled path hands NVENC an 8-bit NV12 surface a 10-bit session refuses, so
-    // 10-bit SDR needs `PUNKTFUNK_NV12=0`; otherwise we would negotiate 10-bit and degrade.
-    cfg!(feature = "nvenc")
-        && linux_resolved_backend() == LinuxBackend::Nvenc
-        && !pf_zerocopy::nv12_enabled()
+    // Direct NVENC only. The pipewire capturer keeps packed RGB for a 10-bit SDR session
+    // (`OutputFormat::ten_bit_sdr`), so NVENC widens 8→10 whatever `PUNKTFUNK_NV12` is; the
+    // encoder still degrades a planar surface to 8-bit if some path delivers one.
+    cfg!(feature = "nvenc") && linux_resolved_backend() == LinuxBackend::Nvenc
 }
 #[cfg(not(any(target_os = "windows", target_os = "linux")))]
 pub fn backend_carries_sdr10() -> bool {

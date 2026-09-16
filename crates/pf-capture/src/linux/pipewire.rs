@@ -179,6 +179,17 @@ pub(super) struct ImportState {
     pub fail_streak: u32,
 }
 
+impl ImportPolicy {
+    /// A 10-bit SDR session keeps packed RGB whatever `PUNKTFUNK_NV12` asks: NVENC widens 8-bit
+    /// to 10-bit only from packed RGB and refuses a planar 8-bit surface in a 10-bit session.
+    fn for_ten_bit_sdr(mut self, ten_bit_sdr: bool) -> Self {
+        if ten_bit_sdr {
+            self.nv12 = false;
+        }
+        self
+    }
+}
+
 /// [`gpu_import`]'s verdict. `ImporterLost` is a LINEAR failure: the caller retires the
 /// importer and the stream continues on the CPU path.
 pub(super) enum ImportOutcome {
@@ -1663,7 +1674,7 @@ pub fn pipewire_thread(
         wake,
         signals,
         vaapi_passthrough,
-        import_policy: plan.import_policy,
+        import_policy: plan.import_policy.for_ten_bit_sdr(opts.ten_bit_sdr),
         import_state: ImportState::default(),
         dbg_log_n: 0,
         pts: crate::pts_provenance::PtsProvenance::new(),
@@ -2649,8 +2660,20 @@ fn dmabuf_modifiers_for_producer(egl: &[u64], advertise: bool, gamescope: bool) 
 mod tests {
     use super::{
         dmabuf_modifiers_for_producer, holds_possible, negotiation_plan, offer_pacing,
-        packed_frame_geometry, supported_data_plane_count, NegotiationInputs, Pacing,
+        packed_frame_geometry, supported_data_plane_count, ImportPolicy, NegotiationInputs, Pacing,
     };
+
+    /// A 10-bit SDR session drops NV12 for packed RGB (NVENC widens 8-bit to 10-bit only from
+    /// packed RGB); an 8-bit session keeps whatever `PUNKTFUNK_NV12` configured.
+    #[test]
+    fn ten_bit_sdr_keeps_packed_rgb() {
+        let p = ImportPolicy {
+            nv12: true,
+            yuv444: false,
+        };
+        assert!(!p.for_ten_bit_sdr(true).nv12);
+        assert!(p.for_ten_bit_sdr(false).nv12);
+    }
 
     /// The raw lane needs the importer (its modifier offer) and a live raw-dmabuf latch.
     #[test]
