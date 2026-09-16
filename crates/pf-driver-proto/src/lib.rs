@@ -1273,6 +1273,9 @@ pub mod encode {
         Nv12,
         /// Shader FP16 scRGB→P010 PQ, 10-bit 4:2:0.
         P010,
+        /// Video-engine BGRA→P010, 10-bit 4:2:0 BT.709 (10-bit SDR): an 8-bit capture widened to a
+        /// Main10 stream under BT.709, no HDR volume. AMF only — NVENC widens from `Bgra` itself.
+        P010Sdr,
         /// Shader FP16 scRGB→packed `R10G10B10A2` PQ BT.2020; the backend CSCs to 4:4:4 itself.
         Rgb10,
         /// Shareable Y + CbCr planes plus a fence, as PyroWave's own Vulkan device imports them.
@@ -1281,18 +1284,20 @@ pub mod encode {
 
     impl EncodeInput {
         /// The input for `backend` (the [`SetEncodeRequest::backends`] numbering) under the
-        /// request's HDR and 4:4:4 flags. Only NVENC ingests packed RGB, so only it can pair
-        /// HDR with full chroma; AMF and QSV take P010 and encode 4:2:0. Media Foundation
-        /// takes NV12 whatever was asked for — no vendor's MFT accepts P010, so an HDR
-        /// request that reaches it encodes 8-bit rather than failing the open.
+        /// request's HDR, depth and 4:4:4 flags. Only NVENC ingests packed RGB, so only it can
+        /// pair HDR with full chroma; AMF and QSV take P010 and encode 4:2:0. `ten_bit` without
+        /// `hdr` is 10-bit SDR: NVENC still widens from `Bgra`, AMF takes a BT.709 P010
+        /// (`P010Sdr`). Media Foundation takes NV12 whatever was asked for — no vendor's MFT
+        /// accepts P010, so an HDR request that reaches it encodes 8-bit rather than failing.
         #[must_use]
-        pub const fn choose(backend: u32, hdr: bool, chroma444: bool) -> Self {
+        pub const fn choose(backend: u32, hdr: bool, ten_bit: bool, chroma444: bool) -> Self {
             match (backend, hdr, chroma444) {
                 (backend::PYROWAVE, _, _) => Self::Planar { hdr, chroma444 },
                 (backend::MEDIA_FOUNDATION, _, _) => Self::Nv12,
                 (backend::NVENC, true, true) => Self::Rgb10,
                 (_, true, _) => Self::P010,
                 (backend::NVENC, false, _) => Self::Bgra,
+                (backend::AMF, false, _) if ten_bit => Self::P010Sdr,
                 _ => Self::Nv12,
             }
         }
@@ -3900,31 +3905,40 @@ mod tests {
     /// the client's Welcome — still said 4:4:4.
     #[test]
     fn a_444_request_picks_a_full_chroma_input() {
-        use encode::EncodeInput::{self, Bgra, Nv12, Planar, Rgb10, P010};
+        use encode::EncodeInput::{self, Bgra, Nv12, P010Sdr, Planar, Rgb10, P010};
 
+        // (backend, hdr, ten_bit, chroma444) -> input. HDR implies ten_bit; 10-bit SDR is
+        // ten_bit without hdr.
         let table = [
-            ((1, false, false), Bgra),
-            ((1, false, true), Bgra),
-            ((1, true, false), P010),
-            ((1, true, true), Rgb10),
-            ((2, true, true), P010),
-            ((3, false, true), Nv12),
+            ((1, false, false, false), Bgra),
+            ((1, false, true, false), Bgra), // NVENC widens SDR-10 from BGRA itself
+            ((1, false, false, true), Bgra),
+            ((1, true, true, false), P010),
+            ((1, true, true, true), Rgb10),
+            ((2, true, true, true), P010),
+            ((2, false, true, false), P010Sdr), // AMF 10-bit SDR: BT.709 P010
+            ((2, false, false, false), Nv12),   // AMF 8-bit SDR
+            ((3, false, false, true), Nv12),
+            ((3, false, true, true), Nv12), // QSV 10-bit SDR not wired: 8-bit NV12
             (
-                (4, true, true),
+                (4, true, true, true),
                 Planar {
                     hdr: true,
                     chroma444: true,
                 },
             ),
         ];
-        for ((backend, hdr, chroma444), want) in table {
-            let got = EncodeInput::choose(backend, hdr, chroma444);
-            assert_eq!(got, want, "backend {backend} hdr {hdr} 444 {chroma444}");
+        for ((backend, hdr, ten_bit, chroma444), want) in table {
+            let got = EncodeInput::choose(backend, hdr, ten_bit, chroma444);
+            assert_eq!(
+                got, want,
+                "backend {backend} hdr {hdr} 10bit {ten_bit} 444 {chroma444}"
+            );
         }
         for backend in [1, 4] {
             for hdr in [false, true] {
                 assert!(
-                    EncodeInput::choose(backend, hdr, true).full_chroma(),
+                    EncodeInput::choose(backend, hdr, hdr, true).full_chroma(),
                     "backend {backend} hdr {hdr} asked 4:4:4 and got a subsampled input"
                 );
             }
