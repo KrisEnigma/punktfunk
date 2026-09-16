@@ -148,6 +148,8 @@ pub struct Encoder {
     /// A producer's own NV12/P010 at the session's size: the next picture is encoded
     /// straight from this import, no VPP pass. Destroyed once that encode has synced.
     direct: Option<VaSurfaceId>,
+    /// The first direct picture has been logged; a field log, not a per-frame one.
+    direct_seen: bool,
     params: SessionParams,
     /// Frames encoded since the last IDR; `frame_num` in the slice header.
     frame_num: u16,
@@ -403,6 +405,7 @@ impl Encoder {
             vpp,
             staging: None,
             direct: None,
+            direct_seen: false,
             params,
             frame_num: 0,
             idr_pic_id: 0,
@@ -588,6 +591,14 @@ impl Encoder {
         ) {
             self.clear_direct();
             self.direct = Some(surface);
+            if !self.direct_seen {
+                self.direct_seen = true;
+                tracing::info!(
+                    fourcc = format_args!("{:#010x}", source.drm_fourcc),
+                    ten_bit = self.ten_bit(),
+                    "VAAPI: encoding the producer's own picture direct (no conversion pass)"
+                );
+            }
             return Ok(());
         }
         let converted = self.vpp.convert(
