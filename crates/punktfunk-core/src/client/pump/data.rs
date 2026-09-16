@@ -1044,6 +1044,7 @@ mod tests {
                 access_tx,
                 audio_mute: Arc::new(std::sync::atomic::AtomicU8::new(0)),
                 pad_slots: Arc::new(std::sync::atomic::AtomicU16::new(0)),
+                launch_outcome: Arc::new(Mutex::new(None)),
             }
             .run(),
         );

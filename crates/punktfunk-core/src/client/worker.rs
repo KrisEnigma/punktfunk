@@ -115,6 +115,8 @@ pub(crate) struct WorkerArgs {
     /// OS pad slots this session holds, one bit each ([`crate::quic::PadSlots`]).
     /// The player number the overlay names; `0` until the first pad has a device.
     pub(crate) pad_slots: Arc<AtomicU16>,
+    /// Latest launch verdict the host sent ([`crate::quic::LaunchOutcome`]).
+    pub(crate) launch_outcome: Arc<Mutex<Option<crate::quic::LaunchOutcome>>>,
     /// Live grants. Seeded from the Welcome advert; every `AccessUpdate` overwrites
     /// (latest wins).
     pub(crate) access_grants: Arc<AtomicU32>,

@@ -4645,6 +4645,46 @@ pub unsafe extern "C" fn punktfunk_connection_end_reject_said(
     })
 }
 
+/// The host's sentence when this session's launch did not give the player their game,
+/// NUL-terminated, into the caller's buffer; empty otherwise. The latest verdict wins, so
+/// poll it. A 256-byte buffer is ample: the wire caps this at 200.
+///
+/// # Safety
+/// `c` is a valid connection handle; `out` is writable for `cap` bytes.
+#[cfg(feature = "quic")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn punktfunk_connection_launch_notice(
+    c: *const PunktfunkConnection,
+    out: *mut c_char,
+    cap: usize,
+) -> PunktfunkStatus {
+    guard(|| {
+        // SAFETY: caller handle or null; `as_ref` never dereferences null.
+        let c = match unsafe { c.as_ref() } {
+            Some(c) => c,
+            None => return PunktfunkStatus::NullPointer,
+        };
+        if out.is_null() || cap == 0 {
+            return PunktfunkStatus::NullPointer;
+        }
+        let outcome = c.inner.launch_outcome();
+        let notice = outcome
+            .as_ref()
+            .and_then(|o| o.notice())
+            .unwrap_or_default();
+        if notice.len() + 1 > cap {
+            return PunktfunkStatus::InvalidArg;
+        }
+        // SAFETY: `out` is non-null and holds `cap` >= notice.len() + 1 bytes.
+        unsafe {
+            // `.cast()`: `c_char` is i8 on x86_64 and u8 on aarch64.
+            std::ptr::copy_nonoverlapping(notice.as_ptr(), out.cast::<u8>(), notice.len());
+            *out.add(notice.len()) = 0;
+        }
+        PunktfunkStatus::Ok
+    })
+}
+
 /// Mid-session typed rejection (`PUNKTFUNK_STATUS_REJECTED_*`); `0` = none.
 /// Ask after `Closed`, before free. Connect-time rejections come from connect.
 ///

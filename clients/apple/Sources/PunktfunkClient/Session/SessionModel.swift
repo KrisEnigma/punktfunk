@@ -314,6 +314,13 @@ final class SessionModel: ObservableObject {
     private var accessWarned1m = false
     /// Auto-dismiss for `accessWarning` — held so a newer warning replaces a pending clear.
     private var accessWarningTimer: Task<Void, Never>?
+    /// The host's line for a launch that did not give the player their game, up for
+    /// `launchNoticeSeconds`. `launchNoticeShown` keeps one verdict from re-raising it.
+    @Published private(set) var launchNotice: String?
+    private var launchNoticeShown: String?
+    private var launchNoticeTimer: Task<Void, Never>?
+    /// Long enough to read a sentence with its cause.
+    private static let launchNoticeSeconds: UInt64 = 10
     #if os(tvOS)
     /// Siri Remote → host pointer while streaming (touch surface moves, press = left click,
     /// Play/Pause = right click) + the remote's deliberate exit (hold Back ≥ 1 s). See
@@ -808,6 +815,18 @@ final class SessionModel: ObservableObject {
         }
     }
 
+    /// Same transient contract as `showAccessWarning`, on its own timer so neither hides the other.
+    private func showLaunchNotice(_ text: String) {
+        launchNoticeShown = text
+        launchNotice = text
+        launchNoticeTimer?.cancel()
+        launchNoticeTimer = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(Self.launchNoticeSeconds))
+            guard !Task.isCancelled else { return }
+            self?.launchNotice = nil
+        }
+    }
+
     /// "1 h 58 m" / "12 m" / "45 s" — the countdown wording the chip and the warnings share.
     static func accessCountdown(_ secs: UInt32) -> String {
         let s = Int(secs)
@@ -877,6 +896,10 @@ final class SessionModel: ObservableObject {
         accessWarningTimer?.cancel()
         accessWarningTimer = nil
         accessWarning = nil
+        launchNoticeTimer?.cancel()
+        launchNoticeTimer = nil
+        launchNotice = nil
+        launchNoticeShown = nil
         accessLevel = .fullControl
         accessRemainingSecs = 0
         accessLimited = false
@@ -1244,6 +1267,9 @@ final class SessionModel: ObservableObject {
                 // readout also walks the countdown and picks up mid-session grant edits.
                 self.updateAccessState()
                 guard let conn = self.connection else { return }
+                if let notice = conn.launchNotice, notice != self.launchNoticeShown {
+                    self.showLaunchNotice(notice)
+                }
                 let (frames, _) = self.meter.drain()
                 // Host timings (0xCF) feed the core, which matches each to its frame. Bounded: a
                 // 240 fps window is ~240 reports; a throw (closed) just ends the drain.

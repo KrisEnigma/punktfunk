@@ -1284,6 +1284,11 @@ struct ContentView: View {
                             AccessWarningBadge(text: warning)
                                 .transition(.opacity.combined(with: .scale(scale: 0.9)))
                         }
+                        // The host's word on a launch that did not give the player their game.
+                        if captureEnabled, let notice = model.launchNotice {
+                            AccessWarningBadge(text: notice, icon: "exclamationmark.triangle")
+                                .transition(.opacity.combined(with: .scale(scale: 0.9)))
+                        }
                         #if !os(tvOS)
                         // The access chip — up for a LIMITED session ("Controller only ·
                         // ends in 1 h 58 m") while the stats overlay is on. It rides the
@@ -1318,6 +1323,7 @@ struct ContentView: View {
                     .padding(.bottom, 24)
                     .animation(.easeOut(duration: 0.2), value: model.micMuted)
                     .animation(.easeOut(duration: 0.2), value: model.accessWarning)
+                    .animation(.easeOut(duration: 0.2), value: model.launchNotice)
                     .animation(.easeOut(duration: 0.2), value: model.accessLimited)
                     // The access chip now rides the stats tier, so the tier is a visibility
                     // driver for this stack too — without it the chip pops on the toggle.
