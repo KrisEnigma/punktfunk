@@ -542,8 +542,10 @@ fn no_such_session() -> Response {
 
 /// End waiting games
 ///
-/// Ends games waiting out the reconnect window. Does not touch a live session
-/// (`DELETE /session` plus `game_on_session_end`).
+/// Ends games waiting out the reconnect window. With `streaming` and an
+/// `app_id`, also ends that title where it is still on a live session — the
+/// move a player has after a launch that never produced a game. The session
+/// itself stays up (`DELETE /session` plus `game_on_session_end`).
 #[utoipa::path(
     post,
     path = "/game/end",
@@ -557,7 +559,18 @@ fn no_such_session() -> Response {
     )
 )]
 pub(crate) async fn end_game(ApiJson(req): ApiJson<EndGameRequest>) -> Response {
-    let ended = crate::gamelease::end_pending(req.app_id.as_deref());
+    let mut ended = crate::gamelease::end_pending(req.app_id.as_deref());
+    // Named title only. The id-less form stays "every waiting game", which is
+    // what the console's one button has always meant.
+    if req.streaming && req.app_id.is_some() {
+        for shared in crate::session_status::live_games(req.app_id.as_deref()) {
+            if !shared.is_trackable() || shared.is_terminating() {
+                continue;
+            }
+            crate::gamelease::terminate(shared, "ended from the management API");
+            ended += 1;
+        }
+    }
     if ended == 0 {
         return api_error(StatusCode::CONFLICT, "no game is waiting to be ended");
     }
@@ -570,6 +583,11 @@ pub(crate) struct EndGameRequest {
     /// Store-qualified id (`steam:570`); omit to end every waiting game.
     #[serde(default)]
     pub app_id: Option<String>,
+    /// Also end `app_id` where it is on a live session, not only where it is
+    /// waiting out a reconnect window. Ignored without `app_id`.
+    #[serde(default)]
+    #[schema(required = false)]
+    pub streaming: bool,
 }
 
 #[derive(Serialize, ToSchema)]

@@ -488,11 +488,12 @@ fun StreamScreen(session: ActiveSession, onSessionEnded: (SessionEndReason) -> U
     // Ending from a path that fires while the app is already away — minutes after the recomposer
     // paused, so the disposal that `onSessionEnded` schedules will not run until the user comes
     // back, leaving the host streaming to an empty room. Repeating is free: a stale handle makes
-    // every native call here a no-op, and the disposal runs the same ones.
-    fun endAway(deliberate: Boolean) {
+    // every native call here a no-op, and the disposal runs the same ones. `reason` decides where
+    // the app lands: `GAME_EXITED` returns a library launch to its own shelf.
+    fun endAway(deliberate: Boolean, reason: SessionEndReason = SessionEndReason.LOCAL) {
         if (deliberate) NativeBridge.nativeDisconnectQuit(handle) else NativeBridge.nativeClose(handle)
         StreamKeepAliveService.stop(context)
-        onSessionEnded(SessionEndReason.LOCAL)
+        onSessionEnded(reason)
     }
 
     // The ongoing notification goes up when the session starts, not when the user leaves: an app
@@ -990,7 +991,15 @@ fun StreamScreen(session: ActiveSession, onSessionEnded: (SessionEndReason) -> U
         }
         // Last, so it covers everything: the launched title's poster until its game is up.
         var launchHold by remember(session) { mutableStateOf(session.launchHold) }
-        launchHold?.let { LaunchHoldOverlay(it) { launchHold = null } }
+        launchHold?.let {
+            LaunchHoldOverlay(
+                it,
+                // Retry is the shelf the launch came off: ending as `GAME_EXITED` puts a library
+                // launch back on it, one press from the same tile.
+                onRetry = { endAway(true, SessionEndReason.GAME_EXITED) },
+                onShow = { launchHold = null },
+            )
+        }
     }
 }
 

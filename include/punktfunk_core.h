@@ -917,6 +917,13 @@
 // [`PadSlots`]. 0x5B: 0x5A is the launch outcome.
 #define PUNKTFUNK_MSG_PAD_SLOTS 91
 
+// [`LaunchOutcome`]. 0x5A: next after [`MSG_AUDIO_STATE`].
+#define PUNKTFUNK_MSG_LAUNCH_OUTCOME 90
+
+// Longest [`LaunchOutcome::message`] in UTF-8 bytes. One sentence plus a cause;
+// a host cannot make the client hold more than this.
+#define PUNKTFUNK_LAUNCH_MESSAGE_MAX 200
+
 #define PUNKTFUNK_AUDIO_MAGIC 201
 
 #define PUNKTFUNK_RUMBLE_MAGIC 202

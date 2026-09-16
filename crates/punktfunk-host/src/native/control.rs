@@ -79,6 +79,10 @@ pub(super) struct Task {
     /// OS pad slots this session holds, from the input thread. The client names the
     /// player it is from this; wire indices are per client and say nothing about it.
     pub(super) pad_slots_rx: tokio::sync::mpsc::UnboundedReceiver<punktfunk_core::quic::PadSlots>,
+    /// What became of this session's library launch, from the launch site and
+    /// from the lease when the game dies on the spot.
+    pub(super) launch_outcome_rx:
+        tokio::sync::mpsc::UnboundedReceiver<punktfunk_core::quic::LaunchOutcome>,
 }
 
 /// Ends when the control stream closes or a data-plane channel drops.
@@ -117,6 +121,7 @@ pub(super) async fn run(task: Task) {
         mut access_rx,
         mut audio_rx,
         mut pad_slots_rx,
+        mut launch_outcome_rx,
     } = task;
     let pf_clipboard::ClipCoord {
         available: clip_available,
@@ -138,6 +143,8 @@ pub(super) async fn run(task: Task) {
     let mut audio_closed = false;
     // Pad slots end with the input thread.
     let mut pad_slots_closed = false;
+    // Same again. The launch site drops its sender when the session ends.
+    let mut launch_outcome_closed = false;
     let mut active = initial_mode;
     // Backstop against Reconfigure spam. Data-plane drain-to-newest already
     // coalesces a resize drag; 500 ms is half the client's 1 s self-limit.
@@ -411,6 +418,18 @@ pub(super) async fn run(task: Task) {
                 let shape = cursor_shape_rx.borrow_and_update().clone();
                 let Some(shape) = shape else { continue };
                 if io::write_msg(&mut ctrl_send, &shape.encode()).await.is_err() {
+                    break;
+                }
+            }
+            outcome = launch_outcome_rx.recv(), if !launch_outcome_closed => {
+                // `None` = every sender gone; disable the arm rather than spin.
+                let Some(outcome) = outcome else { launch_outcome_closed = true; continue };
+                tracing::info!(
+                    outcome = outcome.kind.as_str(),
+                    said = %outcome.message,
+                    "told the client how its launch turned out"
+                );
+                if io::write_msg(&mut ctrl_send, &outcome.encode()).await.is_err() {
                     break;
                 }
             }
