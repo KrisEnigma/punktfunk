@@ -308,6 +308,29 @@ in
         '';
       };
 
+      bind = mkOption {
+        type = types.str;
+        default = if cfg.web.openFirewall then "0.0.0.0" else "127.0.0.1";
+        defaultText = literalExpression ''if openFirewall then "0.0.0.0" else "127.0.0.1"'';
+        example = "100.64.0.3";
+        description = ''
+          The address the console listens on: `127.0.0.1` for this machine only, `0.0.0.0` for
+          every interface, or one address such as a VPN interface. The plugin-UI origin on 47993
+          follows it, always.
+
+          This is the imperative install's `PUNKTFUNK_UI_BIND` in `host.env`; on NixOS the option
+          is the source and `host.env` is not read by the console. The default follows
+          `openFirewall`, because a configuration that opened 47992 asked for the LAN in so many
+          words, while one that did not was only reachable there by accident — so a rebuild onto
+          this release never takes a console off a network its owner declared.
+
+          The one case that signal misses is `networking.firewall.enable = false`, where nothing
+          was opened because nothing is closed. A rebuild moves that console to loopback with no
+          warning; set this to `"0.0.0.0"` to keep it. There is no imperative migration step on
+          NixOS, so the option is the only place this can be said.
+        '';
+      };
+
       autoStart = mkOption {
         type = types.bool;
         default = cfg.host.autoStart;
@@ -633,7 +656,9 @@ in
         path = [ pkgs.coreutils ];
         serviceConfig = {
           Type = "oneshot";
-          RemainAfterExit = true;
+          # Not remain-after-exit: an active oneshot is never re-run, so a console restart in a
+          # live session skipped the host-readiness gate. Mirrors scripts/punktfunk-web-init.service.
+          RemainAfterExit = false;
           ExecStart = "${cfg.web.package}/share/punktfunk-web/web-init.sh";
         };
       };
@@ -678,7 +703,9 @@ in
           # Hardcoding it here would have to out-rank the file, which is a directive-ordering
           # question in the generated unit — so we simply do not create the conflict.
           PORT = "47992";
-          HOST = "0.0.0.0";
+          # Where both listeners bind (`web.bind`). The server's own default is loopback, so this
+          # is the only thing standing between a NixOS console and this machine only.
+          PUNKTFUNK_UI_BIND = cfg.web.bind;
           # Serve HTTPS with the host's own identity cert (the anchor native clients already pin) and
           # mark the session cookie Secure. The host's `serve` writes these PEMs.
           #
