@@ -42,8 +42,17 @@ describe("bwrapArgv", () => {
 		// through /proc/<pid>/root, /proc/<pid>/environ or kill(2).
 		expect(argv).toContain("--unshare-all");
 		expect(argv).toContain("--disable-userns");
+		// bwrap refuses `--disable-userns` unless a user namespace is DEMANDED: `--unshare-all`
+		// only tries for one. Without this pair every plugin exits 1 before it starts.
+		expect(argv).toContain("--unshare-user");
 		expect(argv).toContain("--die-with-parent");
 		expect(argv).toContain("--clearenv");
+		// …which empties the child's environment, so every value must be re-stated in the argv.
+		// The spawn env does not survive it: without these the plugin has no HOME and no socket.
+		const joined = argv.join(" ");
+		expect(joined).toContain("--setenv HOME");
+		expect(joined).toContain("--setenv PUNKTFUNK_MGMT_UNIX /run/punktfunk/host.sock");
+		expect(joined).toContain("--setenv PUNKTFUNK_CONFIG_DIR /run/punktfunk");
 		expect(binds(argv, "--proc")).toBeDefined();
 		expect(argv.join(" ")).toContain("--proc /proc");
 	});
@@ -85,8 +94,9 @@ describe("bwrapArgv", () => {
 
 describe("sandboxEnv", () => {
 	test("carries no inherited value, and points the SDK at the socket", () => {
-		const env = sandboxEnv();
-		expect(env.HOME).toBe("/run/punktfunk/plugin-state");
+		const env = sandboxEnv("/home/u");
+		// The real home, so a `~/...` read the manifest declared is where os.homedir() looks.
+		expect(env.HOME).toBe("/home/u");
 		expect(env.PUNKTFUNK_CONFIG_DIR).toBe("/run/punktfunk");
 		expect(env.PUNKTFUNK_MGMT_UNIX).toBe("/run/punktfunk/host.sock");
 		expect(env.PUNKTFUNK_MGMT_TOKEN).toBeUndefined();
@@ -104,6 +114,15 @@ describe("sandboxProbe", () => {
 	test("says which of the two ways it is unavailable", () => {
 		expect(sandboxProbe(() => ({ status: 0 }), "darwin").ok).toBe(false);
 		expect(sandboxProbe(() => ({ status: 0 }), "linux")).toEqual({ ok: true });
+		// The probe must ask for what bwrapArgv asks for, or it calls a box capable that then
+		// refuses every plugin.
+		let probed: string[] = [];
+		sandboxProbe((_cmd, args) => {
+			probed = args;
+			return { status: 0 };
+		}, "linux");
+		expect(probed).toContain("--unshare-user");
+		expect(probed).toContain("--disable-userns");
 		const missing = sandboxProbe(() => ({ status: null }), "linux");
 		expect(missing.ok).toBe(false);
 		expect(!missing.ok && missing.reason).toContain("bubblewrap");

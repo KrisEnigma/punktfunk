@@ -1,63 +1,90 @@
 #!/bin/bash
-# What a sandboxed plugin can actually reach — the boundary `sdk/src/sandbox.ts` builds, checked
-# against a real kernel rather than asserted.
+# What a sandboxed plugin can actually reach — driven through the REAL runner, against a real
+# kernel, rather than asserted.
 #
-# `sandbox.test.ts` pins the argv; this pins what that argv DOES: no admin token, no ~/.ssh, no
-# host process in /proc, no network, and exactly the declared path, read-only. Keep the flags
-# below in step with `bwrapArgv`.
+# This script used to re-declare bwrap's flags by hand. A flag the copy omitted was a flag no
+# check ever ran, which is how `--disable-userns` shipped needing an `--unshare-user` nothing
+# supplied (bwrap refused every plugin), and how `--clearenv` shipped discarding the whole
+# environment the plugin needs. So: no copy. It builds the runner, installs a probe plugin, and
+# reads what that plugin reports from inside its own sandbox.
 #
-#   docker run --rm --privileged -v $PWD/scripts/check-plugin-sandbox.sh:/check.sh:ro \
-#     ubuntu:24.04 bash /check.sh
+#   docker run --rm --privileged -v "$PWD":/w -v "$PWD/scripts":/s oven/bun:1 \
+#     bash /s/check-plugin-sandbox.sh
 #
 # Needs bubblewrap and unprivileged user namespaces, so it runs on Linux only.
 set -u
+W=${PUNKTFUNK_REPO:-/w}
 apt-get update -qq >/dev/null 2>&1
 apt-get install -y -qq bubblewrap >/dev/null 2>&1 || { echo "FAIL: no bubblewrap"; exit 1; }
 
-HOME_DIR=/root
-mkdir -p "$HOME_DIR/.config/punktfunk" "$HOME_DIR/.ssh" "$HOME_DIR/.local/share/Steam"
-echo "PUNKTFUNK_MGMT_TOKEN=supersecret" > "$HOME_DIR/.config/punktfunk/mgmt-token"
-echo "private key" > "$HOME_DIR/.ssh/id_ed25519"
-echo "steam data" > "$HOME_DIR/.local/share/Steam/marker"
-mkdir -p /run/punktfunk-state && echo "state" > /run/punktfunk-state/marker
+cd "$W/sdk" || { echo "FAIL: no $W/sdk — mount the repo at /w"; exit 1; }
+bun install --ignore-scripts >/dev/null 2>&1
+# The sandbox binds ONE runner file, so the shipped runner is a bundle. Test what ships.
+bun build src/runner-cli.ts --target=bun --outfile /runner.js >/dev/null || { echo "FAIL: bundle"; exit 1; }
 
-# The same flags sdk/src/sandbox.ts emits, for a manifest declaring ~/.local/share/Steam.
-ARGV=(
-  --unshare-all --die-with-parent --new-session --clearenv
-  --proc /proc --dev /dev --tmpfs /tmp
-  --ro-bind /usr /usr
-  --symlink usr/lib /lib --symlink usr/lib64 /lib64 --symlink usr/bin /bin --symlink usr/sbin /sbin
-  --bind /run/punktfunk-state /run/punktfunk/plugin-state
-  --ro-bind-try "$HOME_DIR/.local/share/Steam" "$HOME_DIR/.local/share/Steam"
-)
+export HOME=/root
+CFG=$HOME/.config/punktfunk
+P=$CFG/plugins/node_modules/punktfunk-plugin-probe
+mkdir -p "$P" "$HOME/.ssh" "$HOME/steamlike"
+echo "secret-admin-token"  > "$CFG/mgmt-token"
+echo "private key"         > "$HOME/.ssh/id_ed25519"
+echo "library-data"        > "$HOME/steamlike/marker"
+echo '{"probe":"testtoken"}' > "$CFG/plugin-tokens.json"
+printf '{"dependencies":{"punktfunk-plugin-probe":"*"}}' > "$CFG/plugins/package.json"
+printf '{"name":"punktfunk-plugin-probe","version":"1.0.0","main":"index.js","punktfunk":{"schema":1,"id":"probe","reads":["~/steamlike"]}}' > "$P/package.json"
 
-run_in() { bwrap "${ARGV[@]}" /bin/sh -c "$1" 2>&1; }
+cat > "$P/index.js" <<'JS'
+import fs from "node:fs";
+const say = (k, v) => `${k}=${v}`;
+const o = [];
+let home = "UNSET";
+try { home = (await import("node:os")).homedir(); } catch (e) { home = "THREW"; }
+o.push(say("homedir", home));
+const gone = (f) => { try { f(); return "READABLE"; } catch { return "blocked"; } };
+o.push(say("mgmt", gone(() => fs.readFileSync("/root/.config/punktfunk/mgmt-token", "utf8"))));
+o.push(say("ssh", gone(() => fs.readFileSync("/root/.ssh/id_ed25519", "utf8"))));
+o.push(say("declared", (() => { try { return fs.readFileSync(home + "/steamlike/marker", "utf8").trim(); } catch { return "UNREACHABLE"; } })()));
+o.push(say("declared_ro", (() => { try { fs.writeFileSync(home + "/steamlike/w", "x"); return "WRITABLE"; } catch { return "readonly"; } })()));
+o.push(say("state", (() => { try { fs.writeFileSync("/run/punktfunk/plugin-state/w", "x"); return "writable"; } catch { return "UNWRITABLE"; } })()));
+o.push(say("owntoken", (() => { try { fs.readFileSync("/run/punktfunk/plugin-token", "utf8"); return "present"; } catch { return "MISSING"; } })()));
+o.push(say("procs", fs.readdirSync("/proc").filter((d) => /^\d+$/.test(d)).length));
+o.push(say("cfgdir", process.env.PUNKTFUNK_CONFIG_DIR ?? "UNSET"));
+o.push(say("sock", process.env.PUNKTFUNK_MGMT_UNIX ?? "UNSET"));
+console.log("PROBE " + o.join(" "));
+JS
+
+chmod -R go-w "$CFG"
+LOG=$(mktemp)
+timeout 60 bun /runner.js --plugins "$CFG/plugins" --scripts /nonexistent > "$LOG" 2>&1
+line=$(grep -m1 '^PROBE ' "$LOG")
+[ -n "$line" ] || { echo "FAIL: the plugin never started"; tail -20 "$LOG"; exit 1; }
 
 pass=0; fail=0
-check() { # name, command, expectation: "empty" | "nonempty"
-  out="$(run_in "$2")"
-  if [ "$3" = empty ] && [ -z "$out" ]; then echo "  ok   $1"; pass=$((pass+1));
-  elif [ "$3" = nonempty ] && [ -n "$out" ]; then echo "  ok   $1"; pass=$((pass+1));
-  else echo "  FAIL $1 -> '$out'"; fail=$((fail+1)); fi
+want() { # label, key, expected
+  got=$(echo "$line" | tr ' ' '\n' | grep "^$2=" | cut -d= -f2-)
+  if [ "$got" = "$3" ]; then echo "  ok   $1"; pass=$((pass+1));
+  else echo "  FAIL $1 -> $2=$got (want $3)"; fail=$((fail+1)); fi
 }
 
-echo "== what a plugin can reach"
-check "the admin token is not there"        "cat $HOME_DIR/.config/punktfunk/mgmt-token 2>/dev/null" empty
-check "~/.ssh is not there"                 "cat $HOME_DIR/.ssh/id_ed25519 2>/dev/null" empty
-check "the declared Steam root IS there"    "cat $HOME_DIR/.local/share/Steam/marker 2>/dev/null" nonempty
-check "its own state dir IS writable"       "echo x > /run/punktfunk/plugin-state/w && cat /run/punktfunk/plugin-state/w" nonempty
-check "the declared root is READ-ONLY"      "{ echo x > $HOME_DIR/.local/share/Steam/w && echo wrote; } 2>/dev/null" empty
+echo "== what a sandboxed plugin can reach"
+want "the admin token is not there"      mgmt        blocked
+want "~/.ssh is not there"               ssh         blocked
+want "the declared root IS there"        declared    library-data
+want "the declared root is READ-ONLY"    declared_ro readonly
+want "its own state dir IS writable"     state       writable
+want "its own token IS there"            owntoken    present
+want "HOME is the real home"             homedir     /root
+want "the config dir is set"             cfgdir      /run/punktfunk
+want "the host socket is set"            sock        /run/punktfunk/host.sock
+echo "== the namespace holds"
+# Exactly two: bwrap's own init as pid 1, the plugin as pid 2. The point is the count does not
+# grow with the host's process list — a shared /proc here would be hundreds.
+want "only the sandbox's own processes"  procs       2
 
-echo "== what a plugin can see of the host"
-# The host's own process, running outside: it must not appear in /proc at all.
-sleep 300 &
-HOST_PID=$!
-check "the host process is not in /proc"    "ls /proc/$HOST_PID 2>/dev/null" empty
-check "it cannot be signalled"              "kill -0 $HOST_PID 2>/dev/null && echo reachable" empty
-check "/proc/1 is the sandbox, not the host" "readlink /proc/1/exe | grep -q sleep && echo host" empty
-check "no network"                          "cat /proc/net/tcp 2>/dev/null | tail -n +2 | grep -q . && echo sockets" empty
-kill $HOST_PID 2>/dev/null
+echo "== the capability probe agrees with reality"
+if grep -q 'cannot be sandboxed' "$LOG"; then
+  echo "  FAIL the probe called this box incapable while the sandbox worked"; fail=$((fail+1))
+else echo "  ok   the probe called this box capable"; pass=$((pass+1)); fi
 
-echo
-echo "passed=$pass failed=$fail"
+echo "$pass passed, $fail failed"
 [ "$fail" -eq 0 ]
