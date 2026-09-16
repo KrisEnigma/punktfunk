@@ -55,8 +55,8 @@ export type ClientLogUploaded = { readonly "id": string }
 export const ClientLogUploaded = Schema.Struct({ "id": Schema.String })
 export type DisconnectReason = "quit" | "timeout" | "error"
 export const DisconnectReason = Schema.Literals(["quit", "timeout", "error"]).annotate({ "description": "`Quit` is the typed close; `Timeout` is transport idle; `Error` is everything else." })
-export type EndGameRequest = { readonly "app_id"?: string | null }
-export const EndGameRequest = Schema.Struct({ "app_id": Schema.optionalKey(Schema.Union([Schema.String, Schema.Null]).annotate({ "description": "Store-qualified id (`steam:570`); omit to end every waiting game." })) })
+export type EndGameRequest = { readonly "app_id"?: string | null, readonly "streaming"?: boolean }
+export const EndGameRequest = Schema.Struct({ "app_id": Schema.optionalKey(Schema.Union([Schema.String, Schema.Null]).annotate({ "description": "Store-qualified id (`steam:570`); omit to end every waiting game." })), "streaming": Schema.optionalKey(Schema.Boolean.annotate({ "description": "Also end `app_id` where it is on a live session, not only where it is\nwaiting out a reconnect window. Ignored without `app_id`." })) })
 export type EndGameResult = { readonly "ended": number }
 export const EndGameResult = Schema.Struct({ "ended": Schema.Number.check(Schema.isInt()).check(Schema.isGreaterThanOrEqualTo(0)) })
 export type EnvMarker = { readonly "key": string, readonly "value"?: string | null }
@@ -2073,8 +2073,10 @@ readonly "streamEvents": <Config extends OperationConfig>(options: { readonly pa
 */
 readonly "streamEventsSse": (options: { readonly params?: typeof StreamEventsParams.Encoded | undefined } | undefined) => Stream.Stream<{ readonly event: string; readonly id: string | undefined; readonly data: typeof StreamEvents200Sse.Type }, HttpClientError.HttpClientError | SchemaError | Sse.Retry, typeof StreamEvents200Sse.DecodingServices>
   /**
-* Ends games waiting out the reconnect window. Does not touch a live session
-* (`DELETE /session` plus `game_on_session_end`).
+* Ends games waiting out the reconnect window. With `streaming` and an
+* `app_id`, also ends that title where it is still on a live session — the
+* move a player has after a launch that never produced a game. The session
+* itself stays up (`DELETE /session` plus `game_on_session_end`).
 */
 readonly "endGame": <Config extends OperationConfig>(options: { readonly payload: typeof EndGameRequestJson.Encoded; readonly config?: Config | undefined }) => Effect.Effect<WithOptionalResponse<typeof EndGame200.Type, Config>, HttpClientError.HttpClientError | SchemaError | PunktfunkError<"EndGame401", typeof EndGame401.Type> | PunktfunkError<"EndGame409", typeof EndGame409.Type>>
   /**
