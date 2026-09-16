@@ -934,6 +934,19 @@ val BITRATE_OPTIONS = listOf(
     500_000 to "500 Mbps",
 )
 
+/** The Bitrate menu's "Custom…" entry. Never stored: picking it opens the Mbps field. */
+const val CUSTOM_BITRATE = -1
+
+/** The typed field's ceiling, the console shell's on Android: 2 Gbps. The host takes up to 8. */
+const val CUSTOM_BITRATE_MAX_MBPS = 2_000
+
+/** True when the stored rate is none of [BITRATE_OPTIONS] — typed, or written by the speed test. */
+fun Settings.isCustomBitrate(): Boolean = BITRATE_OPTIONS.none { it.first == bitrateKbps }
+
+/** "14 Mbps" or "14.9 Mbps": any stored rate, so an off-menu one never reads as Automatic. */
+fun bitrateLabel(kbps: Int): String =
+    if (kbps % 1000 == 0) "${kbps / 1000} Mbps" else "%.1f Mbps".format(kbps / 1000.0)
+
 /** (CompositorPref wire byte, label). Byte 6, a Windows host's echo, is never a choice. */
 val COMPOSITOR_OPTIONS = listOf(
     0 to "Automatic",

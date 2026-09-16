@@ -738,6 +738,7 @@ private fun DisplaySettings(s: Settings, update: (Settings) -> Unit, context: an
     var customPicked by remember { mutableStateOf(false) }
     val families = remember(nw, nh, sw, sh) { Resolutions.families(nw to nh, sw to sh) }
     val showCustom = customPicked || s.isCustomResolution(families)
+    var customBitratePicked by remember { mutableStateOf(false) }
     SettingsGroup("Resolution") {
         // The family the dropdown lists. A chip writes that family's size nearest the current
         // height, so the dropdown always holds a row of the family it shows.
@@ -834,13 +835,23 @@ private fun DisplaySettings(s: Settings, update: (Settings) -> Unit, context: an
                 "distorts it.",
         ) { fit -> update(s.copy(videoFit = fit)) }
 
+        // Custom is read from the stored rate, like the resolution above; the flag only keeps the
+        // field open between picking "Custom…" and typing a number.
+        val showCustomBitrate = customBitratePicked || s.isCustomBitrate()
         SettingDropdown(
             label = "Bitrate",
-            options = BITRATE_OPTIONS,
-            selected = s.bitrateKbps,
+            options = BITRATE_OPTIONS + (CUSTOM_BITRATE to
+                if (s.isCustomBitrate()) "Custom (${bitrateLabel(s.bitrateKbps)})" else "Custom…"),
+            selected = if (showCustomBitrate) CUSTOM_BITRATE else s.bitrateKbps,
             field = "bitrate_kbps",
             caption = "Automatic lets the host decide.",
-        ) { kbps -> update(s.copy(bitrateKbps = kbps)) }
+        ) { kbps ->
+            customBitratePicked = kbps == CUSTOM_BITRATE
+            if (kbps != CUSTOM_BITRATE) update(s.copy(bitrateKbps = kbps))
+        }
+        if (showCustomBitrate) {
+            BitrateField(s.bitrateKbps) { kbps -> update(s.copy(bitrateKbps = kbps)) }
+        }
 
         // Only codecs this device can actually decode are offered — a preference the client never
         // advertises would be a dead setting (see [codecOptionsFor]).
@@ -1412,6 +1423,26 @@ private fun ResolutionField(
         singleLine = true,
         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
         modifier = modifier.onFocusChanged { if (!it.isFocused) text = if (value > 0) value.toString() else "" },
+    )
+}
+
+/** A fixed bitrate in whole Mbps. Digits only; each keystroke commits, capped at
+ * [CUSTOM_BITRATE_MAX_MBPS]. Empty or `0` commits nothing — Automatic is the menu's first entry. */
+@Composable
+private fun BitrateField(kbps: Int, onCommit: (Int) -> Unit) {
+    val shown = if (kbps > 0) ((kbps + 500) / 1000).toString() else ""
+    var text by remember { mutableStateOf(shown) }
+    OutlinedTextField(
+        value = text,
+        onValueChange = { raw ->
+            text = raw.filter { it.isDigit() }.take(4)
+            val mbps = (text.toIntOrNull() ?: 0).coerceAtMost(CUSTOM_BITRATE_MAX_MBPS)
+            if (mbps > 0) onCommit(mbps * 1000)
+        },
+        label = { Text("Bitrate (Mbps)") },
+        singleLine = true,
+        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+        modifier = Modifier.fillMaxWidth().onFocusChanged { if (!it.isFocused) text = shown },
     )
 }
 
