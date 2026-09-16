@@ -487,6 +487,15 @@ impl Encoder {
         matches!(self.codec, Codec::Hevc(h) if h.ten_bit)
     }
 
+    /// The VUI colour triple this session emits (`[1,1,1]` BT.709, `[9,16,9]` BT.2020 PQ). The
+    /// VPP RGB→YUV matrix follows it, so a 10-bit SDR session converts as BT.709, not BT.2020.
+    fn colour(&self) -> [u8; 3] {
+        match self.codec {
+            Codec::Hevc(h) => h.colour,
+            _ => pf_vaapi::hevc::COLOUR_BT709,
+        }
+    }
+
     /// Drop a pending direct picture: its encode synced, or a later submit replaced it.
     fn clear_direct(&mut self) {
         if let Some(surface) = self.direct.take() {
@@ -567,7 +576,7 @@ impl Encoder {
             staging,
             (width, height),
             true,
-            self.ten_bit(),
+            self.colour(),
             self.input_surface(),
         )
     }
@@ -606,7 +615,7 @@ impl Encoder {
             surface,
             (source.width, source.height),
             is_rgb,
-            self.ten_bit(),
+            self.colour(),
             self.input_surface(),
         );
         self.display.destroy_surface(surface);
