@@ -445,6 +445,8 @@ mod tests {
                 spawned: None,
                 launch_stamp: None,
                 procs: None,
+                #[cfg(target_os = "linux")]
+                workspace: None,
             },
             Box::new(|| {}),
         );

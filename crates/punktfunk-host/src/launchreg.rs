@@ -104,6 +104,10 @@ struct Record {
     /// The host is ending this launch's game ([`ending`]). Held until
     /// [`ended`] or a newer claim; meanwhile a claim spawns, never adopts.
     ending: bool,
+    /// Workspace the streamed head gave this launch. Kept on the record, not
+    /// on the session: a reconnect focuses the game's workspace rather than
+    /// claiming a second one. `None` until a placed launch reports it.
+    workspace: Option<i64>,
 }
 
 impl Record {
@@ -119,6 +123,7 @@ impl Record {
             released_at: None,
             claim,
             ending: false,
+            workspace: None,
         }
     }
 }
@@ -339,6 +344,8 @@ pub fn claim(
         rec.procs = Arc::new(Mutex::new(Vec::new()));
         rec.launched = false;
         rec.ending = false;
+        // New launch, new placement: the old workspace is the dead copy's.
+        rec.workspace = None;
         rec.holders += 1;
         rec.released_at = None;
         rec.claim = id;
@@ -412,6 +419,25 @@ impl Claim {
         });
     }
 
+    /// Workspace an earlier session gave this launch, for [`Plan::Adopt`] to
+    /// focus again. `None` when nothing was placed, or the backend cannot.
+    pub fn workspace(&self) -> Option<i64> {
+        let mut found = None;
+        self.with_record(|r| found = r.workspace);
+        found
+    }
+
+    /// Record the workspace this launch was placed on. Same claim check as
+    /// [`Claim::launched`]: a newer session's placement is not ours to
+    /// overwrite.
+    pub fn placed(&self, workspace: i64) {
+        self.with_record(|r| {
+            if r.claim == self.id {
+                r.workspace = Some(workspace);
+            }
+        });
+    }
+
     /// Spawn failed or this platform has no launch path. Drop the record
     /// so a retry starts the title rather than inheriting a never-launch.
     pub fn abandon(&self) {
@@ -476,6 +502,7 @@ mod tests {
             released_at,
             claim: 1,
             ending: false,
+            workspace: None,
         }
     }
 

@@ -409,6 +409,85 @@ fn focus_argv(name: &str) -> [&str; 3] {
     ["focus", "output", name]
 }
 
+/// Workspace this launch gets on output `name`, as `(claimed, restore)`.
+///
+/// `want` re-focuses the workspace an earlier session claimed for the same
+/// launch (keep-alive adopt); otherwise [`crate::routing::pick_workspace`]
+/// chooses. `None` when the output shows no numbered workspace or the switch
+/// is refused — the launch then opens where the output already looks.
+pub(crate) fn claim_workspace(name: &str, want: Option<i64>) -> Option<(i64, i64)> {
+    let parsed = swaymsg_query("get_workspaces").ok()?;
+    let restore = visible_workspace(&parsed, name)?;
+    let id = want.unwrap_or_else(|| {
+        crate::routing::pick_workspace(&workspace_slots(&parsed, name), restore)
+    });
+    if id == restore {
+        return Some((id, restore));
+    }
+    match focus_workspace(id) {
+        Ok(()) => Some((id, restore)),
+        Err(e) => {
+            tracing::warn!(
+                workspace = id, output = %name, error = %format!("{e:#}"),
+                "wlroots: workspace switch refused — this launch opens beside whatever the \
+                 streamed output is already showing"
+            );
+            None
+        }
+    }
+}
+
+/// `swaymsg -t get_workspaces` reduced to the pick. sway reports no window
+/// count, so emptiness is `representation` (the layout tree rendering, null on
+/// an empty workspace); anything unreadable reads as occupied, which costs a
+/// free number and never the operator's windows. Unnumbered workspaces
+/// (`num: -1`) are dropped — `workspace number` cannot name one.
+fn workspace_slots(parsed: &serde_json::Value, output: &str) -> Vec<crate::routing::WsSlot> {
+    let Some(arr) = parsed.as_array() else {
+        return Vec::new();
+    };
+    arr.iter()
+        .filter_map(|w| {
+            let id = w.get("num")?.as_i64().filter(|n| *n >= 1)?;
+            Some(crate::routing::WsSlot {
+                id,
+                on_head: w.get("output").and_then(|o| o.as_str()) == Some(output),
+                empty: w
+                    .get("representation")
+                    .is_some_and(|r| r.is_null() || r.as_str() == Some("")),
+            })
+        })
+        .collect()
+}
+
+/// Numbered workspace `output` is showing — the restore target. `None` when
+/// the output shows a workspace with no number, which `workspace number`
+/// cannot switch back to.
+fn visible_workspace(parsed: &serde_json::Value, output: &str) -> Option<i64> {
+    parsed
+        .as_array()?
+        .iter()
+        .find(|w| {
+            w.get("output").and_then(|o| o.as_str()) == Some(output)
+                && w.get("visible").and_then(|v| v.as_bool()) == Some(true)
+        })?
+        .get("num")?
+        .as_i64()
+        .filter(|n| *n >= 1)
+}
+
+/// Switch to workspace `id`. A number sway does not have yet is created here,
+/// empty, on the focused output.
+pub(crate) fn focus_workspace(id: i64) -> Result<()> {
+    swaymsg(&workspace_argv(&id.to_string())).map(|_| ())
+}
+
+/// `workspace number <n>` — `number` so sway matches the digit, not a
+/// workspace literally named `4`. Split so a test pins the shape.
+fn workspace_argv(n: &str) -> [&str; 3] {
+    ["workspace", "number", n]
+}
+
 /// `topology: primary` has no expression here: Wayland has no primary output, and
 /// sway's nearest equivalent is the focused output, which [`focus_output`] already
 /// points at the streamed head. Log and treat as extend. `exclusive` actually
@@ -987,6 +1066,35 @@ fn portal_thread(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Real `swaymsg -t get_workspaces` shape, trimmed to the fields read here.
+    const WORKSPACES: &str = r#"[
+      {"num":1,"name":"1","output":"eDP-1","visible":true,"focused":true,
+       "representation":"H[firefox kitty]"},
+      {"num":2,"name":"2","output":"eDP-1","visible":false,"representation":null},
+      {"num":3,"name":"3","output":"HEADLESS-1","visible":true,"representation":"H[steam]"},
+      {"num":-1,"name":"scratch","output":"HEADLESS-1","visible":false,"representation":null}
+    ]"#;
+
+    /// The streamed output's own workspaces decide, and an unnumbered one is
+    /// never the answer — `workspace number` cannot name it.
+    #[test]
+    fn a_launch_lands_on_an_empty_workspace_of_the_streamed_output() {
+        let parsed: serde_json::Value = serde_json::from_str(WORKSPACES).unwrap();
+        assert_eq!(visible_workspace(&parsed, "HEADLESS-1"), Some(3));
+        let slots = workspace_slots(&parsed, "HEADLESS-1");
+        // Only 3 is ours and it holds the last game: the next free number.
+        assert_eq!(crate::routing::pick_workspace(&slots, 3), 4);
+        // The operator's own head already has an empty 2.
+        let slots = workspace_slots(&parsed, "eDP-1");
+        assert_eq!(crate::routing::pick_workspace(&slots, 1), 2);
+    }
+
+    /// `number` keeps sway matching the digit, not a workspace named `4`.
+    #[test]
+    fn a_workspace_switch_names_the_number() {
+        assert_eq!(workspace_argv("4"), ["workspace", "number", "4"]);
+    }
 
     /// `focus output <name>` — noun second. `output focus <name>` is rejected, and
     /// the only symptom is apps opening on the operator's monitor.

@@ -6037,6 +6037,10 @@
                   }
                 ]
               },
+              "on_window": {
+                "$ref": "#/components/schemas/OnWindow",
+                "description": "Which workspace this title opens on ([`crate::library::OnWindow`]).\nAbsent follows the host's display policy."
+              },
               "prep": {
                 "type": "array",
                 "items": {
@@ -6109,6 +6113,17 @@
                   },
                   {
                     "$ref": "#/components/schemas/LaunchSpec"
+                  }
+                ]
+              },
+              "on_window": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/OnWindow",
+                    "description": "Absent on an update keeps the stored placement, as with `prep`."
                   }
                 ]
               },
@@ -6384,6 +6399,10 @@
               "type": "string"
             },
             "description": "Connectors that stay lit while streaming, even under `exclusive`\n(`design/web-console-overhaul.md` §5.5).\n\nThe shared-desktop case the all-or-nothing topology axis cannot express: the\ncouch TV streams on the sole screen while the desk monitor stays usable. Only\nmeaningful under `exclusive` — nothing else turns a monitor off."
+          },
+          "launch_workspace": {
+            "$ref": "#/components/schemas/WorkspacePlacement",
+            "description": "Default for a launch whose library entry names no `on_window.workspace`.\nOrthogonal to `preset`; `#[serde(default)]` is `own`, so an older\n`display-settings.json` opts in with the rest."
           },
           "layout": {
             "$ref": "#/components/schemas/Layout"
@@ -7136,6 +7155,10 @@
                     "$ref": "#/components/schemas/LaunchSpec"
                   }
                 ]
+              },
+              "on_window": {
+                "$ref": "#/components/schemas/OnWindow",
+                "description": "Which workspace this title's windows open on, where the compositor can\nplace them ([`OnWindow`])."
               },
               "provider": {
                 "type": [
@@ -8367,6 +8390,22 @@
           }
         }
       },
+      "OnWindow": {
+        "type": "object",
+        "description": "Per-entry window placement — one knob today: which workspace the launch\nopens on. Absent follows the host's `launch_workspace` display policy.",
+        "properties": {
+          "workspace": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/WorkspacePlacement"
+              }
+            ]
+          }
+        }
+      },
       "OperatorGameEntry": {
         "allOf": [
           {
@@ -8878,6 +8917,10 @@
                     "$ref": "#/components/schemas/LaunchSpec"
                   }
                 ]
+              },
+              "on_window": {
+                "$ref": "#/components/schemas/OnWindow",
+                "description": "Which workspace the title opens on; absent follows the host's display policy."
               },
               "prep": {
                 "type": "array",
@@ -10180,6 +10223,14 @@
             "minimum": 0
           }
         }
+      },
+      "WorkspacePlacement": {
+        "type": "string",
+        "description": "Where a library launch's windows open on the streamed head.\n\nDefault `own`: the player gets the game on an empty workspace instead of\nthe operator's desk. Honoured only by the backends that can place a launch\n(`claim_workspace`); everywhere else a launch is always `current`.\n\n[`DisplayPolicy`] field, not part of [`EffectivePolicy`]: a preset never\nclobbers it. A library entry's own `on_window.workspace` outranks it.",
+        "enum": [
+          "own",
+          "current"
+        ]
       }
     },
     "securitySchemes": {

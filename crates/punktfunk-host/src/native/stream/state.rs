@@ -554,6 +554,10 @@ impl StreamState {
         // discoverable in `/proc`, so an unscoped launch or watch lands on somebody else's screen.
         #[cfg(target_os = "linux")]
         let seat: Option<String> = cur_display_gen.and_then(crate::vdisplay::registry::seat_for);
+        // Workspace this launch owns on the streamed head; handed to the lease, which
+        // releases it when the game is done.
+        #[cfg(target_os = "linux")]
+        let mut launch_workspace: Option<crate::vdisplay::WorkspaceClaim> = None;
         #[cfg(target_os = "linux")]
         let spawned_launch = match launch.as_deref() {
             Some(cmd) if adopt_launch => {
@@ -562,6 +566,12 @@ impl StreamState {
                     "this client's copy of this title is already running from an earlier session — not \
                      starting a second one"
                 );
+                // The claim belongs to the launch, not to us: go back to the game's
+                // workspace rather than opening an empty one beside it.
+                launch_workspace = launch_claim
+                    .as_ref()
+                    .and_then(|c| c.workspace())
+                    .and_then(|ws| crate::library::adopt_launch_workspace(compositor, ws));
                 None
             }
             // Nested only when this acquire actually spawned gamescope — then `cmd` is already its
@@ -576,9 +586,12 @@ impl StreamState {
                 None
             }
             Some(cmd) => {
-                match crate::library::launch_session_command(compositor, cmd, seat.as_deref()) {
-                    Ok(spawned) => {
+                let own = launch_target.as_ref().is_some_and(|t| t.own_workspace);
+                match crate::library::launch_session_command(compositor, cmd, seat.as_deref(), own)
+                {
+                    Ok(mut spawned) => {
                         spawned_now = true;
+                        launch_workspace = spawned.workspace.take();
                         Some(spawned)
                     }
                     Err(e) => {
@@ -597,6 +610,11 @@ impl StreamState {
                 }
             } else if c.must_spawn() {
                 c.abandon();
+            }
+            // On the record, not on the session: the next reconnect focuses it.
+            #[cfg(target_os = "linux")]
+            if let Some(ws) = launch_workspace.as_ref() {
+                c.placed(ws.id());
             }
         }
 
@@ -684,6 +702,8 @@ impl StreamState {
                     spawned: spawned_pid,
                     launch_stamp,
                     procs: launch_claim.as_ref().and_then(|c| c.procs()),
+                    #[cfg(target_os = "linux")]
+                    workspace: launch_workspace,
                 },
                 on_exit,
             )
