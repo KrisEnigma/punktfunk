@@ -1714,6 +1714,9 @@ pub(crate) async fn run_admitted(
         audio_rx,
         pad_slots_rx,
         launch_outcome_rx,
+        peer: peer.ip(),
+        counters: counters.clone(),
+        stats: stats.clone(),
     }));
     // Only a fingerprint has a record to watch; with no record there is nothing to expire.
     match (session_fp_hex.clone(), access_watch) {
@@ -2022,11 +2025,7 @@ pub(crate) async fn run_admitted(
         let iso_sink = isolation.as_ref().and_then(|i| i.sink.clone());
         #[cfg(not(target_os = "linux"))]
         let iso_sink: Option<String> = None;
-        let sink = iso_sink.or_else(|| {
-            joined
-                .as_ref()
-                .and_then(|(d, _)| d.audio_sink.lock().unwrap().clone())
-        });
+        let tap_from = joined.as_ref().map(|(d, _)| d.audio_sink.clone());
         let published = audio_sink.clone();
         let muted = controls.muted.clone();
         let counters = counters.clone();
@@ -2040,9 +2039,10 @@ pub(crate) async fn run_admitted(
                     channels,
                     budget,
                     audio_plane,
-                    sink,
+                    iso_sink,
                     join_live,
                     published,
+                    tap_from,
                     muted,
                     counters,
                 )
@@ -2220,6 +2220,12 @@ pub(crate) async fn run_admitted(
         .peer_fingerprint()
         .map(|fp| fingerprint_hex(&fp)[..12].to_string())
         .unwrap_or_else(|| conn.remote_address().ip().to_string());
+    // The title's `audio.sessions`, over every session on this display. Lifted with the session.
+    let _audio_policy = hello
+        .launch
+        .as_deref()
+        .and_then(crate::library::audio_sessions_for)
+        .map(|policy| crate::session_status::apply_audio_policy(policy, &client_label));
     // Tray toast: trust-store name (rename at approval wins), else sanitized Hello. `None` if nameless.
     let client_name = conn
         .peer_fingerprint()

@@ -22,6 +22,8 @@ pub(crate) struct WorkerArgs {
     pub(crate) compositor: CompositorPref,
     pub(crate) gamepad: GamepadPref,
     pub(crate) bitrate_kbps: u32,
+    /// ABR limit in kbps; `0` = no limit. Read only while `bitrate_kbps` is 0.
+    pub(crate) abr_max_kbps: u32,
     pub(crate) video_caps: u8,
     pub(crate) audio_channels: u8,
     /// Hello request, never the device format. The host answers in `Welcome`; open
@@ -87,6 +89,12 @@ pub(crate) struct WorkerArgs {
     pub(crate) frames_dropped: Arc<AtomicU64>,
     pub(crate) fec_recovered: Arc<AtomicU64>,
     pub(crate) unsustainable_pin_kbps: Arc<AtomicU32>,
+    /// What the previous Automatic session on this host proved; `None` = first
+    /// session, or an embedder that keeps no per-host state.
+    pub(crate) abr_seed: Option<crate::abr::AbrMemory>,
+    /// What this session has proved so far, republished every report window so
+    /// any teardown path leaves the embedder a current value.
+    pub(crate) abr_memory: Arc<Mutex<crate::abr::AbrMemory>>,
     /// Pump mic task counts wire sends and stale-shed drops; the producer counts
     /// queue-full drops.
     pub(crate) mic_stats: Arc<MicUplinkCounters>,

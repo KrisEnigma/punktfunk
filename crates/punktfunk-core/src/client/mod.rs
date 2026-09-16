@@ -299,6 +299,8 @@ pub struct NativeClient {
     fec_recovered: Arc<AtomicU64>,
     /// See [`unsustainable_pin_kbps`](Self::unsustainable_pin_kbps).
     unsustainable_pin_kbps: Arc<AtomicU32>,
+    /// See [`abr_memory`](Self::abr_memory).
+    abr_memory: Arc<Mutex<crate::abr::AbrMemory>>,
     /// Shared loss-range detector for [`note_frame_index`](Self::note_frame_index): next
     /// expected `frame_index` plus RFI throttle. Avoids per-embedder wrapping arithmetic.
     rfi: Mutex<RfiRecovery>,
@@ -587,6 +589,9 @@ impl NativeClient {
             compositor,
             gamepad,
             bitrate_kbps,
+            // No ABR limit: this entry point predates the setting, so Automatic
+            // means "whatever the link proves", as it always did.
+            0,
             video_caps,
             audio_channels,
             // 0/0 = unspecified, so `Hello` stays pre-hi-res. Explicit 48 000/16 would mean
@@ -605,6 +610,7 @@ impl NativeClient {
             pin,
             identity,
             timeout,
+            None,
             None,
         )
     }
@@ -630,6 +636,11 @@ impl NativeClient {
         compositor: CompositorPref,
         gamepad: GamepadPref,
         bitrate_kbps: u32,
+        // "Adapt, but never above N" in kbps; `0` = no limit. Meaningful only while
+        // `bitrate_kbps` is 0 (Automatic), and `PUNKTFUNK_ABR_MAX_MBPS` still overrides it.
+        // The ceiling binds the negotiated start too, so a 12 Mbps cap never emits a
+        // 20 Mbps second.
+        abr_max_kbps: u32,
         video_caps: u8,
         audio_channels: u8,
         audio_rate_hz: u32,
@@ -650,6 +661,10 @@ impl NativeClient {
         pin: Option<[u8; 32]>,
         identity: Option<(String, String)>,
         timeout: Duration,
+        // What the previous Automatic session on this host proved
+        // ([`NativeClient::abr_memory`]). `None` = start at the host's `Welcome` echo and
+        // re-discover the link, which is what every session did before the memory existed.
+        abr_seed: Option<crate::abr::AbrMemory>,
         // Abort while blocked. Request-access can park ~185 s; Cancel cannot honour that if
         // this call ignores the flag. Same give-up as budget expiry (quit + shutdown). Do not
         // alias onto `shutdown` — the pump means "this connection died" and a caller-set flag
@@ -692,6 +707,7 @@ impl NativeClient {
         let frames_dropped = Arc::new(AtomicU64::new(0));
         let fec_recovered = Arc::new(AtomicU64::new(0));
         let unsustainable_pin_kbps = Arc::new(AtomicU32::new(0));
+        let abr_memory = Arc::new(Mutex::new(crate::abr::AbrMemory::default()));
         let mic_stats = Arc::new(MicUplinkCounters::default());
         let hot_tids = Arc::new(Mutex::new(Vec::new()));
         let clock_offset = Arc::new(AtomicI64::new(0));
@@ -722,6 +738,7 @@ impl NativeClient {
         let frames_dropped_w = frames_dropped.clone();
         let fec_recovered_w = fec_recovered.clone();
         let unsustainable_pin_kbps_w = unsustainable_pin_kbps.clone();
+        let abr_memory_w = abr_memory.clone();
         let mic_stats_w = mic_stats.clone();
         let hot_tids_w = hot_tids.clone();
         let clock_offset_w = clock_offset.clone();
@@ -761,6 +778,7 @@ impl NativeClient {
                     compositor,
                     gamepad,
                     bitrate_kbps,
+                    abr_max_kbps,
                     video_caps,
                     audio_channels,
                     audio_rate_hz,
@@ -806,6 +824,8 @@ impl NativeClient {
                     frames_dropped: frames_dropped_w,
                     fec_recovered: fec_recovered_w,
                     unsustainable_pin_kbps: unsustainable_pin_kbps_w,
+                    abr_seed,
+                    abr_memory: abr_memory_w,
                     mic_stats: mic_stats_w,
                     hot_tids: hot_tids_w,
                     clock_offset: clock_offset_w,
@@ -887,6 +907,7 @@ impl NativeClient {
             frames_dropped,
             fec_recovered,
             unsustainable_pin_kbps,
+            abr_memory,
             rfi: Mutex::new(RfiRecovery::default()),
             hot_tids,
             clock_offset,
@@ -1055,6 +1076,14 @@ impl NativeClient {
     /// for the session; show it to the user once with the next move (Automatic, or lower).
     pub fn unsustainable_pin_kbps(&self) -> u32 {
         self.unsustainable_pin_kbps.load(Ordering::Relaxed)
+    }
+
+    /// What Automatic has proved on this host so far, for the embedder to persist
+    /// per host and hand back to the next connect. All-zero until the first report
+    /// window, and on a session that never ran Automatic. Live, not final — read it
+    /// whenever the session ends, however it ends.
+    pub fn abr_memory(&self) -> crate::abr::AbrMemory {
+        *self.abr_memory.lock().unwrap()
     }
 
     /// Parity-repaired shards (loss that never became a dropped frame). Monotonic; HUD diffs
