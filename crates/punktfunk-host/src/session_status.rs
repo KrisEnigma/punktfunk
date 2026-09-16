@@ -76,6 +76,18 @@ pub struct SessionControls {
     pub access_tx: Option<tokio::sync::mpsc::UnboundedSender<punktfunk_core::quic::AccessUpdate>>,
     /// The control task's audio lane. `None` on a session with no control task (tests).
     pub audio_tx: Option<tokio::sync::mpsc::UnboundedSender<punktfunk_core::quic::AudioState>>,
+    /// Head the window routes read and act on ([`SessionControls::set_head`]).
+    /// Latched per session: the injector's slot is one per process, and a second
+    /// session's bring-up would otherwise re-point this one at its head.
+    pub head: Arc<Mutex<Option<StreamedHead>>>,
+}
+
+/// The compositor head one session streams — what its window list names.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StreamedHead {
+    pub compositor: crate::vdisplay::Compositor,
+    /// `wl_output.name` of the streamed head.
+    pub output: String,
 }
 
 impl SessionControls {
@@ -89,7 +101,19 @@ impl SessionControls {
             deadline_unix: Arc::new(AtomicI64::new(0)),
             access_tx: None,
             audio_tx: None,
+            head: Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// Latch the head this session streams, once the capture pipeline names it.
+    /// A backend that names no output leaves it `None` and lists nothing.
+    pub fn set_head(&self, head: Option<StreamedHead>) {
+        *self.head.lock().unwrap_or_else(|e| e.into_inner()) = head;
+    }
+
+    /// This session's head, or `None` before capture is up.
+    pub fn head(&self) -> Option<StreamedHead> {
+        self.head.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     /// Re-point the live mask, clamped to the pairing's ceiling, and tell the client

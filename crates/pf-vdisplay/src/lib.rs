@@ -63,6 +63,14 @@ pub use session::{
 #[cfg(target_os = "linux")]
 pub use session::{session_epoch, session_x11_env};
 
+/// The streamed head's window list and the verbs that act on one.
+/// Types on every platform; the backend arms are Linux.
+#[path = "vdisplay/toplevels.rs"]
+pub(crate) mod toplevels;
+#[cfg(target_os = "linux")]
+pub use toplevels::{list_toplevels, toplevels_token, window_action};
+pub use toplevels::{Toplevel, WindowVerb};
+
 #[path = "vdisplay/routing.rs"]
 pub(crate) mod routing;
 pub use routing::{

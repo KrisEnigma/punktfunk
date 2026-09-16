@@ -370,6 +370,8 @@ fn api_router_parts() -> (Router<Arc<MgmtState>>, utoipa::openapi::OpenApi) {
         .routes(routes!(session::request_session_idr))
         .routes(routes!(session::set_session_audio))
         .routes(routes!(session::set_session_access))
+        .routes(routes!(session::get_session_windows))
+        .routes(routes!(session::act_on_session_window))
         .routes(routes!(
             session::get_session_settings,
             session::set_session_settings

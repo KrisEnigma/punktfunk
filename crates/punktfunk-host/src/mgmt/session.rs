@@ -9,6 +9,7 @@
 //! nothing is streaming is a 404, never another session's teardown.
 
 use super::shared::*;
+use crate::vdisplay::Toplevel;
 use std::sync::atomic::Ordering;
 
 /// Stop the session
@@ -204,6 +205,160 @@ pub(crate) struct SessionAccess {
     grants: u32,
     /// `full` | `controller` | `view` | `custom`, derived from `grants`.
     level: String,
+}
+
+/// List this session's windows
+///
+/// The toplevels on the head this session streams, so a client in a full-screen
+/// game can see what is behind it. Free to every session: those windows are
+/// already in the pixels it receives. The operator's other monitors are not in
+/// the payload, whatever the caller's access.
+#[utoipa::path(
+    get,
+    path = "/session/{id}/windows",
+    tag = "session",
+    operation_id = "getSessionWindows",
+    params(("id" = u64, Path, description = "Session id from `GET /status`")),
+    responses(
+        (status = OK, description = "Windows on this session's head", body = Vec<Toplevel>),
+        (status = NOT_FOUND, description = "No live session with that id", body = ApiError),
+        (status = UNAUTHORIZED, description = "Missing or invalid bearer token", body = ApiError),
+    )
+)]
+pub(crate) async fn get_session_windows(Path(id): Path<u64>) -> Response {
+    let Some(controls) = crate::session_status::controls(id) else {
+        return no_such_session();
+    };
+    Json(session_windows(&controls)).into_response()
+}
+
+/// Act on one of this session's windows
+///
+/// Focus, full-screen or close by id, gated on the session's LIVE grants — the
+/// same mask the input thread checks every event against. A view-only guest is
+/// refused all three; a controller-only guest raises a window but never closes
+/// one. An id this session's head does not currently hold is a 404, so a stale
+/// id cannot act on whatever now answers to it.
+#[utoipa::path(
+    post,
+    path = "/session/{id}/windows/{window}",
+    tag = "session",
+    operation_id = "actOnSessionWindow",
+    params(
+        ("id" = u64, Path, description = "Session id from `GET /status`"),
+        ("window" = String, Path, description = "Window id from `GET /session/{id}/windows`"),
+    ),
+    request_body = WindowActionRequest,
+    responses(
+        (status = NO_CONTENT, description = "The compositor accepted the verb"),
+        (status = FORBIDDEN, description = "This session's access does not cover the verb", body = ApiError),
+        (status = NOT_FOUND, description = "No such session, or no such window on its head", body = ApiError),
+        (status = BAD_GATEWAY, description = "The compositor refused the verb", body = ApiError),
+        (status = UNAUTHORIZED, description = "Missing or invalid bearer token", body = ApiError),
+    )
+)]
+pub(crate) async fn act_on_session_window(
+    Path((id, window)): Path<(u64, String)>,
+    ApiJson(req): ApiJson<WindowActionRequest>,
+) -> Response {
+    let Some(controls) = crate::session_status::controls(id) else {
+        return no_such_session();
+    };
+    // The live mask, read now: a console re-point or an expiry between the
+    // client's fetch and this call must land before the verb does.
+    let grants = controls.grants.load(Ordering::Relaxed);
+    if !req.action.permitted_by(grants) {
+        tracing::info!(
+            session = id,
+            verb = req.action.as_str(),
+            grants,
+            "management API: a window verb this session's access does not cover"
+        );
+        return api_error(
+            StatusCode::FORBIDDEN,
+            "This device's access doesn't cover that — ask the host's operator to widen it.",
+        );
+    }
+    act_on_window(&controls, &window, req.action, id)
+}
+
+/// The verb, once the grant gate has passed. Split out so the platform arms do
+/// not sit inside the handler.
+#[cfg(target_os = "linux")]
+fn act_on_window(
+    controls: &crate::session_status::SessionControls,
+    window: &str,
+    verb: crate::vdisplay::WindowVerb,
+    id: u64,
+) -> Response {
+    let Some(head) = controls.head() else {
+        return no_such_window();
+    };
+    match crate::vdisplay::window_action(head.compositor, &head.output, verb, window) {
+        Ok(()) => {
+            tracing::info!(
+                session = id,
+                verb = verb.as_str(),
+                window,
+                "management API: acted on a window of this session's head"
+            );
+            StatusCode::NO_CONTENT.into_response()
+        }
+        // The id check and the dispatch share one error: either way this session
+        // has no window to act on, and neither answer names the operator's desk.
+        Err(e) => {
+            tracing::info!(
+                session = id, verb = verb.as_str(), window, error = %format!("{e:#}"),
+                "management API: window verb not applied"
+            );
+            no_such_window()
+        }
+    }
+}
+
+/// A host with no compositor to ask has no window to act on.
+#[cfg(not(target_os = "linux"))]
+fn act_on_window(
+    _controls: &crate::session_status::SessionControls,
+    _window: &str,
+    _verb: crate::vdisplay::WindowVerb,
+    _id: u64,
+) -> Response {
+    no_such_window()
+}
+
+/// Windows on this session's head, or none before capture names it.
+#[cfg(target_os = "linux")]
+fn session_windows(
+    controls: &crate::session_status::SessionControls,
+) -> Vec<crate::vdisplay::Toplevel> {
+    controls.head().map_or_else(Vec::new, |h| {
+        crate::vdisplay::list_toplevels(h.compositor, &h.output)
+    })
+}
+
+/// No compositor here reports toplevels.
+#[cfg(not(target_os = "linux"))]
+fn session_windows(
+    _controls: &crate::session_status::SessionControls,
+) -> Vec<crate::vdisplay::Toplevel> {
+    Vec::new()
+}
+
+/// One refusal for "gone" and "not yours": telling them apart would confirm a
+/// window exists on a head this session may not see.
+fn no_such_window() -> Response {
+    api_error(
+        StatusCode::NOT_FOUND,
+        "That window isn't on this session's screen any more.",
+    )
+}
+
+#[derive(Deserialize, ToSchema)]
+pub(crate) struct WindowActionRequest {
+    /// `focus` | `fullscreen` | `close`.
+    #[schema(example = "focus")]
+    action: crate::vdisplay::WindowVerb,
 }
 
 /// One id, one 404 — never a reach across to another session.
