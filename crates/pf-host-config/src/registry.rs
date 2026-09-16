@@ -441,6 +441,82 @@ mod tests {
         }
     }
 
+    const DOCS_HEADER: &str = "| Setting | `host.env` | Values | Default | Applies |";
+
+    fn docs_table() -> String {
+        let code = |s: &str| format!("`{s}`");
+        let mut out = format!("{DOCS_HEADER}\n|---|---|---|---|---|\n");
+        for s in SETTINGS {
+            let values = match s.kind {
+                Kind::Bool => "`on` · `off`".to_string(),
+                Kind::Int { min, max, unit } => format!("{min}–{max} {unit}"),
+                Kind::Enum(o) => o.iter().map(|x| code(x)).collect::<Vec<_>>().join(" · "),
+                Kind::Text { max_len } => format!("text, up to {max_len} characters"),
+                Kind::List => "comma list".to_string(),
+            };
+            let default = match s.default.to_value() {
+                Value::Bool(b) => code(if b { "on" } else { "off" }),
+                Value::String(t) if t.is_empty() => "—".to_string(),
+                Value::Array(_) => "built-in list".to_string(),
+                Value::String(t) => code(&t),
+                v => code(&v.to_string()),
+            };
+            let applies = match s.apply {
+                Apply::Now => "at once",
+                Apply::NextSession => "next session",
+                Apply::Restart => "after a restart",
+            };
+            let only = if s.os.is_empty() {
+                String::new()
+            } else {
+                let names: Vec<_> =
+                    s.os.iter()
+                        .map(|o| match *o {
+                            "linux" => "Linux",
+                            "windows" => "Windows",
+                            other => other,
+                        })
+                        .collect();
+                format!(" ({})", names.join(", "))
+            };
+            out += &format!(
+                "| {}{only} | `{}` | {values} | {default} | {applies} |\n",
+                s.title, s.env
+            );
+        }
+        out
+    }
+
+    /// `configuration.md` carries the table this registry renders. `UPDATE_SETTINGS_DOCS=1`
+    /// rewrites it in place.
+    #[test]
+    fn docs_table_is_current() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../docs-site/content/docs/configuration.md"
+        );
+        let doc = std::fs::read_to_string(path).expect("read configuration.md");
+        let start = doc
+            .find(DOCS_HEADER)
+            .expect("configuration.md has the settings table");
+        let len = doc[start..]
+            .split_inclusive('\n')
+            .take_while(|l| l.starts_with('|'))
+            .map(str::len)
+            .sum::<usize>();
+        let want = docs_table();
+        if std::env::var_os("UPDATE_SETTINGS_DOCS").is_some() {
+            let next = format!("{}{want}{}", &doc[..start], &doc[start + len..]);
+            std::fs::write(path, next).expect("write configuration.md");
+            return;
+        }
+        assert_eq!(
+            &doc[start..start + len],
+            want,
+            "the settings table in configuration.md is stale — rerun with UPDATE_SETTINGS_DOCS=1"
+        );
+    }
+
     #[test]
     fn bool_grammar_is_one_grammar() {
         let s = find("gamestream").unwrap();

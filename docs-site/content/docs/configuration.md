@@ -34,6 +34,26 @@ Two things people come here for are **not** host settings: **resolution** and **
 by the client — see [Bitrate](#bitrate) near the end. The last sections are background: the
 variables the **clients** read, several devices at once, and codecs.
 
+## Settings in the web console
+
+These settings are also on the web console's **Host → Settings** page, which changes them without
+editing a file. A value in `host.env`, or a flag on the host's command line, wins over the console,
+and the console shows that setting as locked. Remove the line and restart the host to hand the
+setting back to the console.
+
+| Setting | `host.env` | Values | Default | Applies |
+|---|---|---|---|---|
+| GameStream | `PUNKTFUNK_GAMESTREAM` | `on` · `off` | `off` | after a restart |
+| Browser streaming | `PUNKTFUNK_WEBTRANSPORT` | `on` · `off` | `off` | after a restart |
+| Shared clipboard (Linux, Windows) | `PUNKTFUNK_CLIPBOARD` | `off` · `text` · `files` | `off` | next session |
+| Host name | `PUNKTFUNK_HOST_NAME` | text, up to 63 characters | — | after a restart |
+| 10-bit and HDR | `PUNKTFUNK_10BIT` | `on` · `off` | `on` | next session |
+| Full color 4:4:4 | `PUNKTFUNK_444` | `on` · `off` | `on` | next session |
+| Game frame limit (Linux) | `PUNKTFUNK_MAX_FPS` | 0–240 fps | `0` | next session |
+| Where audio plays (Linux, Windows) | `PUNKTFUNK_AUDIO_OUTPUT_MODE` | `client_only` · `host_and_client` · `follow_default` | `client_only` | next session |
+| Voice chat (Linux) | `PUNKTFUNK_AUDIO_VOICE_CHAT` | `stream` · `host` | `stream` | next session |
+| Voice chat apps (Linux) | `PUNKTFUNK_AUDIO_VOICE_APPS` | comma list | built-in list | next session |
+
 ## Session anchors
 
 **Leave these unset on a normal setup.** Running as a `systemctl --user` service the host inherits
@@ -176,7 +196,7 @@ See your desktop page ([KDE](/docs/kde), [GNOME](/docs/gnome)) for when to set t
 
 | Setting | Values | Meaning |
 |---|---|---|
-| `PUNKTFUNK_CLIPBOARD` | `off` *(default)* · `on`/`1` · `text-only` | Share the clipboard between client and host. `on` allows text, HTML/RTF and images **plus file transfer**; `text-only` (alias `no-files`) allows the text and image formats but refuses files. |
+| `PUNKTFUNK_CLIPBOARD` | `off` *(default)* · `text` · `files` | Share the clipboard between client and host. `files` (also `on`/`1`) allows text, HTML/RTF and images **plus file transfer**; `text` (also `text-only`) allows the text and image formats but refuses files. |
 
 This line is only half the switch — your client has a per-host toggle that also has to be on, and
 the host needs a clipboard backend underneath. Both, and what a greyed-out toggle means, are on

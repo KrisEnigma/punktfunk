@@ -142,6 +142,7 @@
 	"activity_update_applied": "Update applied",
 	"activity_plugins_changed": "Plugins changed",
 	"activity_store_changed": "Store changed",
+	"activity_settings_changed": "Host settings changed",
 	"activity_host_started": "Host started",
 	"activity_host_stopping": "Host stopping",
 	"action_stop_session": "Stop session",

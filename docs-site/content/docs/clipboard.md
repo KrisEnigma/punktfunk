@@ -28,13 +28,12 @@ The accepted values:
 
 | Value | Effect |
 |---|---|
-| unset, empty, `0`, `off`, `false` | **Off (the default).** The host never advertises the clipboard capability and never accepts a clipboard transfer. |
-| `text-only`, `no-files`, `text` | On for text, HTML, rich text and images. File transfer is refused. |
-| `on`, `1` | On, and file transfer is permitted by policy. |
+| unset, empty, `off`, `0`, `false`, `no` | **Off (the default).** The host never advertises the clipboard capability and never accepts a clipboard transfer. |
+| `text` (also `text-only`, `no-files`) | On for text, HTML, rich text and images. File transfer is refused. |
+| `files` (also `on`, `1`, `true`, `yes`) | On, and file transfer is permitted by policy. |
 
-Values are trimmed and compared case-insensitively. **Anything the host doesn't recognise is
-treated as `on`** — a typo like `PUNKTFUNK_CLIPBOARD=yes` or `no-file` enables the permissive
-policy rather than failing, so check the spelling if you meant `text-only`.
+Values are trimmed and compared case-insensitively. A value the host doesn't recognise is ignored
+with a warning in the host log, so the setting stays off.
 
 The file is only read at startup, so restart the host. On Linux:
 
@@ -51,8 +50,8 @@ punktfunk-host service restart
 See [Configuration](/docs/configuration) for the rest of `host.env`.
 
 > **About the file mode.** No client shipping today asks for file transfer, and no host clipboard
-> backend offers file formats yet, so `on` and `text-only` behave the same in practice — `text-only`
-> makes that explicit and keeps it that way.
+> backend offers file formats yet, so `files` and `text` behave the same in practice — `text` makes
+> that explicit and keeps it that way.
 
 ## 2. Turn it on for that host, in your client
 
