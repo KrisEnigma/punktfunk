@@ -56,6 +56,8 @@ pub struct Ctx<'a> {
     /// mutation (rebase), then `save`.
     pub store: &'a dyn crate::store::SettingsStore,
     pub platform: crate::platform::Platform,
+    /// This device's own screen ([`crate::shell::ConsoleOptions::screen`]).
+    pub screen: Option<crate::shell::DeviceScreen>,
     pub pads: &'a [PadInfo],
     /// Steam Deck: never draw our keyboard — Steam's types via SDL text input.
     pub deck: bool,

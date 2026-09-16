@@ -107,8 +107,8 @@ extension SettingsView {
                 .font(.geist(15, relativeTo: .subheadline))
                 .foregroundStyle(.secondary)
             Picker("Aspect ratio", selection: aspectSelection) {
-                ForEach(Resolutions.aspects.indices, id: \.self) { i in
-                    Text(Resolutions.aspects[i].label).tag(i)
+                ForEach(Array(SettingsOptions.families().enumerated()), id: \.offset) { i, family in
+                    Text(family.label).tag(i)
                 }
             }
             .labelsHidden()
@@ -194,7 +194,8 @@ extension SettingsView {
             get: { family },
             set: { i in
                 customMode = false
-                let mode = Resolutions.nearest(i, height: effective.height)
+                let mode = Resolutions.nearestIn(
+                    SettingsOptions.families()[i], height: effective.height)
                 setResolution(width: mode.w, height: mode.h)
             })
     }

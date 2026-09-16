@@ -736,12 +736,13 @@ private fun DisplaySettings(s: Settings, update: (Settings) -> Unit, context: an
     // until an edit actually makes it custom (or a preset is re-picked). Custom itself is detected
     // from the stored size, never flagged (see [isCustomResolution]), so nothing new persists.
     var customPicked by remember { mutableStateOf(false) }
-    val showCustom = customPicked || s.isCustomResolution()
+    val families = remember(nw, nh, sw, sh) { Resolutions.families(nw to nh, sw to sh) }
+    val showCustom = customPicked || s.isCustomResolution(families)
     var customBitratePicked by remember { mutableStateOf(false) }
     SettingsGroup("Resolution") {
         // The family the dropdown lists. A chip writes that family's size nearest the current
         // height, so the dropdown always holds a row of the family it shows.
-        val family = s.resolutionFamily()
+        val family = s.resolutionFamily(families)
         Text(
             "Aspect ratio",
             style = MaterialTheme.typography.bodySmall,
@@ -751,12 +752,12 @@ private fun DisplaySettings(s: Settings, update: (Settings) -> Unit, context: an
             modifier = Modifier.horizontalScroll(rememberScrollState()),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            Resolutions.ASPECTS.forEachIndexed { i, a ->
+            families.forEachIndexed { i, a ->
                 FilterChip(
                     selected = i == family,
                     onClick = {
                         customPicked = false
-                        val (w, h) = Resolutions.nearest(i, s.height)
+                        val (w, h) = Resolutions.nearestIn(a, s.height)
                         update(s.copy(width = w, height = h))
                     },
                     label = { Text(a.label) },
@@ -765,7 +766,7 @@ private fun DisplaySettings(s: Settings, update: (Settings) -> Unit, context: an
         }
         SettingDropdown(
             label = "Resolution",
-            options = resolutionOptions(family).map { (w, h, lbl) ->
+            options = resolutionOptions(families[family]).map { (w, h, lbl) ->
                 (w to h) to when (w) {
                     0 -> "$lbl ($nw × $nh)"
                     SAFE_AREA_MODE -> "$lbl ($sw × $sh)"
@@ -774,7 +775,7 @@ private fun DisplaySettings(s: Settings, update: (Settings) -> Unit, context: an
             } +
                 // The (-1, -1) sentinel can't collide with a real size; once a custom size is
                 // stored its label carries the live value, like the native row carries ($nw × $nh).
-                ((-1 to -1) to if (s.isCustomResolution()) "Custom (${s.width} × ${s.height})" else "Custom…"),
+                ((-1 to -1) to if (s.isCustomResolution(families)) "Custom (${s.width} × ${s.height})" else "Custom…"),
             selected = if (showCustom) -1 to -1 else s.width to s.height,
             field = SettingsOverlay.FIELD_RESOLUTION,
             caption = "The host makes a display exactly this size — no scaling. Native follows " +

@@ -218,23 +218,45 @@ enum SettingsOptions {
     // MARK: - Stream mode (iOS/macOS pickers + the gamepad settings rows on all three; the
     // touch/remote tvOS SettingsView builds its own preset list)
 
-    /// The family a picker lists for a stored size: its shape, or 16:9 while the size is this
-    /// device's own or a shape no family has (see `Resolutions`).
-    static func family(width: Int, height: Int) -> Int {
-        Resolutions.aspectOf(width, height) ?? 0
+    /// The aspect switch's entries: this device's screen and safe area first when no standard
+    /// shape has them (a phone), then the standard families — see `Resolutions.families`.
+    @MainActor
+    static func families() -> [Resolutions.Aspect] {
+        let own = nativeModes()
+        return Resolutions.families(
+            screen: own.first.map { (w: $0.w, h: $0.h) },
+            safe: own.dropFirst().first.map { (w: $0.w, h: $0.h) })
     }
 
-    /// This device's native mode first, then one aspect family's sizes (unnamed — a picker
-    /// shows them as plain `w × h`), deduped by dimensions (native wins a tie).
-    ///
-    /// On iOS the native row is followed by its **safe-area** variant, which is the same mode
-    /// narrowed so the picture clears the sensor housing and the rounded corners — see
-    /// [`SafeDisplay`] for why a narrower mode is the whole fix. It is emitted unconditionally and
-    /// left to the dedup below: on a device with no housing the two modes are identical, the
-    /// duplicate is dropped, and no pointless row appears. A notched Mac gets the same pair from
-    /// [`macDisplayModes`], shortened instead of narrowed.
+    /// The entry a picker lists for a stored size: its shape, with native (`0`) under this
+    /// device's own screen where it has one; otherwise, and for a shape none has, the first entry.
+    @MainActor
+    static func family(width: Int, height: Int) -> Int {
+        let families = families()
+        if width == 0 {
+            return families.firstIndex { $0.label == Resolutions.screenLabel } ?? 0
+        }
+        return Resolutions.familyOf(families, width, height) ?? 0
+    }
+
+    /// This device's native modes first, then one entry's sizes from `families()` (unnamed — a
+    /// picker shows them as plain `w × h`), deduped by dimensions (native wins a tie).
     @MainActor
     static func resolutionModes(family: Int) -> [(name: String, w: Int, h: Int)] {
+        let entries = families()
+        let sizes = entries[min(family, entries.count - 1)].sizes.map { (name: "", w: $0.w, h: $0.h) }
+        var seen = Set<String>()
+        return (nativeModes() + sizes).filter { seen.insert("\($0.w)x\($0.h)").inserted }
+    }
+
+    /// This device's own modes: the screen, then its safe-area variant where it differs.
+    ///
+    /// On iOS the safe-area variant is the same mode narrowed so the picture clears the sensor
+    /// housing and the rounded corners — see [`SafeDisplay`] for why a narrower mode is the whole
+    /// fix. A notched Mac gets the same pair from [`macDisplayModes`], shortened instead of
+    /// narrowed. On a device with no housing the two are identical and the second is dropped.
+    @MainActor
+    static func nativeModes() -> [(name: String, w: Int, h: Int)] {
         var native: [(name: String, w: Int, h: Int)] = []
         #if os(iOS) || os(tvOS)
         let bounds = UIScreen.main.nativeBounds // portrait-oriented pixels (tvOS: the TV mode)
@@ -250,9 +272,8 @@ enum SettingsOptions {
         #else
         native = macDisplayModes()
         #endif
-        let sizes = Resolutions.aspects[family].sizes.map { (name: "", w: $0.w, h: $0.h) }
         var seen = Set<String>()
-        return (native + sizes).filter { seen.insert("\($0.w)x\($0.h)").inserted }
+        return native.filter { seen.insert("\($0.w)x\($0.h)").inserted }
     }
 
     #if os(macOS)

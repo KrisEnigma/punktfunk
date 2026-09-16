@@ -241,6 +241,16 @@ pub struct ConsoleOptions {
     /// [`DEFAULT_GPU_CACHE_BYTES`]; a memory-tight box may go down to
     /// [`MIN_GPU_CACHE_BYTES`] but never below it.
     pub gpu_cache_bytes: usize,
+    /// This device's own screen, for the Aspect row. `None` where streams go to a window or a
+    /// TV: only a panel of an unusual shape (a phone) changes what the row offers.
+    pub screen: Option<DeviceScreen>,
+}
+
+/// A built-in screen in landscape pixels, whole and clear of its cutout.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DeviceScreen {
+    pub full: (u32, u32),
+    pub safe: (u32, u32),
 }
 
 impl ConsoleOptions {
@@ -258,6 +268,7 @@ impl ConsoleOptions {
             store: None,
             platform: Platform::Desktop,
             gpu_cache_bytes: DEFAULT_GPU_CACHE_BYTES,
+            screen: None,
         }
     }
 }
@@ -290,6 +301,7 @@ pub(crate) struct Shell {
     settings: trust::Settings,
     store: Arc<dyn SettingsStore>,
     pub(crate) platform: Platform,
+    screen: Option<DeviceScreen>,
     hosts: Vec<HostRow>,
     hosts_gen: u64,
     device_name: String,
@@ -404,6 +416,7 @@ impl Shell {
             settings,
             store,
             platform: opts.platform,
+            screen: opts.screen,
             hosts: Vec::new(),
             hosts_gen: u64::MAX,
             device_name: opts.device_name,
@@ -649,6 +662,7 @@ impl Shell {
             settings: &mut self.settings,
             store: &*self.store,
             platform: self.platform,
+            screen: self.screen,
             pads: &self.pads,
             deck: self.deck,
             fallback_ui: self.fallback_ui,
@@ -1164,6 +1178,7 @@ impl Shell {
                 settings: &mut self.settings,
                 store: &*self.store,
                 platform: self.platform,
+                screen: self.screen,
                 pads: &self.pads,
                 deck: self.deck,
                 fallback_ui: self.fallback_ui,
@@ -1255,6 +1270,7 @@ impl Shell {
                 settings: &mut self.settings,
                 store: &*self.store,
                 platform: self.platform,
+                screen: self.screen,
                 pads: &self.pads,
                 deck: self.deck,
                 fallback_ui: self.fallback_ui,
@@ -1290,6 +1306,7 @@ impl Shell {
                 settings: &mut self.settings,
                 store: &*self.store,
                 platform: self.platform,
+                screen: self.screen,
                 pads: &self.pads,
                 deck: self.deck,
                 fallback_ui: self.fallback_ui,
