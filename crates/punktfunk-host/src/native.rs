@@ -1446,14 +1446,27 @@ pub(crate) async fn run_admitted(
     let stop = Arc::new(AtomicBool::new(false));
     // Set before `stop` on `QUIT_CODE` so the display lease skips the keep-alive linger.
     let quit = Arc::new(AtomicBool::new(false));
+    // Why the session ended, for its summary. Latched first-writer-wins, so the host's own
+    // close (game exit, clean finish) beats the `Other` this watcher would read it back as.
+    let end_reason = Arc::new(std::sync::atomic::AtomicU8::new(0));
+    // Session totals for the summary. The input, audio and encode paths all outlive the
+    // guard that reads them, so they bump a shared block rather than hand a figure over.
+    let counters = Arc::new(crate::session_status::SessionCounters::default());
     {
         let stop = stop.clone();
         let quit = quit.clone();
+        let end_reason = end_reason.clone();
         let conn = conn.clone();
         tokio::spawn(async move {
             let reason = conn.closed().await;
             if reason.closed_with(QUIT_CODE) {
                 quit.store(true, Ordering::SeqCst);
+                crate::events::SessionEndReason::Local.latch(&end_reason);
+            } else {
+                // The client's own rule: anything that is not our close code is the link
+                // going away. A close this host made reads as `Other` here too, which is
+                // why the paths that make one latch before they call it.
+                crate::events::SessionEndReason::Lost.latch(&end_reason);
             }
             stop.store(true, Ordering::SeqCst);
         });
@@ -1789,6 +1802,7 @@ pub(crate) async fn run_admitted(
         let pad_audio_on = welcome.host_caps & punktfunk_core::quic::HOST_CAP_PAD_AUDIO != 0;
         let grants = session_grants.clone();
         let frame_map = frame_map.clone();
+        let counters = counters.clone();
         std::thread::Builder::new()
             .name("punktfunk1-input".into())
             .spawn({
@@ -1803,6 +1817,7 @@ pub(crate) async fn run_admitted(
                         grants,
                         frame_map,
                         stop,
+                        counters,
                     )
                 }
             })
@@ -1811,18 +1826,20 @@ pub(crate) async fn run_admitted(
     // One `read_datagram` loop (two would race): 0xCB mic, 0xCC rich, 0xC8 input. Magics disjoint.
     let input_conn = conn.clone();
     let grants_dp = session_grants.clone();
+    let counters_dp = counters.clone();
     tokio::spawn(async move {
-        let (mut input_count, mut mic_count, mut rich_count) = (0u64, 0u64, 0u64);
-        let mut dropped = 0u64;
+        // Shared, not local: this task ends with the connection, which closes after the session
+        // summary is built, so a local total would never reach it.
+        let n = &*counters_dp;
         // Per-class counts; one warn on the first drop; totals at end-of-stream.
         let denied = GrantDrops::new();
         // Full queue: drop, never block (would stall mic + this reader). Disconnected ends the loop.
-        let mut offer = |tx: &std::sync::mpsc::SyncSender<ClientInput>, item: ClientInput| match tx
+        let offer = |tx: &std::sync::mpsc::SyncSender<ClientInput>, item: ClientInput| match tx
             .try_send(item)
         {
             Ok(()) => true,
             Err(std::sync::mpsc::TrySendError::Full(_)) => {
-                dropped += 1;
+                n.input_dropped.fetch_add(1, Ordering::Relaxed);
                 true
             }
             Err(std::sync::mpsc::TrySendError::Disconnected(_)) => false,
@@ -1837,7 +1854,7 @@ pub(crate) async fn run_admitted(
                     denied.note(GrantClass::Mic);
                     continue;
                 }
-                mic_count += 1;
+                n.input_mic.fetch_add(1, Ordering::Relaxed);
                 // Bounded `try_send`: never block this loop. seq + pts ride for de-jitter.
                 let _ = mic_tx.try_send(crate::audio::MicFrame {
                     seq,
@@ -1849,7 +1866,7 @@ pub(crate) async fn run_admitted(
                     denied.note(GrantClass::Gamepad);
                     continue;
                 }
-                rich_count += 1;
+                n.input_rich.fetch_add(1, Ordering::Relaxed);
                 if !offer(&rich_tx, ClientInput::Rich(rich)) {
                     break;
                 }
@@ -1859,7 +1876,7 @@ pub(crate) async fn run_admitted(
                     denied.note(GrantClass::Pointer);
                     continue;
                 }
-                rich_count += 1;
+                n.input_rich.fetch_add(1, Ordering::Relaxed);
                 if !offer(&rich_tx, ClientInput::Pen(pen)) {
                     break;
                 }
@@ -1869,7 +1886,7 @@ pub(crate) async fn run_admitted(
                     denied.note(class);
                     continue;
                 }
-                input_count += 1;
+                n.input_events.fetch_add(1, Ordering::Relaxed);
                 // KEY_FLAG_SEMANTIC_VK is in-process (GameStream ingest). Strip it from the wire.
                 if matches!(
                     ev.kind,
@@ -1884,10 +1901,10 @@ pub(crate) async fn run_admitted(
             }
         }
         tracing::info!(
-            input = input_count,
-            mic = mic_count,
-            rich = rich_count,
-            dropped,
+            input = n.input_events.load(Ordering::Relaxed),
+            mic = n.input_mic.load(Ordering::Relaxed),
+            rich = n.input_rich.load(Ordering::Relaxed),
+            dropped = n.input_dropped.load(Ordering::Relaxed),
             denied = %denied.summary(),
             "client datagram stream ended"
         );
@@ -1983,6 +2000,7 @@ pub(crate) async fn run_admitted(
         });
         let published = audio_sink.clone();
         let muted = controls.muted.clone();
+        let counters = counters.clone();
         std::thread::Builder::new()
             .name("punktfunk1-audio".into())
             .spawn(move || {
@@ -1997,6 +2015,7 @@ pub(crate) async fn run_admitted(
                     join_live,
                     published,
                     muted,
+                    counters,
                 )
             })
             .map_err(|e| tracing::warn!(error = %e, "audio thread spawn failed — session continues without audio"))
@@ -2146,6 +2165,8 @@ pub(crate) async fn run_admitted(
     };
     let stop_stream = stop.clone();
     let quit_stream = quit.clone();
+    let end_reason_stream = end_reason.clone();
+    let counters_stream = counters.clone();
     // Client HDR volume for EDID + 0xCE. `None` = older client / no HDR → built-in defaults.
     let client_hdr = hello.display_hdr.map(crate::encode::hdr_meta_from_wire);
     let fec_target_dp = fec_target.clone();
@@ -2306,6 +2327,8 @@ pub(crate) async fn run_admitted(
                         seconds,
                         stop: stop_stream,
                         quit: quit_stream,
+                        end_reason: end_reason_stream,
+                        counters: counters_stream,
                         reconfig: reconfig_rx,
                         keyframe: keyframe_rx,
                         rfi: rfi_rx,
