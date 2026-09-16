@@ -2468,6 +2468,7 @@ mod tests {
                 2_000_000,
                 8,
                 ChromaFormat::Yuv420,
+                false,
                 None,
             ) {
                 Ok(e) => e,
@@ -3023,6 +3024,118 @@ mod tests {
         if !mastering {
             eprintln!("note: no mastering-display SEI found on this VCN/driver — client falls back to the 0xCE datagram");
         }
+    }
+
+    /// Live 10-bit SDR: P010 HEVC Main10 under BT.709 (no HDR volume). Confirms the colour untie —
+    /// the encoder must NOT emit mastering/CLL SEI, and (via `AMF_SDR10_DUMP=<path>` + ffprobe) the
+    /// SPS VUI signals BT.709, not BT.2020 PQ. Same P010 ring as the HDR path; only the colour
+    /// differs.
+    #[test]
+    fn amf_sdr10_encode_live_smoke() {
+        use windows::Win32::Graphics::Direct3D11::D3D11_BIND_SHADER_RESOURCE;
+        if let Err(e) = try_factory() {
+            eprintln!("skipping: AMF runtime unavailable ({e})");
+            return;
+        }
+        let Some(device) = amd_d3d11_device() else {
+            eprintln!("skipping: no AMD adapter on this box");
+            return;
+        };
+        let (w, h, fps) = (640u32, 480u32, 60u32);
+        let desc = D3D11_TEXTURE2D_DESC {
+            Width: w,
+            Height: h,
+            MipLevels: 1,
+            ArraySize: 1,
+            Format: DXGI_FORMAT_P010,
+            SampleDesc: DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0,
+            },
+            Usage: D3D11_USAGE_DEFAULT,
+            BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
+            CPUAccessFlags: 0,
+            MiscFlags: 0,
+        };
+        let mut tex: Option<ID3D11Texture2D> = None;
+        // SAFETY: CreateTexture2D fills the out-param only on success; owned COM, this thread.
+        unsafe { device.CreateTexture2D(&desc, None, Some(&mut tex)) }.expect("P010 texture");
+        let tex = tex.expect("P010 texture");
+        let mut enc = match AmfEncoder::open(
+            Codec::H265,
+            PixelFormat::P010,
+            w,
+            h,
+            fps,
+            4_000_000,
+            10,
+            ChromaFormat::Yuv420,
+            false, // SDR: BT.709, not BT.2020 PQ
+            None,
+        ) {
+            Ok(e) => e,
+            Err(e) => {
+                eprintln!("skipping: native AMF 10-bit SDR open declined ({e:#})");
+                return;
+            }
+        };
+        // No set_hdr_meta: a 10-bit SDR session carries no HDR volume.
+        let mut aus: Vec<EncodedFrame> = Vec::new();
+        for i in 0..6 {
+            let frame = CapturedFrame {
+                provenance: Default::default(),
+                width: w,
+                height: h,
+                pts_ns: 1 + i as u64,
+                format: PixelFormat::P010,
+                payload: FramePayload::D3d11(pf_frame::dxgi::D3d11Frame {
+                    texture: tex.clone(),
+                    device: device.clone(),
+                    pyro: None,
+                }),
+                cursor: None,
+            };
+            enc.submit(&frame).expect("submit (P010 SDR)");
+            if let Some(au) = enc.poll().expect("poll") {
+                aus.push(au);
+            }
+        }
+        assert!(!aus.is_empty(), "10-bit SDR encode produced no AUs");
+        let idr = &aus[0];
+        assert!(idr.keyframe, "first AU must be an IDR");
+        // No mastering (137) / CLL (144) prefix SEI on an SDR stream.
+        let mut hdr_sei = false;
+        for i in 0..idr.data.len().saturating_sub(5) {
+            let d = &idr.data[i..];
+            let nal = if d.starts_with(&[0, 0, 1]) {
+                &d[3..]
+            } else if d.starts_with(&[0, 0, 0, 1]) {
+                &d[4..]
+            } else {
+                continue;
+            };
+            if nal.len() >= 3 && nal[0] == 0x4E && nal[1] == 0x01 && matches!(nal[2], 137 | 144) {
+                hdr_sei = true;
+            }
+        }
+        assert!(
+            !hdr_sei,
+            "a 10-bit SDR stream must not carry HDR mastering/CLL SEI"
+        );
+        if let Ok(path) = std::env::var("AMF_SDR10_DUMP") {
+            let full: Vec<u8> = aus.iter().flat_map(|a| a.data.iter().copied()).collect();
+            let _ = std::fs::write(&path, &full);
+            eprintln!(
+                "amf_sdr10: wrote {path} ({} bytes, {} AUs)",
+                full.len(),
+                aus.len()
+            );
+        }
+        eprintln!(
+            "live AMF HEVC Main10 SDR: {} AUs, IDR {} bytes, hdr_sei={hdr_sei}",
+            aus.len(),
+            idr.data.len()
+        );
     }
 
     /// Live intra-refresh property on a scratch component (does not mutate process env).

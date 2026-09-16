@@ -287,6 +287,7 @@ fn outcome_tag(kind: InputKind, chroma444: bool) -> [u8; 32] {
         InputKind::Bgra => "Bgra",
         InputKind::Nv12 => "Nv12",
         InputKind::P010 => "P010",
+        InputKind::P010Sdr => "P010Sdr",
         InputKind::Rgb10 => "Rgb10",
         InputKind::Planar { .. } => "Planar",
     };
