@@ -225,10 +225,11 @@ impl Encoder for NativeVaapiEncoder {
                     offset: d.offset,
                     stride: d.stride,
                 }];
-                // NV12's chroma: named, or contiguous below the luma rows.
+                // NV12/P010 chroma: named by the producer, or contiguous below the luma
+                // rows. Both are two-plane; a single-plane import is refused by the driver.
                 if let Some((offset, stride)) = d.plane1 {
                     planes.push(ExportedPlane { fd, offset, stride });
-                } else if d.fourcc == vpp::DRM_FORMAT_NV12 {
+                } else if d.fourcc == vpp::DRM_FORMAT_NV12 || d.fourcc == vpp::DRM_FORMAT_P010 {
                     planes.push(ExportedPlane {
                         fd,
                         offset: d.offset + d.stride * frame.height,
