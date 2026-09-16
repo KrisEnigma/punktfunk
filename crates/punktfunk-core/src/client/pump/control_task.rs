@@ -52,6 +52,9 @@ pub(super) struct ControlTask {
     /// Live pad-slot mask ([`NativeClient::pad_slots`]). Latest wins — the host
     /// resends the whole set whenever one of this session's pads comes or goes.
     pub(super) pad_slots: Arc<std::sync::atomic::AtomicU16>,
+    /// Latest [`crate::quic::LaunchOutcome`] ([`NativeClient::launch_outcome`]). Latest
+    /// wins: the host sends a second verdict when a spawned game dies on the spot.
+    pub(super) launch_outcome: Arc<std::sync::Mutex<Option<crate::quic::LaunchOutcome>>>,
 }
 
 impl ControlTask {
@@ -77,6 +80,7 @@ impl ControlTask {
             access_tx,
             audio_mute,
             pad_slots,
+            launch_outcome,
         } = self;
         // Mid-stream clock re-sync ([`ClockResync`]): a batch every
         // CLOCK_RESYNC_INTERVAL and when the pump asks (CtrlRequest::ClockResync
@@ -324,6 +328,13 @@ impl ControlTask {
                         // wire indices are per client, the OS slots are host-wide.
                         tracing::info!(slots = p.slots, "host assigned this session's pad slots");
                         pad_slots.store(p.slots, Ordering::Relaxed);
+                    } else if let Ok(o) = crate::quic::LaunchOutcome::decode(&msg) {
+                        tracing::info!(
+                            kind = o.kind.as_str(),
+                            message = %o.message,
+                            "host reported this session's launch"
+                        );
+                        *launch_outcome.lock().unwrap_or_else(|e| e.into_inner()) = Some(o);
                     } else if let Ok(shape) = crate::quic::CursorShape::decode(&msg) {
                         // Pointer bitmap changed. try_send: overflow drops newest;
                         // the next shape change resends.

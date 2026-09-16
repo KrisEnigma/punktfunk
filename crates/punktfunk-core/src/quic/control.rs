@@ -1170,6 +1170,12 @@ impl LaunchOutcome {
         LaunchOutcome { kind, message }
     }
 
+    /// The line a client shows: the host's sentence, when the player did not get the game
+    /// they asked for. `None` when the launch needs no words.
+    pub fn notice(&self) -> Option<&str> {
+        (self.kind.needs_telling() && !self.message.is_empty()).then_some(self.message.as_str())
+    }
+
     pub fn encode(&self) -> Vec<u8> {
         // magic[0..4] type[4] kind[5] len[6] message[7..]
         let msg = self.message.as_bytes();
@@ -1797,6 +1803,18 @@ mod tests {
         );
         assert!(!LaunchOutcomeKind::Spawned.needs_telling());
         assert!(LaunchOutcomeKind::Failed.needs_telling());
+        assert_eq!(
+            LaunchOutcome::new(LaunchOutcomeKind::Failed, "Quail closed.").notice(),
+            Some("Quail closed.")
+        );
+        assert_eq!(
+            LaunchOutcome::new(LaunchOutcomeKind::Adopted, "Picked it up.").notice(),
+            None
+        );
+        assert_eq!(
+            LaunchOutcome::new(LaunchOutcomeKind::Refused, "").notice(),
+            None
+        );
 
         let good = LaunchOutcome::new(LaunchOutcomeKind::Failed, "x").encode();
         assert!(LaunchOutcome::decode(&good[..good.len() - 1]).is_err());

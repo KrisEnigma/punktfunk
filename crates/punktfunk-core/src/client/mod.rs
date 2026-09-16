@@ -324,6 +324,8 @@ pub struct NativeClient {
     /// OS pad slots the host gave this session, one bit each. Slot `n` is player
     /// `n + 1`; `0` until a pad of ours has a device on the host.
     pad_slots: Arc<AtomicU16>,
+    /// Latest launch verdict from the host; `None` until one arrives.
+    launch_outcome: Arc<Mutex<Option<crate::quic::LaunchOutcome>>>,
     /// Smoothed QUIC round trip (µs), sampled by the worker. `0` until the first sample.
     rtt_us: Arc<AtomicU32>,
     /// The stats overlay window. Receipt and 0xCF timings land in it as they are pulled.
@@ -716,6 +718,7 @@ impl NativeClient {
         let audio_buffer_ms = Arc::new(AtomicU32::new(0));
         let audio_mute = Arc::new(AtomicU8::new(0));
         let pad_slots = Arc::new(AtomicU16::new(0));
+        let launch_outcome = Arc::new(Mutex::new(None));
         let rtt_us = Arc::new(AtomicU32::new(0));
         let decode_lat = Arc::new(Mutex::new(DecodeLatAcc::default()));
         // Pump seeds from Welcome before ready_tx, then follows every ack.
@@ -749,6 +752,7 @@ impl NativeClient {
         let pad_mouse_w = pad_mouse.clone();
         let audio_mute_w = audio_mute.clone();
         let pad_slots_w = pad_slots.clone();
+        let launch_outcome_w = launch_outcome.clone();
         let access_grants_w = access_grants.clone();
         let access_deadline_w = access_deadline_unix.clone();
         let end_reject_w = end_reject_code.clone();
@@ -834,6 +838,7 @@ impl NativeClient {
                     live_bitrate: live_bitrate_w,
                     audio_mute: audio_mute_w,
                     pad_slots: pad_slots_w,
+                    launch_outcome: launch_outcome_w,
                     access_grants: access_grants_w,
                     access_deadline_unix: access_deadline_w,
                     access_tx,
@@ -883,6 +888,7 @@ impl NativeClient {
             access: Mutex::new(access_rx),
             audio_mute,
             pad_slots,
+            launch_outcome,
             access_grants,
             access_deadline_unix,
             end_reject_code,
@@ -1421,6 +1427,16 @@ impl NativeClient {
     /// send [`crate::quic::PadSlots`]. [`crate::hud::player_label`] is the wording.
     pub fn pad_slots(&self) -> u16 {
         self.pad_slots.load(Ordering::Relaxed)
+    }
+
+    /// What became of this session's library launch, latest verdict first. `None` before the
+    /// host sends one, on a session that launched nothing, and on a host too old to say.
+    /// [`crate::quic::LaunchOutcome::notice`] is the line to show.
+    pub fn launch_outcome(&self) -> Option<crate::quic::LaunchOutcome> {
+        self.launch_outcome
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     /// `(pad, low, high)`; TTL of a v2 envelope is dropped. Use

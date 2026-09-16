@@ -4017,6 +4017,65 @@ mod tests {
         host.join().unwrap().unwrap();
     }
 
+    /// A launch the host cannot resolve streams on, and the client learns why from the
+    /// control message.
+    #[test]
+    fn unknown_launch_reaches_the_client_as_a_refusal() {
+        let _serial = SESSION_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        use punktfunk_core::client::NativeClient;
+        use punktfunk_core::quic::{endpoint, LaunchOutcomeKind};
+
+        let store = access_store_path("launch-outcome");
+        let _ = std::fs::remove_file(&store);
+        let np = Arc::new(NativePairing::load_with(Some(store.clone()), None, false).unwrap());
+        let (cert, key) = endpoint::generate_identity().unwrap();
+        let fp_hex = fingerprint_hex(&endpoint::fingerprint_of_pem(&cert).unwrap());
+        np.add_with_access("Launcher", &fp_hex, None).unwrap();
+        let host = spawn_access_host(19786, 1, np);
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        let client = NativeClient::connect(
+            "127.0.0.1",
+            19786,
+            punktfunk_core::Mode {
+                width: 1280,
+                height: 720,
+                refresh_hz: 60,
+            },
+            CompositorPref::Auto,
+            GamepadPref::Auto,
+            0,
+            0,
+            2,
+            0,
+            0,
+            None,
+            0,
+            false,
+            Some("pf-test:no-such-title".into()),
+            Some("Launcher".into()),
+            None,
+            Some((cert, key)),
+            std::time::Duration::from_secs(10),
+        )
+        .expect("an unresolvable launch still admits the session");
+        // A cold library scan decides the refusal; it can take seconds.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        let outcome = loop {
+            if let Some(o) = client.launch_outcome() {
+                break o;
+            }
+            assert!(std::time::Instant::now() < deadline, "no launch outcome");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        };
+        assert_eq!(outcome.kind, LaunchOutcomeKind::Refused);
+        assert!(outcome
+            .notice()
+            .is_some_and(|n| n.starts_with("Couldn't start")));
+        drop(client);
+        let _ = std::fs::remove_file(&store);
+        host.join().unwrap().unwrap();
+    }
+
     /// Expired record knocks into pending; re-approval is the re-grant on the held connection.
     #[test]
     fn expired_record_knocks_into_pending_and_reapproval_regrants() {
