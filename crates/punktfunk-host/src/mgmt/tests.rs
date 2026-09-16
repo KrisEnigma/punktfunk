@@ -1769,6 +1769,10 @@ fn every_route_is_classified_for_the_plugin_and_cert_lanes() {
             false,
             false,
         ),
+        // Live pad feed: console lane only, for the same reason as the window list —
+        // a cert caller is not bound to a session id, so it could watch another
+        // session's controller. A plugin has no use for a 250 Hz input tap.
+        ("GET", "/api/v1/session/{id}/pads", false, false),
         ("GET", "/api/v1/session/settings", true, false),
         ("PUT", "/api/v1/session/settings", true, false),
         ("POST", "/api/v1/game/end", true, false),

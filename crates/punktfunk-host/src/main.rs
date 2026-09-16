@@ -147,6 +147,8 @@ mod native;
 mod native_pairing;
 mod net_health;
 mod osinfo;
+// Live per-session pad tap the console's Controllers page streams.
+mod pad_feed;
 mod plugins;
 mod power;
 // Process-table half of session⇄game binding — design/session-game-lifetime.md. Empty on macOS.

@@ -1643,6 +1643,8 @@ pub(crate) async fn run_admitted(
         audio_tx: Some(audio_tx),
         // Filled by the stream thread once capture names the head.
         head: Arc::new(std::sync::Mutex::new(None)),
+        // Written by the input thread below, read by `GET /session/{id}/pads`.
+        pads: Arc::new(crate::pad_feed::PadFeed::new()),
     };
     tokio::spawn(control::run(control::Task {
         ctrl_send,
@@ -1789,6 +1791,7 @@ pub(crate) async fn run_admitted(
         let pad_audio_on = welcome.host_caps & punktfunk_core::quic::HOST_CAP_PAD_AUDIO != 0;
         let grants = session_grants.clone();
         let frame_map = frame_map.clone();
+        let pad_feed = controls.pads.clone();
         std::thread::Builder::new()
             .name("punktfunk1-input".into())
             .spawn({
@@ -1802,6 +1805,7 @@ pub(crate) async fn run_admitted(
                         pad_audio_on,
                         grants,
                         frame_map,
+                        pad_feed,
                         stop,
                     )
                 }
