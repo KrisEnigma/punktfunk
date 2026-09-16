@@ -46,8 +46,45 @@ Each preset is a bundle of independent grants, under **Advanced** in the edit sh
 **Controller only deliberately does not include Launch**: in co-play the owner drives what runs.
 Want a guest picking games? Turn on that one Advanced toggle.
 
+## Couch co-op over JOIN
+
+Two people, one screen, one game — the second player on their own phone or PC. Pair the guest's
+device **Controller only**, have them connect to the host you are already streaming from, and the
+host puts them on the *same* display instead of opening a second one (the session list calls that
+**Joined another session**). Their controllers arrive as extra controllers on that desktop, with
+rumble and pad audio, and nothing else they send lands. From the game's side it is simply two pads
+on one PC, which is what local co-op wants.
+
+**Who is Player 1** is a host decision, because a controller's OS slot is what a local co-op game
+reads and each client numbers its own pads from zero. Left alone, the slot goes to whichever pad
+appears first, so the order changes every time someone reconnects. The Dashboard's **Sessions**
+card carries a player picker on each row: pick **Player 1–4** and that session's controllers take
+that slot. The pick is remembered against the device's pairing, so the same device is the same
+player next time it connects — it follows the pairing, not an address.
+
+Two things the picker deliberately does not do. A controller that is already plugged in keeps the
+slot it was created under until it re-plugs, because renumbering a live pad is an unplug in front
+of the game. And a slot another live session asked for first stays theirs — the picker says so
+rather than taking it. A session with no pick keeps the old behaviour: first free slot.
+
+Up-to-date clients name the player themselves: the [stats overlay](/docs/stats) leads with
+*"player 2"* whenever the session holds a controller, so the guest can check without asking.
+
+This is a *shared* desktop, so everything under
+[what access levels do not cover](#what-this-does-not-cover) still applies: the guest sees and
+hears your whole screen, and game audio is one stream both of you hear.
+
 A session's quality controls — resolution, bitrate, keyframe requests — are *not* governed. They
 only shape that device's own stream; restricting them would cost usability and buy no security.
+
+**The window list is not a grant.** A client can ask what is open on the screen it is streaming —
+so a player in a full-screen game can see the Discord call or the launcher waiting behind it — and
+every device gets that, spectators included: those windows are already in the picture it receives.
+Only the streamed screen is listed; your other monitors never appear, whatever the access level.
+*Acting* on a window is governed: **Gamepad, Pointer or Keyboard** lets a device focus or
+full-screen one (a device that can send input can already click a window to raise it), and
+**closing** one needs **Launch**, for the same reason Launch governs starting a game — the owner
+drives what runs. A view-only spectator can do none of the three.
 
 ## Temporary access
 
@@ -102,9 +139,22 @@ with the overlay off. A guest who wants to check what they are allowed to do bri
 way they bring up the stats. The expiry warnings are separate: they are toasts, they announce a
 change rather than describe a state, and they appear whatever the overlay is set to.
 
+## Changing access while someone is streaming
+
+The Dashboard's **Sessions** card carries an access picker on each row. It changes the session in
+front of you — the mask the host checks every event against — with no reconnect: hand a
+view-only friend the pad, take it back when your turn comes round. An up-to-date client's access
+chip follows within the same second.
+
+This is the *session*, not the pairing. The device's stored access is untouched, so the change
+lasts until that session ends, and an edit to the device's own access overrides it. The picker can
+only re-point **within** the pairing: asking for more than the device is paired for lands on what
+the pairing allows, not on what was asked. Widening the device itself is still the **Paired
+devices** sheet, behind the console login.
+
 ## Where enforcement happens
 
-The host checks every input event against the device's grants before injecting it, refuses
+The host checks every input event against the session's live grants before injecting it, refuses
 ungranted planes at session setup (no Gamepad grant means the virtual pads are never created; no
 Microphone grant means the mic plane never attaches), and re-pairing a device **preserves** its
 existing access — the only way to widen a grant is the console's own dialogs, behind the console

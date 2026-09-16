@@ -44,7 +44,7 @@ fn reject_lone_until_disconnect(
     None
 }
 
-fn reject_reserved(grants: u32) -> Option<Response> {
+pub(crate) fn reject_reserved(grants: u32) -> Option<Response> {
     if grants & GRANT_RESERVED != 0 {
         return Some(api_error(
             StatusCode::BAD_REQUEST,
@@ -75,9 +75,20 @@ fn chosen_access(
     })
 }
 
+/// The three named levels the console offers, as masks. `None` = not one of them;
+/// a caller that wants another shape sends `grants` instead.
+pub(crate) fn grants_for_level(level: &str) -> Option<u32> {
+    match level {
+        "full" => Some(GRANT_PRESET_FULL),
+        "controller" => Some(GRANT_PRESET_CONTROLLER_ONLY),
+        "view" => Some(GRANT_PRESET_VIEW_ONLY),
+        _ => None,
+    }
+}
+
 /// Display name of a grant mask. Derived, never stored — two copies would
 /// drift. Absent = full; reserved bits ignored (same reading as enforcement).
-fn access_level(grants: Option<u32>) -> &'static str {
+pub(crate) fn access_level(grants: Option<u32>) -> &'static str {
     match grants.unwrap_or(GRANT_ALL) & GRANT_ALL {
         m if m == GRANT_PRESET_FULL => "full",
         m if m == GRANT_PRESET_CONTROLLER_ONLY => "controller",
@@ -145,6 +156,11 @@ pub(crate) struct NativeClient {
     /// The record is dropped when the device's last session ends, rather than at a clock
     /// time. `expires_unix` may also be set; whichever comes first ends the grant.
     until_disconnect: bool,
+    /// Player slot this device's pads take, 0-based; `null` = whichever comes free.
+    /// Set through `PUT /session/{id}/player` while the device streams.
+    // `value_type`: an `Option<u8>` alone generates as `never` in the SDK.
+    #[schema(value_type = u32, required = false)]
+    preferred_pad_slot: Option<u8>,
 }
 
 impl NativeClient {
@@ -158,6 +174,7 @@ impl NativeClient {
             expires_unix: c.expires_unix,
             granted_unix: c.granted_unix,
             until_disconnect: c.until_disconnect,
+            preferred_pad_slot: c.preferred_pad_slot,
         }
     }
 }
@@ -522,6 +539,7 @@ pub(crate) async fn update_native_client_access(
                     expires_unix: access.expires_unix,
                     granted_unix: Some(unix_now()),
                     until_disconnect: access.until_disconnect,
+                    preferred_pad_slot: current.preferred_pad_slot,
                 });
             Json(NativeClient::from_record(stored)).into_response()
         }

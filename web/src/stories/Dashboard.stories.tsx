@@ -11,11 +11,15 @@ const meta = {
 		onStopSession: () => {},
 		onRequestIdr: () => {},
 		onEndGame: () => {},
-		onToggleMute: () => {},
+		onStopOne: () => {},
+		onIdrOne: () => {},
+		onMuteOne: () => {},
+		onAccessOne: () => {},
+		onPlayerOne: () => {},
 		isStopping: false,
 		isRequestingIdr: false,
 		isEndingGame: false,
-		isTogglingMute: false,
+		isChangingSession: false,
 	},
 } satisfies Meta<typeof DashboardView>;
 

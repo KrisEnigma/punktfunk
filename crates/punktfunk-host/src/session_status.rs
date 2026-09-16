@@ -8,13 +8,27 @@
 //! an entry.
 //!
 //! [`register`] on stream start; [`LiveSessionGuard`] removes the entry on
-//! any scope exit. `/status` reads [`snapshot`]/[`count`]. Dashboard stop
-//! and IDR reach a native session through [`stop_all`] and [`force_idr_all`].
+//! any scope exit. `/status` reads [`snapshot`]/[`count`]. The id-less Dashboard
+//! stop and IDR reach every native session through [`stop_all_quit`] and
+//! [`force_idr_all`]; the per-session routes take one id through [`stop_quit`],
+//! [`force_idr`] and [`controls`].
+//!
+//! The same drop builds a [`crate::events::SessionSummary`] — the session's own
+//! numbers plus why it ended — onto `session.ended` and into [`recent`], which is
+//! what `GET /api/v1/session/last` serves. [`SessionCounters`] is the shared block
+//! the input, audio and encode paths bump so the summary can read totals from
+//! threads that outlive it.
 
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::collections::VecDeque;
+use std::sync::atomic::{
+    AtomicBool, AtomicI64, AtomicU16, AtomicU32, AtomicU64, AtomicU8, Ordering,
+};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use crate::encode::Codec;
+use crate::encode::{ChromaFormat, Codec};
+use crate::events::{
+    AudioEgress, BitrateSpan, GyroCadence, InputCounts, SessionEndReason, SessionSummary,
+};
 
 /// One live native session. The Arcs are the video loop's own handles, so a
 /// mid-stream mode/bitrate change shows on `/status` with no second write.
@@ -47,24 +61,265 @@ struct LiveSession {
     /// The capturer's live health, published by the video loop (WP18). `None` until the
     /// first publish, or on a capturer that does not classify.
     capture_health: Arc<Mutex<Option<pf_capture::CaptureHealth>>>,
-    /// Admitted by `mode_conflict: join`: shares the owner's display and audio.
-    joined: bool,
-    /// The audio thread's mute, read per frame.
-    mute: Arc<SessionMute>,
+    /// Sharing another session's display (`mode_conflict: join`) rather than owning one.
+    join: bool,
+    /// What the per-session management routes act on.
+    controls: SessionControls,
+    started: std::time::Instant,
+    /// Host wall clock at registration; [`started`](Self::started) cannot give one.
+    started_unix: i64,
+    /// 8 or 10, and the encoder's chroma. Fixed for the session.
+    bit_depth: u8,
+    chroma: ChromaFormat,
+    /// [`SessionEndReason`] as `u8`, latched by whichever path knows. 0 = the video
+    /// loop never reached its clean tail, which is [`SessionEndReason::HostError`].
+    end_reason: Arc<AtomicU8>,
+    /// What the video loop counted, stored once at its tail ([`record_tally`]).
+    /// `None` on a loop that bailed before it.
+    tally: Option<SessionTally>,
+    /// Totals the input, audio and encode paths bump while the session runs.
+    counters: Arc<SessionCounters>,
 }
 
-/// Why a session's audio is silent. The operator's switch and a title's
-/// `audio.sessions` policy are separate bits, so a lease ending lifts only its
-/// own and never an operator's mute.
+/// The video loop's own totals, handed over as it finishes.
+#[derive(Clone, Copy)]
+pub struct SessionTally {
+    /// Access units the send thread put on the wire.
+    pub frames_sent: u64,
+    /// The capturer's refused frames; `None` where it does not count them.
+    pub frames_dropped: Option<u64>,
+    /// Path MTU the QUIC stack settled on, bytes.
+    pub path_mtu: u16,
+}
+
+/// Live handles the management plane acts on for ONE session. Built in
+/// `native::serve` and carried here by the video loop, so a per-session route
+/// never has to reach across into another session's state.
+#[derive(Clone)]
+pub struct SessionControls {
+    /// LIVE grant mask — the same atomic the input filter reads every event against.
+    pub grants: Arc<AtomicU32>,
+    /// The pairing's own mask. A live change is `requested & ceiling`: the console
+    /// re-points within what this device is paired for, never above it.
+    pub ceiling: Arc<AtomicU32>,
+    /// Audio egress drops this session's frames while set. Capturer and sink stay up.
+    pub muted: Arc<AtomicBool>,
+    /// Access deadline, unix seconds; 0 = permanent. The `remaining_secs` an
+    /// `AccessUpdate` owes the client.
+    pub deadline_unix: Arc<AtomicI64>,
+    /// The control task's access lane — the same one the expiry watch writes, so a
+    /// live re-point clears the clipboard exactly like a pairing edit does.
+    pub access_tx: Option<tokio::sync::mpsc::UnboundedSender<punktfunk_core::quic::AccessUpdate>>,
+    /// The control task's audio lane. `None` on a session with no control task (tests).
+    pub audio_tx: Option<tokio::sync::mpsc::UnboundedSender<punktfunk_core::quic::AudioState>>,
+    /// Head the window routes read and act on ([`SessionControls::set_head`]).
+    /// Latched per session: the injector's slot is one per process, and a second
+    /// session's bring-up would otherwise re-point this one at its head.
+    pub head: Arc<Mutex<Option<StreamedHead>>>,
+    /// OS pad slots this session holds, one bit each — the player numbers a local
+    /// co-op game reads. Published by the input thread.
+    pub pad_slots: Arc<AtomicU16>,
+    /// Full cert fingerprint, when this session has one. The stable device key —
+    /// `client` is only its 12-hex prefix, and an address is not an identity.
+    pub fingerprint: Option<String>,
+    /// This device's key in [`crate::inject::pad_pool`]. A reservation and a
+    /// reconnect are keyed by it, so both follow the pairing, never the address.
+    pub pad_owner: u64,
+    /// Player slot the operator picked, 0-based; [`NO_PAD_SLOT`] = lazy claim.
+    pub preferred_pad_slot: Arc<AtomicU8>,
+    /// Live pad tap this session's input thread publishes to. Idle until a console
+    /// opens `GET /session/{id}/pads` ([`crate::pad_feed`]).
+    pub pads: Arc<crate::pad_feed::PadFeed>,
+}
+
+/// `preferred_pad_slot` for a session the operator has not placed. Not a valid
+/// slot: `MAX_PADS` is 16.
+pub const NO_PAD_SLOT: u8 = u8::MAX;
+
+/// The compositor head one session streams — what its window list names.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StreamedHead {
+    pub compositor: crate::vdisplay::Compositor,
+    /// `wl_output.name` of the streamed head.
+    pub output: String,
+}
+
+impl SessionControls {
+    /// Full control, permanent, unmuted, nothing to tell the client. The shape an
+    /// anonymous (`--open`) session and the tests start from.
+    pub fn open() -> SessionControls {
+        SessionControls {
+            grants: Arc::new(AtomicU32::new(punktfunk_core::quic::GRANT_ALL)),
+            ceiling: Arc::new(AtomicU32::new(punktfunk_core::quic::GRANT_ALL)),
+            muted: Arc::new(AtomicBool::new(false)),
+            deadline_unix: Arc::new(AtomicI64::new(0)),
+            access_tx: None,
+            audio_tx: None,
+            head: Arc::new(Mutex::new(None)),
+            pad_slots: Arc::new(AtomicU16::new(0)),
+            fingerprint: None,
+            pad_owner: crate::inject::pad_pool::owner_key(None),
+            preferred_pad_slot: Arc::new(AtomicU8::new(NO_PAD_SLOT)),
+            pads: Arc::new(crate::pad_feed::PadFeed::new()),
+        }
+    }
+
+    /// The player slot the operator picked for this session, 0-based.
+    pub fn player(&self) -> Option<u8> {
+        match self.preferred_pad_slot.load(Ordering::Relaxed) {
+            NO_PAD_SLOT => None,
+            slot => Some(slot),
+        }
+    }
+
+    /// Place this session's pads on `slot`, or hand it back to the lazy claim with
+    /// `None`. The pool reservation is a hint the next pad to plug reads, so a pad
+    /// already built keeps the slot it was created under until it re-plugs.
+    ///
+    /// `false` = another live session asked for that slot first and keeps it.
+    pub fn set_player(&self, slot: Option<u8>) -> bool {
+        let Some(slot) = slot else {
+            self.preferred_pad_slot
+                .store(NO_PAD_SLOT, Ordering::Relaxed);
+            return true;
+        };
+        if !crate::inject::pad_pool::global().reserve(slot, self.pad_owner) {
+            return false;
+        }
+        self.preferred_pad_slot.store(slot, Ordering::Relaxed);
+        true
+    }
+
+    /// OS pad slots this session holds right now, lowest first.
+    pub fn pads(&self) -> Vec<u8> {
+        let mask = self.pad_slots.load(Ordering::Relaxed);
+        (0..punktfunk_core::input::MAX_PADS as u8)
+            .filter(|n| mask & (1 << n) != 0)
+            .collect()
+    }
+
+    /// Latch the head this session streams, once the capture pipeline names it.
+    /// A backend that names no output leaves it `None` and lists nothing.
+    pub fn set_head(&self, head: Option<StreamedHead>) {
+        *self.head.lock().unwrap_or_else(|e| e.into_inner()) = head;
+    }
+
+    /// This session's head, or `None` before capture is up.
+    pub fn head(&self) -> Option<StreamedHead> {
+        self.head.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// Re-point the live mask, clamped to the pairing's ceiling, and tell the client
+    /// its chip changed. Returns the mask that took effect — never more than `ceiling`.
+    pub fn set_grants(&self, requested: u32) -> u32 {
+        let applied = requested & self.ceiling.load(Ordering::Relaxed);
+        self.grants.store(applied, Ordering::Relaxed);
+        let deadline = self.deadline_unix.load(Ordering::Relaxed);
+        if let Some(tx) = &self.access_tx {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_secs() as i64);
+            // Best-effort, like every other `AccessUpdate`: the host enforces either way.
+            let _ = tx.send(punktfunk_core::quic::AccessUpdate {
+                grants: applied,
+                remaining_secs: if deadline == 0 {
+                    0
+                } else {
+                    u32::try_from((deadline - now).max(1)).unwrap_or(u32::MAX)
+                },
+            });
+        }
+        applied
+    }
+
+    /// Set the audio gate and tell the client, so its overlay can name the silence
+    /// instead of leaving the player to wonder what broke.
+    pub fn set_muted(&self, muted: bool) {
+        self.muted.store(muted, Ordering::SeqCst);
+        if let Some(tx) = &self.audio_tx {
+            let _ = tx.send(punktfunk_core::quic::AudioState { muted });
+        }
+    }
+}
+
+/// Session totals the loops bump and the summary reads.
+///
+/// One block rather than a dozen `Arc<Atomic…>`: the input task, the audio thread and the
+/// encode loop all outlive [`LiveSessionGuard::drop`], so the summary cannot wait for them
+/// to hand a figure over. Relaxed throughout — diagnostics, not synchronisation.
 #[derive(Default)]
-pub struct SessionMute {
-    operator: AtomicBool,
-    policy: AtomicBool,
+pub struct SessionCounters {
+    /// Datagrams accepted by class, and offers the input queue refused when full.
+    pub input_events: AtomicU64,
+    pub input_mic: AtomicU64,
+    pub input_rich: AtomicU64,
+    pub input_dropped: AtomicU64,
+    /// `RichInput::Motion` arrivals, and the gaps ≥ 500 ms among them.
+    motion_samples: AtomicU64,
+    motion_stalls: AtomicU64,
+    /// Set when the audio thread starts. Distinguishes a silent plane from no plane.
+    audio_ran: AtomicBool,
+    audio_sent: AtomicU64,
+    audio_infilled: AtomicU64,
+    audio_late: AtomicU64,
+    audio_max_late_us: AtomicU64,
+    audio_reanchors: AtomicU64,
+    /// Every encoder target the session ran at. `notes` counts them; the first is the
+    /// opening rate, so the rest are the moves.
+    bitrate_min_kbps: AtomicU32,
+    bitrate_max_kbps: AtomicU32,
+    bitrate_sum_kbps: AtomicU64,
+    bitrate_notes: AtomicU32,
 }
 
-impl SessionMute {
-    pub fn is_muted(&self) -> bool {
-        self.operator.load(Ordering::Relaxed) || self.policy.load(Ordering::Relaxed)
+impl SessionCounters {
+    /// One motion arrival. `stalled` is [`crate::native::motion_cadence`]'s own verdict, so
+    /// what counts as a break in the feed is defined in exactly one place.
+    pub fn note_motion(&self, stalled: bool) {
+        self.motion_samples.fetch_add(1, Ordering::Relaxed);
+        if stalled {
+            self.motion_stalls.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// The audio plane is up for this session, however little it goes on to send.
+    pub fn note_audio_started(&self) {
+        self.audio_ran.store(true, Ordering::Relaxed);
+    }
+
+    /// One audio frame on the wire. `late` is the miss against its slot and `was_late` the
+    /// window's own verdict on it — same split as [`note_motion`](Self::note_motion).
+    pub fn note_audio_frame(&self, late: std::time::Duration, infilled: bool, was_late: bool) {
+        self.audio_sent.fetch_add(1, Ordering::Relaxed);
+        if infilled {
+            self.audio_infilled.fetch_add(1, Ordering::Relaxed);
+        }
+        if was_late {
+            self.audio_late.fetch_add(1, Ordering::Relaxed);
+        }
+        self.audio_max_late_us
+            .fetch_max(late.as_micros() as u64, Ordering::Relaxed);
+    }
+
+    pub fn note_audio_reanchor(&self) {
+        self.audio_reanchors.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// One encoder target the session ran at. Call it wherever the rate actually changed:
+    /// a repeat would read as a move that never happened.
+    pub fn note_bitrate(&self, kbps: u32) {
+        if kbps == 0 {
+            return;
+        }
+        self.bitrate_min_kbps
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |m| {
+                Some(if m == 0 { kbps } else { m.min(kbps) })
+            })
+            .ok();
+        self.bitrate_max_kbps.fetch_max(kbps, Ordering::Relaxed);
+        self.bitrate_sum_kbps
+            .fetch_add(u64::from(kbps), Ordering::Relaxed);
+        self.bitrate_notes.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -94,28 +349,74 @@ pub enum AudioSessions {
 
 /// Whether `policy` silences a session. `launcher` is the launching session's
 /// client label, matched the way [`stop_by_fingerprint`] matches.
-fn policy_mutes(policy: AudioSessions, launcher: &str, client: &str, joined: bool) -> bool {
+fn policy_mutes(policy: AudioSessions, launcher: &str, client: &str, join: bool) -> bool {
     match policy {
         AudioSessions::All => false,
-        AudioSessions::Owner => joined,
-        AudioSessions::Joined => !joined,
+        AudioSessions::Owner => join,
+        AudioSessions::Joined => !join,
         AudioSessions::Launcher => client != launcher,
     }
 }
 
+struct AudioPolicy {
+    sessions: AudioSessions,
+    launcher: String,
+    /// Sessions this policy muted, so its end unmutes exactly those.
+    muted: Vec<u64>,
+}
+
 /// The live title policy, applied to sessions that register while it stands.
 /// One at a time: a second lease replaces it, and the first to end lifts both.
-static AUDIO_POLICY: Mutex<Option<(AudioSessions, String)>> = Mutex::new(None);
+static AUDIO_POLICY: Mutex<Option<AudioPolicy>> = Mutex::new(None);
+
+/// Apply a title's `audio.sessions` through the same mute the operator uses, so
+/// the client is told and the operator can unmute live. Drop unmutes what it muted.
+pub fn apply_audio_policy(sessions: AudioSessions, launcher: &str) -> AudioPolicyGuard {
+    let mut muted = Vec::new();
+    for s in registry().lock().unwrap().iter() {
+        if policy_mutes(sessions, launcher, &s.client, s.join) {
+            s.controls.set_muted(true);
+            muted.push(s.id);
+        }
+    }
+    *AUDIO_POLICY.lock().unwrap() = Some(AudioPolicy {
+        sessions,
+        launcher: launcher.to_owned(),
+        muted,
+    });
+    tracing::info!(policy = ?sessions, launcher, "title audio policy applied");
+    AudioPolicyGuard(())
+}
+
+pub struct AudioPolicyGuard(());
+
+impl Drop for AudioPolicyGuard {
+    fn drop(&mut self) {
+        let Some(policy) = AUDIO_POLICY.lock().unwrap().take() else {
+            return;
+        };
+        for s in registry().lock().unwrap().iter() {
+            if policy.muted.contains(&s.id) {
+                s.controls.set_muted(false);
+            }
+        }
+    }
+}
 
 /// Resolved read of one live session for `/status`.
 #[derive(Clone)]
 pub struct SessionSnapshot {
-    /// Registry id: the `{id}` of the per-session routes.
+    /// Same id the per-session routes and `session.started` carry.
     pub id: u64,
     /// Client label: 12-hex cert-fingerprint prefix, or peer IP if anonymous.
     pub client: String,
-    pub joined: bool,
+    pub hdr: bool,
+    /// Sharing another session's display rather than owning one.
+    pub join: bool,
     pub muted: bool,
+    /// Live `GRANT_*` mask, after any per-session re-point.
+    pub grants: u32,
+    pub uptime_s: u64,
     pub width: u32,
     pub height: u32,
     pub fps: u32,
@@ -129,12 +430,11 @@ pub struct SessionSnapshot {
     pub time_to_first_frame_ms: u32,
     /// Last mid-stream resize total, ms. 0 = no resize this session.
     pub last_resize_ms: u32,
+    /// OS pad slots this session holds, lowest first. Slot `n` is player `n + 1`.
+    pub pads: Vec<u8>,
+    /// Player slot the operator picked, 0-based. `None` = lazy claim.
+    pub preferred_pad_slot: Option<u8>,
 }
-
-/// Serializes tests that touch the process-global registry; otherwise one
-/// test's session leaks into another's `/status`.
-#[cfg(test)]
-pub(crate) static SESSION_REGISTRY_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 fn registry() -> &'static Mutex<Vec<LiveSession>> {
     static REG: OnceLock<Mutex<Vec<LiveSession>>> = OnceLock::new();
@@ -154,6 +454,80 @@ fn session_ref(s: &LiveSession) -> crate::events::SessionRef {
         client: s.client.clone(),
         mode: crate::events::mode_str(width, height, fps),
         hdr: s.hdr,
+    }
+}
+
+/// Host wall clock, unix seconds — the same clock `mgmt::auth` stamps deadlines in.
+fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as i64)
+}
+
+/// `None` until a pad sends motion: a keyboard-and-mouse session owes no gyro row.
+fn gyro_cadence(c: &SessionCounters) -> Option<GyroCadence> {
+    let samples = c.motion_samples.load(Ordering::Relaxed);
+    let stalls = c.motion_stalls.load(Ordering::Relaxed);
+    (samples > 0 || stalls > 0).then_some(GyroCadence { samples, stalls })
+}
+
+/// `None` when no audio thread ran. A thread that ran and sent nothing reports zeros —
+/// a silent plane and no plane are different faults.
+fn audio_egress(c: &SessionCounters) -> Option<AudioEgress> {
+    c.audio_ran.load(Ordering::Relaxed).then(|| AudioEgress {
+        sent: c.audio_sent.load(Ordering::Relaxed),
+        infilled: c.audio_infilled.load(Ordering::Relaxed),
+        late: c.audio_late.load(Ordering::Relaxed),
+        max_late_ms: c.audio_max_late_us.load(Ordering::Relaxed) / 1_000,
+        reanchors: c.audio_reanchors.load(Ordering::Relaxed),
+    })
+}
+
+/// `None` until an opening rate is noted. The first note is that rate, so the moves are
+/// the notes after it.
+fn bitrate_span(c: &SessionCounters) -> Option<BitrateSpan> {
+    let notes = c.bitrate_notes.load(Ordering::Relaxed);
+    (notes > 0).then(|| BitrateSpan {
+        min_kbps: c.bitrate_min_kbps.load(Ordering::Relaxed),
+        avg_kbps: (c.bitrate_sum_kbps.load(Ordering::Relaxed) / u64::from(notes)) as u32,
+        max_kbps: c.bitrate_max_kbps.load(Ordering::Relaxed),
+        adaptive_steps: notes - 1,
+    })
+}
+
+/// Everything this session ended up being. Built once, in [`LiveSessionGuard::drop`],
+/// and shared by `session.ended` and `GET /session/last`.
+fn summary(s: &LiveSession) -> SessionSummary {
+    let (width, height, fps) = crate::native::unpack_mode(s.mode.load(Ordering::Relaxed));
+    SessionSummary {
+        id: s.id,
+        client: s.client.clone(),
+        client_name: s.client_name.clone(),
+        started_unix: s.started_unix,
+        duration_s: s.started.elapsed().as_secs(),
+        mode: crate::events::mode_str(width, height, fps),
+        hdr: s.hdr,
+        join: s.join,
+        codec: s.codec.label().to_string(),
+        bit_depth: s.bit_depth,
+        chroma: if s.chroma.is_444() { "4:4:4" } else { "4:2:0" }.to_string(),
+        bitrate_kbps: s.bitrate_kbps.load(Ordering::Relaxed),
+        bitrate: bitrate_span(&s.counters),
+        input: InputCounts {
+            events: s.counters.input_events.load(Ordering::Relaxed),
+            mic: s.counters.input_mic.load(Ordering::Relaxed),
+            rich: s.counters.input_rich.load(Ordering::Relaxed),
+            dropped: s.counters.input_dropped.load(Ordering::Relaxed),
+        },
+        gyro: gyro_cadence(&s.counters),
+        audio: audio_egress(&s.counters),
+        frames_sent: s.tally.map(|t| t.frames_sent),
+        frames_dropped: s.tally.and_then(|t| t.frames_dropped),
+        bringup_ms: s.ttff_ms.load(Ordering::Relaxed),
+        path_mtu: s.tally.map(|t| t.path_mtu),
+        // Nothing latched means the loop never reached its tail, which is a fault.
+        ended: SessionEndReason::from_u8(s.end_reason.load(Ordering::SeqCst))
+            .unwrap_or(SessionEndReason::HostError),
     }
 }
 
@@ -184,15 +558,22 @@ pub struct Registration {
     pub game: Option<Arc<crate::gamelease::LeaseShared>>,
     /// The video loop's capture-health slot; it stores the capturer's report on its own cadence.
     pub capture_health: Arc<Mutex<Option<pf_capture::CaptureHealth>>>,
-    /// Admitted by `mode_conflict: join`.
-    pub joined: bool,
-    /// The audio thread's mute; the same Arc it reads per frame.
-    pub mute: Arc<SessionMute>,
+    /// Sharing another session's display (`mode_conflict: join`) rather than owning one.
+    pub join: bool,
+    /// Handles the per-session management routes act on.
+    pub controls: SessionControls,
+    /// 8 or 10, and the encoder's chroma. Both fixed for the session.
+    pub bit_depth: u8,
+    pub chroma: ChromaFormat,
+    /// [`SessionEndReason`] latch, shared with the paths that know why: the connection
+    /// watcher, the game-exit close, an operator stop, and the loop's own clean tail.
+    pub end_reason: Arc<AtomicU8>,
+    /// The session's shared counter block, already being bumped by its side threads.
+    pub counters: Arc<SessionCounters>,
 }
 
 /// Publish a live native session. The guard removes it on drop and pairs
 /// `session.started` with `session.ended` on every exit path, including panic.
-/// A standing title policy applies to the new row at once.
 pub fn register(reg: Registration) -> LiveSessionGuard {
     let Registration {
         mode,
@@ -208,15 +589,20 @@ pub fn register(reg: Registration) -> LiveSessionGuard {
         last_resize_ms,
         game,
         capture_health,
-        joined,
-        mute,
+        join,
+        controls,
+        bit_depth,
+        chroma,
+        end_reason,
+        counters,
     } = reg;
     let id = next_id();
-    if let Some((policy, launcher)) = AUDIO_POLICY.lock().unwrap().as_ref() {
-        mute.policy.store(
-            policy_mutes(*policy, launcher, &client, joined),
-            Ordering::Relaxed,
-        );
+    // A standing title policy reaches a session that arrives under it.
+    if let Some(p) = AUDIO_POLICY.lock().unwrap().as_mut() {
+        if policy_mutes(p.sessions, &p.launcher, &client, join) {
+            controls.set_muted(true);
+            p.muted.push(id);
+        }
     }
     let session = LiveSession {
         id,
@@ -233,9 +619,21 @@ pub fn register(reg: Registration) -> LiveSessionGuard {
         last_resize_ms,
         game,
         capture_health,
-        joined,
-        mute,
+        join,
+        controls,
+        started: std::time::Instant::now(),
+        started_unix: unix_now(),
+        bit_depth,
+        chroma,
+        end_reason,
+        tally: None,
+        counters,
     };
+    // The opening rate, so the span has a floor before adaptive bitrate moves it. Registration
+    // is after the encoder opened, so this is what it actually runs at.
+    session
+        .counters
+        .note_bitrate(session.bitrate_kbps.load(Ordering::Relaxed));
     crate::events::emit(crate::events::EventKind::SessionStarted {
         session: session_ref(&session),
     });
@@ -256,15 +654,69 @@ pub struct LiveSessionGuard {
 }
 
 impl Drop for LiveSessionGuard {
+    /// Retires the entry, then publishes the session's own numbers twice: onto
+    /// `session.ended` for a live consumer, and into the ring a bug report reads back.
     fn drop(&mut self) {
-        let mut reg = registry().lock().unwrap();
+        let mut reg = registry().lock().unwrap_or_else(|e| e.into_inner());
         if let Some(pos) = reg.iter().position(|s| s.id == self.id) {
             let session = reg.remove(pos);
             drop(reg); // emit outside the registry lock; the bus takes its own
+            let summary = summary(&session);
+            push_recent(summary.clone());
             crate::events::emit(crate::events::EventKind::SessionEnded {
                 session: session_ref(&session),
+                summary: Box::new(summary),
             });
         }
+    }
+}
+
+/// Eight finished sessions: the one that just broke, plus the handful before it a
+/// reporter is asked about. A host that streams for weeks must not grow a log here.
+const RECENT_SESSIONS: usize = 8;
+
+fn recent_ring() -> &'static Mutex<VecDeque<SessionSummary>> {
+    static RING: OnceLock<Mutex<VecDeque<SessionSummary>>> = OnceLock::new();
+    RING.get_or_init(|| Mutex::new(VecDeque::with_capacity(RECENT_SESSIONS)))
+}
+
+/// Newest at the front, oldest evicted. Split out so the bound is testable without
+/// the process-global ring, which every other test in this binary also writes to.
+fn push_bounded(ring: &mut VecDeque<SessionSummary>, s: SessionSummary) {
+    if ring.len() == RECENT_SESSIONS {
+        ring.pop_back();
+    }
+    ring.push_front(s);
+}
+
+fn push_recent(s: SessionSummary) {
+    push_bounded(
+        &mut recent_ring().lock().unwrap_or_else(|e| e.into_inner()),
+        s,
+    );
+}
+
+/// Finished sessions, newest first. Empty on a host that has not streamed since it
+/// started — `GET /session/last` answers with the empty list, not an error.
+pub fn recent() -> Vec<SessionSummary> {
+    recent_ring()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .cloned()
+        .collect()
+}
+
+/// Hand the video loop's totals to the registry as it finishes, so the summary the
+/// guard builds a moment later carries them. Unknown id = the entry is already gone.
+pub fn record_tally(id: u64, tally: SessionTally) {
+    if let Some(s) = registry()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter_mut()
+        .find(|s| s.id == id)
+    {
+        s.tally = Some(tally);
     }
 }
 
@@ -283,8 +735,11 @@ pub fn snapshot() -> Vec<SessionSnapshot> {
             SessionSnapshot {
                 id: s.id,
                 client: s.client.clone(),
-                joined: s.joined,
-                muted: s.mute.is_muted(),
+                hdr: s.hdr,
+                join: s.join,
+                muted: s.controls.muted.load(Ordering::SeqCst),
+                grants: s.controls.grants.load(Ordering::Relaxed),
+                uptime_s: s.started.elapsed().as_secs(),
                 width,
                 height,
                 fps,
@@ -298,6 +753,8 @@ pub fn snapshot() -> Vec<SessionSnapshot> {
                     .clone(),
                 time_to_first_frame_ms: s.ttff_ms.load(Ordering::Relaxed),
                 last_resize_ms: s.last_resize_ms.load(Ordering::Relaxed),
+                pads: s.controls.pads(),
+                preferred_pad_slot: s.controls.player(),
             }
         })
         .collect()
@@ -406,6 +863,30 @@ pub fn games() -> Vec<GameSnapshot> {
     out
 }
 
+/// Leases on games that are still on a streaming session, filtered by `app_id`
+/// (`None` = all of them). What `POST /game/end` reaches when a title is up
+/// rather than waiting out a reconnect window.
+pub fn live_games(app_id: Option<&str>) -> Vec<Arc<crate::gamelease::LeaseShared>> {
+    let mine =
+        |g: &Arc<crate::gamelease::LeaseShared>| app_id.is_none() || g.game.id.as_deref() == app_id;
+    let mut out: Vec<Arc<crate::gamelease::LeaseShared>> = registry()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .filter_map(|s| s.game.clone())
+        .filter(&mine)
+        .collect();
+    out.extend(
+        gs_game()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .filter(|g| mine(g))
+            .cloned(),
+    );
+    out
+}
+
 /// Tear down every live native session. Best-effort: loops observe the
 /// flag and exit; the guard then clears the entry. Not intended teardown —
 /// prefer [`stop_all_quit`] for an operator action.
@@ -425,6 +906,7 @@ pub fn stop_by_fingerprint(fp_hex: &str) -> usize {
     let mut n = 0;
     for s in registry().lock().unwrap().iter() {
         if s.client.len() == 12 && fp_hex.starts_with(s.client.as_str()) {
+            SessionEndReason::StoppedByOperator.latch(&s.end_reason);
             s.quit.store(true, Ordering::SeqCst);
             s.stop.store(true, Ordering::SeqCst);
             n += 1;
@@ -450,11 +932,55 @@ pub fn other_client_live(fp_hex: &str) -> bool {
 ///
 /// Sets `quit` before `stop` so teardown matches a client's own Stop: the
 /// display skips keep-alive linger and end-game-on-session-end sees intent.
+/// The summary says `stopped_by_operator`; the client only ever sees `host_ended`.
 pub fn stop_all_quit() {
     for s in registry().lock().unwrap().iter() {
+        SessionEndReason::StoppedByOperator.latch(&s.end_reason);
         s.quit.store(true, Ordering::SeqCst);
         s.stop.store(true, Ordering::SeqCst);
     }
+}
+
+/// Tear down ONE live native session deliberately (`DELETE /session/{id}`).
+/// `false` = no such session. Same `quit`-before-`stop` order and same
+/// `stopped_by_operator` summary as [`stop_all_quit`].
+pub fn stop_quit(id: u64) -> bool {
+    registry()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .find(|s| s.id == id)
+        .is_some_and(|s| {
+            SessionEndReason::StoppedByOperator.latch(&s.end_reason);
+            s.quit.store(true, Ordering::SeqCst);
+            s.stop.store(true, Ordering::SeqCst);
+            true
+        })
+}
+
+/// Force a keyframe on ONE live native session (`POST /session/{id}/idr`).
+/// `false` = no such session.
+pub fn force_idr(id: u64) -> bool {
+    registry()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .find(|s| s.id == id)
+        .is_some_and(|s| {
+            s.force_idr.store(true, Ordering::Relaxed);
+            true
+        })
+}
+
+/// This session's management handles, cloned out so the caller acts without the
+/// registry lock. `None` = no such session (the routes' 404).
+pub fn controls(id: u64) -> Option<SessionControls> {
+    registry()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .find(|s| s.id == id)
+        .map(|s| s.controls.clone())
 }
 
 /// Force a keyframe on every live native session (`POST /session/idr`).
@@ -465,60 +991,25 @@ pub fn force_idr_all() {
     }
 }
 
-/// The operator's mute for one session (`PUT /session/{id}/audio`).
-/// `false` = no live session has that id.
-pub fn set_muted(id: u64, muted: bool) -> bool {
-    let reg = registry().lock().unwrap();
-    let Some(s) = reg.iter().find(|s| s.id == id) else {
-        return false;
-    };
-    s.mute.operator.store(muted, Ordering::Relaxed);
-    true
-}
-
-/// Apply a title's `audio.sessions` to every live session, and to each one
-/// that registers while the guard lives. Drop lifts the policy's mutes only.
-pub fn apply_audio_policy(policy: AudioSessions, launcher: &str) -> AudioPolicyGuard {
-    *AUDIO_POLICY.lock().unwrap() = Some((policy, launcher.to_owned()));
-    for s in registry().lock().unwrap().iter() {
-        s.mute.policy.store(
-            policy_mutes(policy, launcher, &s.client, s.joined),
-            Ordering::Relaxed,
-        );
-    }
-    tracing::info!(policy = ?policy, launcher, "title audio policy applied");
-    AudioPolicyGuard(())
-}
-
-pub struct AudioPolicyGuard(());
-
-impl Drop for AudioPolicyGuard {
-    fn drop(&mut self) {
-        *AUDIO_POLICY.lock().unwrap() = None;
-        for s in registry().lock().unwrap().iter() {
-            s.mute.policy.store(false, Ordering::Relaxed);
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn fake_session(client: &str) -> (LiveSessionGuard, Arc<AtomicBool>, Arc<AtomicBool>) {
-        fake_session_joined(client, false).0
+        fake_session_with_reason(
+            client,
+            Arc::new(AtomicU8::new(0)),
+            Arc::new(SessionCounters::default()),
+        )
     }
 
-    fn fake_session_joined(
+    fn fake_session_with_reason(
         client: &str,
-        joined: bool,
-    ) -> (
-        (LiveSessionGuard, Arc<AtomicBool>, Arc<AtomicBool>),
-        Arc<SessionMute>,
-    ) {
+        end_reason: Arc<AtomicU8>,
+        counters: Arc<SessionCounters>,
+    ) -> (LiveSessionGuard, Arc<AtomicBool>, Arc<AtomicBool>) {
         let stop = Arc::new(AtomicBool::new(false));
         let quit = Arc::new(AtomicBool::new(false));
-        let mute = Arc::new(SessionMute::default());
         let guard = register(Registration {
             mode: Arc::new(AtomicU64::new(0)),
             bitrate_kbps: Arc::new(AtomicU32::new(20_000)),
@@ -533,17 +1024,47 @@ mod tests {
             last_resize_ms: Arc::new(AtomicU32::new(0)),
             game: None,
             capture_health: Arc::new(Mutex::new(None)),
-            joined,
-            mute: mute.clone(),
+            join: false,
+            controls: SessionControls::open(),
+            bit_depth: 8,
+            chroma: ChromaFormat::Yuv420,
+            end_reason,
+            counters,
         });
-        ((guard, stop, quit), mute)
+        (guard, stop, quit)
+    }
+
+    fn fake_joiner(client: &str, join: bool) -> (LiveSessionGuard, SessionControls) {
+        let controls = SessionControls::open();
+        let guard = register(Registration {
+            mode: Arc::new(AtomicU64::new(0)),
+            bitrate_kbps: Arc::new(AtomicU32::new(20_000)),
+            codec: Codec::H265,
+            stop: Arc::new(AtomicBool::new(false)),
+            quit: Arc::new(AtomicBool::new(false)),
+            force_idr: Arc::new(AtomicBool::new(false)),
+            client: client.into(),
+            client_name: None,
+            hdr: false,
+            ttff_ms: Arc::new(AtomicU32::new(0)),
+            last_resize_ms: Arc::new(AtomicU32::new(0)),
+            game: None,
+            capture_health: Arc::new(Mutex::new(None)),
+            join,
+            controls: controls.clone(),
+            bit_depth: 8,
+            chroma: ChromaFormat::Yuv420,
+            end_reason: Arc::new(AtomicU8::new(0)),
+            counters: Arc::new(SessionCounters::default()),
+        });
+        (guard, controls)
     }
 
     #[test]
     fn policy_picks_the_sessions_it_names() {
         use AudioSessions::*;
-        // (policy, client, joined) → muted
-        for (policy, client, joined, want) in [
+        // (policy, client, join) → muted
+        for (policy, client, join, want) in [
             (All, "aaaaaaaaaaaa", true, false),
             (Owner, "aaaaaaaaaaaa", false, false),
             (Owner, "bbbbbbbbbbbb", true, true),
@@ -553,43 +1074,35 @@ mod tests {
             (Launcher, "bbbbbbbbbbbb", true, true),
         ] {
             assert_eq!(
-                policy_mutes(policy, "aaaaaaaaaaaa", client, joined),
+                policy_mutes(policy, "aaaaaaaaaaaa", client, join),
                 want,
-                "{policy:?} {client} joined={joined}"
+                "{policy:?} {client} join={join}"
             );
         }
     }
 
-    /// A policy mutes by role, reaches a session that registers later, and its
-    /// end lifts only what it set: the operator's mute stays.
+    /// A policy mutes by role, reaches a joiner that registers later, and its end
+    /// unmutes only what it muted: an operator's own mute stays.
     #[test]
-    fn policy_and_operator_mutes_are_separate_bits() {
-        let _serial = SESSION_REGISTRY_LOCK.blocking_lock();
-        let (_owner, owner_mute) = fake_session_joined("aaaaaaaaaaaa", false);
-        let guard = apply_audio_policy(AudioSessions::Owner, "aaaaaaaaaaaa");
-        let ((_joiner, ..), joiner_mute) = fake_session_joined("bbbbbbbbbbbb", true);
-        assert!(!owner_mute.is_muted());
+    fn policy_mute_reaches_late_joiners_and_lifts_at_the_end() {
+        let (_owner, owner) = fake_joiner("cccccccccccc", false);
+        let guard = apply_audio_policy(AudioSessions::Owner, "cccccccccccc");
+        let (_joiner, joiner) = fake_joiner("dddddddddddd", true);
+        assert!(!owner.muted.load(Ordering::SeqCst));
         assert!(
-            joiner_mute.is_muted(),
+            joiner.muted.load(Ordering::SeqCst),
             "a joiner registered under the policy is muted"
         );
-        let owner_id = snapshot()
-            .iter()
-            .find(|s| s.client == "aaaaaaaaaaaa")
-            .unwrap()
-            .id;
-        assert!(set_muted(owner_id, true));
-        assert!(!set_muted(owner_id + 1_000_000, true));
+        owner.set_muted(true);
         drop(guard);
         assert!(
-            !joiner_mute.is_muted(),
+            !joiner.muted.load(Ordering::SeqCst),
             "the lease ending lifts the policy mute"
         );
         assert!(
-            owner_mute.is_muted(),
+            owner.muted.load(Ordering::SeqCst),
             "the operator's mute outlives the policy"
         );
-        assert!(snapshot().iter().any(|s| s.id == owner_id && s.muted));
     }
 
     /// Unpair revokes a live session by the 12-hex fingerprint prefix
@@ -605,6 +1118,22 @@ mod tests {
         assert!(stop1.load(Ordering::SeqCst) && quit1.load(Ordering::SeqCst));
         assert!(!stop2.load(Ordering::SeqCst));
         assert!(!stop3.load(Ordering::SeqCst));
+    }
+
+    /// Each registered session carries its own pad feed, so a Controllers stream
+    /// opened on one id can never draw another session's input.
+    #[tokio::test]
+    async fn each_session_holds_its_own_pad_feed() {
+        let (a, _s, _q) = fake_session("aaaaaaaaaaaa");
+        let (b, _s2, _q2) = fake_session("bbbbbbbbbbbb");
+        let feed_a = controls(a.id).expect("A is live").pads;
+        let feed_b = controls(b.id).expect("B is live").pads;
+        assert!(!Arc::ptr_eq(&feed_a, &feed_b));
+
+        let mut rx = feed_a.subscribe();
+        // B has no subscriber, so its publish is a no-op; A's must not receive it either way.
+        feed_b.publish(|| unreachable!("an unwatched feed must not build a frame"));
+        assert!(rx.try_recv().is_err(), "A's stream holds only A's pads");
     }
 
     /// A Moonlight game has no live-session entry, so it is only on `/status`
@@ -635,6 +1164,11 @@ mod tests {
                 spawned: None,
                 launch_stamp: None,
                 procs: None,
+                #[cfg(target_os = "linux")]
+                workspace: None,
+                #[cfg(target_os = "linux")]
+                window_stage: None,
+                outcome: None,
             },
             Box::new(|| {}),
         );
@@ -653,7 +1187,152 @@ mod tests {
             // Not `grace` while the stream is up: the console keys
             // countdown / End now off that state.
             assert_ne!(row.state, "grace");
+            // The same row is what `POST /game/end` reaches with `streaming`,
+            // and only ever under its own id.
+            assert_eq!(live_games(Some(id)).len(), 1);
+            assert!(live_games(Some("steam:9999")).is_empty());
         }
         assert!(mine().is_none(), "the row goes with the stream");
+        assert!(
+            live_games(Some(id)).is_empty(),
+            "a game with no stream left is the grace registry's, not this list's"
+        );
+    }
+
+    fn one_summary(id: u64) -> SessionSummary {
+        SessionSummary {
+            id,
+            client: "192.0.2.7".into(),
+            client_name: None,
+            started_unix: 0,
+            duration_s: 0,
+            mode: "1920x1080@60".into(),
+            hdr: false,
+            join: false,
+            codec: "hevc".into(),
+            bit_depth: 8,
+            chroma: "4:2:0".into(),
+            bitrate_kbps: 0,
+            bitrate: None,
+            frames_sent: None,
+            frames_dropped: None,
+            input: InputCounts {
+                events: 0,
+                mic: 0,
+                rich: 0,
+                dropped: 0,
+            },
+            gyro: None,
+            audio: None,
+            bringup_ms: 0,
+            path_mtu: None,
+            ended: SessionEndReason::HostEnded,
+        }
+    }
+
+    /// A host that has not streamed answers with nothing, and a host that streams for
+    /// weeks still answers with eight — newest first.
+    #[test]
+    fn the_recent_ring_starts_empty_and_keeps_only_the_newest() {
+        let mut ring: VecDeque<SessionSummary> = VecDeque::new();
+        assert!(ring.iter().next().is_none(), "no sessions is not an error");
+
+        for id in 1..=(RECENT_SESSIONS as u64 * 3) {
+            push_bounded(&mut ring, one_summary(id));
+        }
+        assert_eq!(ring.len(), RECENT_SESSIONS);
+        assert_eq!(ring.front().map(|s| s.id), Some(RECENT_SESSIONS as u64 * 3));
+        assert_eq!(
+            ring.back().map(|s| s.id),
+            Some(RECENT_SESSIONS as u64 * 3 - RECENT_SESSIONS as u64 + 1)
+        );
+    }
+
+    /// The whole feature end to end: the numbers the video loop hands over, and the
+    /// reason an operator stop latched, survive into the ring `GET /session/last` reads.
+    #[test]
+    fn a_finished_session_lands_in_the_ring_with_its_numbers() {
+        let reason = Arc::new(AtomicU8::new(0));
+        let counters = Arc::new(SessionCounters::default());
+        let (guard, _stop, _quit) =
+            fake_session_with_reason("192.0.2.9", reason.clone(), counters.clone());
+        let id = guard.id;
+        // What the side threads bump while the session runs, each through its own note.
+        counters.input_events.fetch_add(7457, Ordering::Relaxed);
+        counters.input_rich.fetch_add(150_983, Ordering::Relaxed);
+        for stalled in [false, false, true] {
+            counters.note_motion(stalled);
+        }
+        counters.note_audio_started();
+        counters.note_audio_frame(std::time::Duration::from_millis(11), true, true);
+        counters.note_audio_frame(std::time::Duration::from_millis(1), false, false);
+        counters.note_audio_reanchor();
+        // 20 000 was seeded at registration, so these two are the moves.
+        counters.note_bitrate(10_000);
+        counters.note_bitrate(30_000);
+        record_tally(
+            id,
+            SessionTally {
+                frames_sent: 4096,
+                frames_dropped: Some(3),
+                path_mtu: 1369,
+            },
+        );
+        SessionEndReason::StoppedByOperator.latch(&reason);
+        drop(guard);
+
+        // By id: other tests in this binary drop their own sessions into the same ring.
+        let mine = recent()
+            .into_iter()
+            .find(|s| s.id == id)
+            .expect("the finished session is in the ring");
+        assert_eq!(mine.frames_sent, Some(4096));
+        assert_eq!(mine.frames_dropped, Some(3));
+        assert_eq!(mine.path_mtu, Some(1369));
+        assert_eq!(mine.ended, SessionEndReason::StoppedByOperator);
+        assert_eq!(mine.codec, "hevc");
+        assert_eq!(mine.chroma, "4:2:0");
+        assert_eq!(mine.bitrate_kbps, 20_000);
+
+        let input = &mine.input;
+        assert_eq!((input.events, input.rich, input.mic), (7457, 150_983, 0));
+
+        let gyro = mine.gyro.expect("a pad sent motion");
+        assert_eq!((gyro.samples, gyro.stalls), (3, 1));
+
+        let audio = mine.audio.expect("the audio plane ran");
+        assert_eq!((audio.sent, audio.infilled, audio.late), (2, 1, 1));
+        assert_eq!(audio.max_late_ms, 11, "the worst miss, not the last");
+        assert_eq!(audio.reanchors, 1);
+
+        // Mean of 20 000, 10 000 and 30 000 — the targets, not their durations.
+        let b = mine.bitrate.expect("an encoder opened");
+        assert_eq!(
+            (b.min_kbps, b.avg_kbps, b.max_kbps),
+            (10_000, 20_000, 30_000)
+        );
+        assert_eq!(b.adaptive_steps, 2, "the opening rate is not a move");
+    }
+
+    /// A session whose loop never reached its tail reports the fault and no totals,
+    /// rather than a clean end with zeros in it.
+    #[test]
+    fn a_session_that_never_finished_reports_a_host_error() {
+        let (guard, _stop, _quit) = fake_session("192.0.2.10");
+        let id = guard.id;
+        drop(guard);
+
+        let mine = recent()
+            .into_iter()
+            .find(|s| s.id == id)
+            .expect("an abandoned session is still summarized");
+        assert_eq!(mine.ended, SessionEndReason::HostError);
+        assert_eq!(mine.frames_sent, None);
+        assert_eq!(mine.path_mtu, None);
+        // No pad, no audio thread: absent, not a row of zeros that reads as "all fine".
+        assert!(mine.gyro.is_none());
+        assert!(mine.audio.is_none());
+        // The datagram reader is up before a session registers, so its counts are always a claim.
+        assert_eq!(mine.input.events, 0);
     }
 }
