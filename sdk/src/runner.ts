@@ -25,6 +25,7 @@ import { spawn, spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import type { Writable } from "node:stream";
 import { pathToFileURL } from "node:url";
 import { PunktfunkHost } from "./client.js";
 import { layer as hostLayer } from "./effect.js";
@@ -33,6 +34,7 @@ import { connect, type PluginDef } from "./index.js";
 import {
 	bwrapArgv,
 	grantedRoots,
+	netlinkFilter,
 	type PluginManifest,
 	readManifest,
 	sandboxEnv,
@@ -467,6 +469,11 @@ const runSandboxed = (
 			);
 			return;
 		}
+		const filter = netlinkFilter();
+		if (!filter) {
+			resume(Effect.fail(new Error(`no sandbox syscall filter for ${process.arch}`)));
+			return;
+		}
 		const runtime = process.env.XDG_RUNTIME_DIR ?? "/tmp";
 		const socket = path.join(runtime, "punktfunk", `plugin-${id}.sock`);
 		const proxy = serveHostProxy({
@@ -497,8 +504,11 @@ const runSandboxed = (
 		];
 		const child = spawn("bwrap", argv, {
 			env: sandboxEnv(os.homedir()),
-			stdio: ["ignore", "inherit", "inherit"],
+			// fd 3 is `--add-seccomp-fd 3`.
+			stdio: ["ignore", "inherit", "inherit", "pipe"],
 		});
+		// A bwrap that dies before reading surfaces through `exit`, not an EPIPE here.
+		(child.stdio[3] as Writable).on("error", () => {}).end(filter);
 		child.on("error", (e) => {
 			proxy.close();
 			resume(Effect.fail(e));
