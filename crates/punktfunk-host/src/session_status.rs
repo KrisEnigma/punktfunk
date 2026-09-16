@@ -114,6 +114,9 @@ pub struct SessionControls {
     /// Latched per session: the injector's slot is one per process, and a second
     /// session's bring-up would otherwise re-point this one at its head.
     pub head: Arc<Mutex<Option<StreamedHead>>>,
+    /// Live pad tap this session's input thread publishes to. Idle until a console
+    /// opens `GET /session/{id}/pads` ([`crate::pad_feed`]).
+    pub pads: Arc<crate::pad_feed::PadFeed>,
 }
 
 /// The compositor head one session streams — what its window list names.
@@ -136,6 +139,7 @@ impl SessionControls {
             access_tx: None,
             audio_tx: None,
             head: Arc::new(Mutex::new(None)),
+            pads: Arc::new(crate::pad_feed::PadFeed::new()),
         }
     }
 
@@ -871,6 +875,22 @@ mod tests {
         assert!(stop1.load(Ordering::SeqCst) && quit1.load(Ordering::SeqCst));
         assert!(!stop2.load(Ordering::SeqCst));
         assert!(!stop3.load(Ordering::SeqCst));
+    }
+
+    /// Each registered session carries its own pad feed, so a Controllers stream
+    /// opened on one id can never draw another session's input.
+    #[tokio::test]
+    async fn each_session_holds_its_own_pad_feed() {
+        let (a, _s, _q) = fake_session("aaaaaaaaaaaa");
+        let (b, _s2, _q2) = fake_session("bbbbbbbbbbbb");
+        let feed_a = controls(a.id).expect("A is live").pads;
+        let feed_b = controls(b.id).expect("B is live").pads;
+        assert!(!Arc::ptr_eq(&feed_a, &feed_b));
+
+        let mut rx = feed_a.subscribe();
+        // B has no subscriber, so its publish is a no-op; A's must not receive it either way.
+        feed_b.publish(|| unreachable!("an unwatched feed must not build a frame"));
+        assert!(rx.try_recv().is_err(), "A's stream holds only A's pads");
     }
 
     /// A Moonlight game has no live-session entry, so it is only on `/status`
