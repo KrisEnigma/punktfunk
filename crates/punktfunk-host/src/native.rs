@@ -150,9 +150,9 @@ fn bind_data_socket(
             tracing::warn!(
                 local_ip = ?local_ip,
                 error = %e,
-                "could not bind the data plane to the address the control connection arrived on \
-                 — falling back to the wildcard. On a multi-homed host video may now egress from \
-                 a different interface than the client dialed, which it silently drops."
+                "data plane did not bind to the control-connection address — falling back to the \
+                 wildcard; on a multi-homed host video may egress from a different interface than \
+                 the client dialed, which it silently drops"
             );
             Ok(std::net::UdpSocket::bind("0.0.0.0:0")?)
         }
@@ -545,8 +545,8 @@ fn install_shutdown_restore() {
             signal(SignalKind::interrupt()),
         ) else {
             tracing::warn!(
-                "could not install shutdown signal handlers — a host stopped mid-takeover will \
-                 leave the box's own session down until it is restarted"
+                "shutdown signal handlers did not install — a host stopped mid-takeover leaves \
+                 the box's own session down until it is restarted"
             );
             return;
         };
@@ -2988,6 +2988,16 @@ mod tests {
 
         // No reported local address keeps the wildcard.
         let sock = bind_data_socket(None, None).expect("bind wildcard data socket");
+        assert!(sock.local_addr().unwrap().ip().is_unspecified());
+    }
+
+    /// A pinned address that this host cannot own still has to yield a socket. 192.0.2.1
+    /// is TEST-NET-1, so the bind miss is the live fallback, not a mock.
+    #[test]
+    fn data_socket_falls_back_to_wildcard_when_the_control_address_cannot_bind() {
+        let unroutable = std::net::IpAddr::V4(std::net::Ipv4Addr::new(192, 0, 2, 1));
+        let sock = bind_data_socket(None, Some(unroutable))
+            .expect("wildcard fallback after a pinned bind miss");
         assert!(sock.local_addr().unwrap().ip().is_unspecified());
     }
 
