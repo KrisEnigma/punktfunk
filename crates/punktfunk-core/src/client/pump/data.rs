@@ -69,6 +69,8 @@ pub(super) struct DataPump {
     /// Accepted mode, written by the control task. Read when `mode_gen`
     /// moves so the frame budget follows the new refresh.
     pub(super) mode_slot: Arc<Mutex<crate::config::Mode>>,
+    /// Published each window from [`crate::abr::BitrateController::last_cut`].
+    pub(super) rate_cut: Arc<std::sync::atomic::AtomicU8>,
 }
 
 impl DataPump {
@@ -101,6 +103,7 @@ impl DataPump {
             stream_cap_kbps,
             refresh_hz,
             mode_slot: pump_mode_slot,
+            rate_cut,
         } = self;
         pin_thread_user_interactive(); // frame channel → user-interactive video pump
         register_hot_tid(&pump_hot_tids); // UDP receive + FEC reassembly
@@ -564,6 +567,7 @@ impl DataPump {
                         activity,
                     )
                 };
+                rate_cut.store(abr.last_cut().map_or(0, |c| c as u8), Ordering::Relaxed);
                 if let Some(kbps) = verdict {
                     // Log window signals with the decision so decode-/
                     // encode-driven retargets are separable from network.
@@ -1055,6 +1059,7 @@ mod tests {
                 height: 1080,
                 refresh_hz: 60,
             })),
+            rate_cut: Arc::new(std::sync::atomic::AtomicU8::new(0)),
         };
         let started = Instant::now();
         let pump_thread = std::thread::spawn(move || pump.run());
