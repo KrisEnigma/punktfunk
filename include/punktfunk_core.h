@@ -2983,6 +2983,18 @@ PunktfunkStatus punktfunk_connection_end_reject_said(const PunktfunkConnection *
 #endif
 
 #if defined(PUNKTFUNK_FEATURE_QUIC)
+// The host's sentence when this session's launch did not give the player their game,
+// NUL-terminated, into the caller's buffer; empty otherwise. The latest verdict wins, so
+// poll it. A 256-byte buffer is ample: the wire caps this at 200.
+//
+// # Safety
+// `c` is a valid connection handle; `out` is writable for `cap` bytes.
+PunktfunkStatus punktfunk_connection_launch_notice(const PunktfunkConnection *c,
+                                                   char *out,
+                                                   uintptr_t cap);
+#endif
+
+#if defined(PUNKTFUNK_FEATURE_QUIC)
 // Mid-session typed rejection (`PUNKTFUNK_STATUS_REJECTED_*`); `0` = none.
 // Ask after `Closed`, before free. Connect-time rejections come from connect.
 //

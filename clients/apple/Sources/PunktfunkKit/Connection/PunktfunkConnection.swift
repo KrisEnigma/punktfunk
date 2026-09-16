@@ -2171,6 +2171,21 @@ public final class PunktfunkConnection: @unchecked Sendable {
         return said.isEmpty ? nil : said
     }
 
+    /// The host's sentence when this session's launch did not give the player their game:
+    /// refused, died on the spot, or picked up without the host seeing it. `nil` otherwise,
+    /// and on a host too old to say. The latest verdict wins, so poll it.
+    public var launchNotice: String? {
+        abiLock.lock()
+        defer { abiLock.unlock() }
+        guard let h = handle, !closeRequested else { return nil }
+        // The wire caps the sentence at 200 bytes; this is that plus room for the NUL.
+        var buf = [CChar](repeating: 0, count: 256)
+        guard punktfunk_connection_launch_notice(h, &buf, UInt(buf.count)) == statusOK
+        else { return nil }
+        let notice = String(cString: buf)
+        return notice.isEmpty ? nil : notice
+    }
+
     deinit { close() }
 
     /// Snapshot the handle unless close is pending (callers hold their plane lock).
