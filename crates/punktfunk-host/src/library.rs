@@ -162,18 +162,49 @@ pub fn validate_icon(icon: Option<&str>) -> std::result::Result<(), String> {
     }
 }
 
-/// Per-entry window placement — one knob today: which workspace the launch
-/// opens on. Absent follows the host's `launch_workspace` display policy.
+/// Per-entry window placement, applied once when the game's own window first
+/// reaches the screen. Absent keys take the defaults below; `workspace` alone
+/// falls back to the host's `launch_workspace` display policy.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct OnWindow {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace: Option<crate::vdisplay::policy::WorkspacePlacement>,
+    /// Raise it. Default on: the player launched it, so it is what they want
+    /// in front — a launcher that steals focus back leaves them on the desk.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub focus: Option<bool>,
+    /// Make it full-screen. Default off: most games set their own mode, and
+    /// forcing it fights a title that wanted a window.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fullscreen: Option<bool>,
+    /// Move it onto the streamed head if it opened elsewhere. Default on: a
+    /// game the player cannot see is the whole failure this stage exists for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub move_to_stream_output: Option<bool>,
 }
 
 impl OnWindow {
     /// Nothing set: the key stays out of `library.json` and off the wire.
     pub fn is_empty(&self) -> bool {
         self.workspace.is_none()
+            && self.focus.is_none()
+            && self.fullscreen.is_none()
+            && self.move_to_stream_output.is_none()
+    }
+
+    /// Raise the game's first window. Default on.
+    pub fn wants_focus(&self) -> bool {
+        self.focus.unwrap_or(true)
+    }
+
+    /// Full-screen it. Default off — a title that wanted a window keeps one.
+    pub fn wants_fullscreen(&self) -> bool {
+        self.fullscreen.unwrap_or(false)
+    }
+
+    /// Carry it onto the streamed head. Default on.
+    pub fn wants_stream_output(&self) -> bool {
+        self.move_to_stream_output.unwrap_or(true)
     }
 
     /// Does this launch get a workspace of its own? The entry decides; absent,

@@ -468,12 +468,13 @@ fn start_cast(name: &str, hw_cursor: bool) -> Result<(OwnedFd, u32, crate::porta
     Ok((fd, node_id, cursor_mode))
 }
 
-/// Puts the streamed head's monitor rule back after a `hyprctl reload`.
+/// Reads the event socket: puts the streamed head's monitor rule back after a
+/// `hyprctl reload`, and bumps [`WINDOW_GEN`] when the window list moves.
 ///
 /// A reload drops every runtime `hyprctl keyword` (see [`restore_heads`]),
 /// including [`set_monitor_rule`]'s mode. The compositor does not re-apply it.
-/// Subscribes to the event socket rather than polling so an idle session costs
-/// nothing.
+/// One subscription, not polling, so an idle session costs nothing — and one
+/// socket, so the window list rides this reader rather than opening a second.
 ///
 /// The MODE only. A reload also undoes `topology: exclusive` head disables, but
 /// re-disabling them here races teardown's [`restore_heads`] (`hyprctl reload`
@@ -493,10 +494,14 @@ fn watch_config_reloads(name: String, mode: Mode) -> Option<ReloadWatcher> {
     };
     // Shutting this clone down is what unparks the blocking read below.
     let stopper = sock.try_clone().ok()?;
+    WINDOW_WATCHERS.fetch_add(1, Ordering::Relaxed);
     thread::spawn(move || {
         for line in std::io::BufReader::new(sock).lines() {
             // Guard shutdown or compositor gone — nothing left to re-apply to.
             let Ok(line) = line else { return };
+            if is_window_event(&line) {
+                WINDOW_GEN.fetch_add(1, Ordering::Relaxed);
+            }
             if !is_config_reload(&line) {
                 continue;
             }
@@ -519,7 +524,8 @@ fn watch_config_reloads(name: String, mode: Mode) -> Option<ReloadWatcher> {
     Some(ReloadWatcher(stopper))
 }
 
-/// Ends [`watch_config_reloads`]'s thread by shutting its socket down.
+/// Ends [`watch_config_reloads`]'s thread by shutting its socket down, and
+/// drops this head out of [`WINDOW_WATCHERS`].
 ///
 /// The thread is parked in a blocking read. A stop flag would leave it alive
 /// until the compositor emitted an event — one stranded thread per session,
@@ -528,6 +534,7 @@ struct ReloadWatcher(UnixStream);
 
 impl Drop for ReloadWatcher {
     fn drop(&mut self) {
+        WINDOW_WATCHERS.fetch_sub(1, Ordering::Relaxed);
         let _ = self.0.shutdown(std::net::Shutdown::Both);
     }
 }
@@ -550,6 +557,42 @@ fn event_socket_path() -> Option<std::path::PathBuf> {
 /// false hit is a `hyprctl` round trip on a live stream.
 fn is_config_reload(line: &str) -> bool {
     line.split(">>").next() == Some("configreloaded")
+}
+
+/// Bumped by [`watch_config_reloads`] on every event that can change the window
+/// list. Free-running and shared by all heads: it is a "re-read" signal, not a
+/// count of anything.
+static WINDOW_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Live [`ReloadWatcher`] count. With none, [`WINDOW_GEN`] is frozen and would
+/// pin a stale list forever, so [`window_gen`] admits it cannot tell.
+static WINDOW_WATCHERS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Does this event change what [`toplevels`] would return? Same NAME match as
+/// [`is_config_reload`]: a window titled `openwindow` must not bump the token.
+fn is_window_event(line: &str) -> bool {
+    matches!(
+        line.split(">>").next(),
+        Some(
+            "openwindow"
+                | "closewindow"
+                | "movewindow"
+                | "movewindowv2"
+                | "windowtitle"
+                | "windowtitlev2"
+                | "activewindow"
+                | "activewindowv2"
+                | "fullscreen"
+                | "changefloatingmode"
+                | "monitorremoved"
+        )
+    )
+}
+
+/// Re-read token for [`crate::toplevels::toplevels_token`]. `None` when no
+/// watcher is on the socket — then the caller must not trust a frozen value.
+pub(crate) fn window_gen() -> Option<u64> {
+    (WINDOW_WATCHERS.load(Ordering::Relaxed) > 0).then(|| WINDOW_GEN.load(Ordering::Relaxed))
 }
 
 /// How long teardown waits for ScreenCast close before removing the output
@@ -819,6 +862,128 @@ fn active_workspace_id(name: &str) -> Option<i64> {
         .get("activeWorkspace")?
         .get("id")?
         .as_i64()
+}
+
+/// Windows on head `name`, or on every head when `name` is `None`.
+///
+/// Two reads: `clients` names a workspace, `workspaces` names each workspace's
+/// monitor, and `clients`' own `monitor` is an index that does not survive a
+/// hotplug. Empty on any failure — this list is never worth an error.
+pub(crate) fn toplevels(name: Option<&str>) -> Vec<crate::toplevels::Toplevel> {
+    let Ok(clients) = hyprctl(&["-j", "clients"]) else {
+        tracing::debug!(output = ?name, "hyprland: no client list");
+        return Vec::new();
+    };
+    let (Ok(clients), Ok(spaces)) = (
+        serde_json::from_str::<serde_json::Value>(&clients),
+        hyprctl(&["-j", "workspaces"])
+            .and_then(|raw| Ok(serde_json::from_str::<serde_json::Value>(&raw)?)),
+    ) else {
+        tracing::debug!(output = ?name, "hyprland: unreadable client list");
+        return Vec::new();
+    };
+    parse_clients(&clients, &spaces, name)
+}
+
+/// `hyprctl -j clients` + `-j workspaces` reduced to windows, filtered to head
+/// `monitor` when one is named.
+///
+/// A window whose workspace no workspace list claims is dropped rather than
+/// guessed onto a head. Unmapped and hidden windows are not on screen, so they
+/// are not in a switcher.
+fn parse_clients(
+    clients: &serde_json::Value,
+    spaces: &serde_json::Value,
+    monitor: Option<&str>,
+) -> Vec<crate::toplevels::Toplevel> {
+    let (Some(clients), Some(spaces)) = (clients.as_array(), spaces.as_array()) else {
+        return Vec::new();
+    };
+    clients
+        .iter()
+        .filter(|c| {
+            c.get("mapped").and_then(|v| v.as_bool()) != Some(false)
+                && c.get("hidden").and_then(|v| v.as_bool()) != Some(true)
+        })
+        .filter_map(|c| {
+            let ws = c.get("workspace")?;
+            let id = ws.get("id")?.as_i64()?;
+            let on = spaces
+                .iter()
+                .find(|w| w.get("id").and_then(|v| v.as_i64()) == Some(id))?
+                .get("monitor")?
+                .as_str()?;
+            monitor.is_none_or(|want| want == on).then_some(())?;
+            Some(crate::toplevels::Toplevel {
+                id: c.get("address")?.as_str()?.to_string(),
+                title: string_field(c, "title"),
+                app_id: string_field(c, "class"),
+                pid: c
+                    .get("pid")
+                    .and_then(|v| v.as_i64())
+                    .and_then(|p| u32::try_from(p).ok()),
+                // Hyprland reports no `focused`; the focus stack does, and its
+                // head is the focused window.
+                focused: c.get("focusHistoryID").and_then(|v| v.as_i64()) == Some(0),
+                fullscreen: is_fullscreen(c.get("fullscreen")),
+                workspace: ws
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .map_or_else(|| id.to_string(), str::to_string),
+                output: on.to_string(),
+            })
+        })
+        .collect()
+}
+
+/// A missing or unreadable string field is empty, never a dropped window: a
+/// nameless window is still one the player can see and wants to reach.
+fn string_field(v: &serde_json::Value, key: &str) -> String {
+    v.get(key)
+        .and_then(|s| s.as_str())
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// `fullscreen` is a bool on older Hyprland and a mode int on newer (0 = none).
+/// Anything unreadable is "not full-screen" — the honest answer for a field
+/// this host cannot parse.
+fn is_fullscreen(v: Option<&serde_json::Value>) -> bool {
+    match v {
+        Some(v) if v.is_boolean() => v.as_bool().unwrap_or(false),
+        Some(v) => v.as_i64().is_some_and(|m| m != 0),
+        None => false,
+    }
+}
+
+/// Run one window verb on `address`.
+///
+/// Classic dispatchers only. The Lua config era spells these `hl.dsp.*` and
+/// this host has no instance to pin the spelling against, so that era gets a
+/// refusal and one log line rather than a guessed expression.
+pub(crate) fn window_action(verb: crate::toplevels::WindowVerb, address: &str) -> Result<()> {
+    use crate::toplevels::WindowVerb;
+    let target = format!("address:{address}");
+    match verb {
+        WindowVerb::Focus => hyprctl_dispatch(&["dispatch", "focuswindow", &target]),
+        // No per-window fullscreen dispatcher: focus it, then act on the focused
+        // window. `1` is maximize-free full-screen.
+        WindowVerb::Fullscreen => {
+            hyprctl_dispatch(&["dispatch", "focuswindow", &target])?;
+            hyprctl_dispatch(&["dispatch", "fullscreen", "1"])
+        }
+        WindowVerb::Close => hyprctl_dispatch(&["dispatch", "closewindow", &target]),
+    }
+}
+
+/// Carry window `address` onto head `dest`, then follow it there.
+///
+/// `movewindow` acts on the focused window, so focus it first. Best-effort:
+/// the game stays where it opened on a refusal.
+pub(crate) fn move_to_output(address: &str, dest: &str) -> Result<()> {
+    let target = format!("address:{address}");
+    hyprctl_dispatch(&["dispatch", "focuswindow", &target])?;
+    hyprctl_dispatch(&["dispatch", "movewindow", &format!("mon:{dest}")])
 }
 
 /// Workspace this launch gets on head `name`, as `(claimed, restore)`.
@@ -2089,6 +2254,94 @@ mod tests {
             disable_lua_expr("DP-1"),
             r#"hl.monitor{ output = "DP-1", disabled = true }"#
         );
+    }
+
+    /// Real `hyprctl -j clients` shape, trimmed to the fields the list reads.
+    /// Two eras of `fullscreen` (bool and mode int) ride here on purpose.
+    const CLIENTS: &str = r#"[
+      {"address":"0x55a1","mapped":true,"hidden":false,"workspace":{"id":3,"name":"3"},
+       "monitor":0,"class":"steam_app_570","title":"Dota 2","pid":4242,
+       "focusHistoryID":0,"fullscreen":2},
+      {"address":"0x55a2","mapped":true,"hidden":false,"workspace":{"id":3,"name":"3"},
+       "monitor":0,"class":"steam","title":"Steam","pid":99,
+       "focusHistoryID":1,"fullscreen":false},
+      {"address":"0x55a3","mapped":true,"hidden":false,"workspace":{"id":1,"name":"1"},
+       "monitor":1,"class":"discord","title":"Private call — Ada","pid":7,
+       "focusHistoryID":2,"fullscreen":false},
+      {"address":"0x55a4","mapped":false,"hidden":false,"workspace":{"id":3,"name":"3"},
+       "class":"ghost","title":"not mapped","pid":8,"focusHistoryID":3}
+    ]"#;
+
+    /// Only the streamed head's windows leave this parser. The operator's own
+    /// monitor carries the titles a guest must never be handed.
+    #[test]
+    fn a_window_list_holds_the_streamed_head_and_nothing_else() {
+        let clients: serde_json::Value = serde_json::from_str(CLIENTS).unwrap();
+        let spaces: serde_json::Value = serde_json::from_str(WORKSPACES).unwrap();
+        let list = parse_clients(&clients, &spaces, Some("PF-1234-1"));
+        assert_eq!(
+            list.iter().map(|w| w.id.as_str()).collect::<Vec<_>>(),
+            ["0x55a1", "0x55a2"],
+            "an unmapped window and the operator's desk are both out"
+        );
+        let game = &list[0];
+        assert_eq!(game.title, "Dota 2");
+        assert_eq!(game.app_id, "steam_app_570");
+        assert_eq!(game.pid, Some(4242));
+        assert_eq!(game.workspace, "3");
+        assert_eq!(game.output, "PF-1234-1");
+        assert!(game.focused, "focus stack head is the focused window");
+        assert!(game.fullscreen, "mode 2 is full-screen");
+        assert!(!list[1].focused);
+        // The private title is on DP-1, and DP-1 is not what this session streams.
+        assert!(!list.iter().any(|w| w.title.contains("Private")));
+    }
+
+    /// A workspace no `workspaces` payload claims has no head we can prove, so
+    /// the window is dropped rather than guessed onto the streamed one.
+    #[test]
+    fn a_window_on_an_unknown_workspace_is_never_assumed_to_be_ours() {
+        let clients: serde_json::Value = serde_json::from_str(
+            r#"[{"address":"0x1","workspace":{"id":77,"name":"77"},"class":"x","title":"t"}]"#,
+        )
+        .unwrap();
+        let spaces: serde_json::Value = serde_json::from_str(WORKSPACES).unwrap();
+        assert!(parse_clients(&clients, &spaces, Some("PF-1234-1")).is_empty());
+    }
+
+    /// Both spellings of `fullscreen`, and the field missing entirely.
+    #[test]
+    fn fullscreen_reads_the_bool_era_and_the_mode_era() {
+        assert!(!is_fullscreen(None));
+        assert!(!is_fullscreen(Some(&serde_json::json!(false))));
+        assert!(is_fullscreen(Some(&serde_json::json!(true))));
+        assert!(!is_fullscreen(Some(&serde_json::json!(0))));
+        assert!(is_fullscreen(Some(&serde_json::json!(1))));
+        assert!(is_fullscreen(Some(&serde_json::json!(2))));
+    }
+
+    /// The window token must see window events and ignore the reload the same
+    /// reader is there for — and neither may fire on a window merely titled so.
+    #[test]
+    fn the_window_token_matches_event_names_not_window_titles() {
+        assert!(is_window_event("openwindow>>55a1,3,kitty,kitty"));
+        assert!(is_window_event("windowtitlev2>>55a1,Dota 2"));
+        assert!(is_window_event("activewindow>>kitty,~/src"));
+        assert!(!is_window_event("configreloaded>>"));
+        // A NAME match, so an event whose PAYLOAD names a window event does not
+        // count — the same trap `is_config_reload` exists to avoid.
+        assert!(!is_window_event("workspace>>openwindow"));
+        assert!(!is_window_event("createworkspace>>closewindow"));
+        // The reload path must not have moved.
+        assert!(is_config_reload("configreloaded>>"));
+        assert!(!is_config_reload("openwindow>>55a1,3,kitty,kitty"));
+    }
+
+    /// With no watcher on the socket the token is frozen, and a frozen token
+    /// would pin one stale list for the session's life.
+    #[test]
+    fn the_window_token_admits_when_no_reader_is_listening() {
+        assert_eq!(window_gen(), None, "no watcher was spawned in this test");
     }
 
     /// Real `hyprctl -j workspaces` shape, trimmed to the fields the pick reads.
