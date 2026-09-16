@@ -1,7 +1,7 @@
 //! One pass over the PipeWire registry for the apps playing audio right now.
 //!
 //! Feeds the console's voice-chat app picker, so it names apps the way
-//! `host_bridge::is_voice_app` matches them: process binary first, then
+//! `pf_host_config::voice_app_matches` matches them: process binary first, then
 //! `application.name`, lowercased.
 
 use anyhow::{Context, Result};

@@ -527,7 +527,15 @@ mod tests {
         assert_eq!(c.clipboard, crate::ClipboardPolicy::Text);
         assert_eq!(c.max_fps, Some(240));
         assert_eq!(c.host_name, None);
-        assert_eq!(c.audio_voice_apps, vec!["discord", "firefox"]);
+        // Listed apps join the built-in ones; a repeat is not added twice.
+        assert_eq!(
+            c.audio_voice_apps.len(),
+            crate::DEFAULT_VOICE_APPS.len() + 1
+        );
+        assert_eq!(
+            c.audio_voice_apps.last().map(String::as_str),
+            Some("firefox")
+        );
         assert_eq!(c.audio_voice_chat, crate::VoiceChatRoute::Host);
         assert!(c.ten_bit && c.four_four_four && !c.gamestream);
         let zero = build(&env_of(&[]), &file, &[]);

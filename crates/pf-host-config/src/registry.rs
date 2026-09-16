@@ -428,9 +428,10 @@ pub static SETTINGS: &[Setting] = &[
         .spellings(&[("normal", "standard"), ("medium", "standard")]),
     row("audio_hires", "PUNKTFUNK_AUDIO_HIRES", Kind::Bool, D::Bool(true), Audio, NextSession, "Lossless audio", "configuration"),
     row("audio_voice_chat", "PUNKTFUNK_AUDIO_VOICE_CHAT", Kind::Enum(&["stream", "host"]), D::Str("stream"), Audio, NextSession, "Voice chat", "configuration")
-        .only(LINUX)
+        .only(LINUX_WINDOWS)
         .spellings(&[("client", "stream"), ("speakers", "host")]),
-    row("audio_voice_apps", "PUNKTFUNK_AUDIO_VOICE_APPS", Kind::List, D::List(crate::DEFAULT_VOICE_APPS), Audio, NextSession, "Voice chat apps", "configuration").only(LINUX),
+    // Extra apps; the host always adds `DEFAULT_VOICE_APPS`.
+    row("audio_voice_apps", "PUNKTFUNK_AUDIO_VOICE_APPS", Kind::List, D::List(&[]), Audio, NextSession, "Voice chat apps", "configuration").only(LINUX_WINDOWS),
     row("pad_audio", "PUNKTFUNK_PAD_AUDIO", Kind::Bool, D::Bool(true), Audio, NextSession, "Controller speaker", "controller-audio").only(LINUX_WINDOWS),
     row("audio_redundancy", "PUNKTFUNK_AUDIO_REDUNDANCY", TRI, D::Str("auto"), Audio, NextSession, "Audio redundancy", "configuration")
         .advanced()
@@ -520,7 +521,13 @@ mod tests {
             let default = match s.default.to_value() {
                 Value::Bool(b) => code(if b { "on" } else { "off" }),
                 Value::String(t) if t.is_empty() => "—".to_string(),
-                Value::Array(_) => "built-in list".to_string(),
+                Value::Array(a) if a.is_empty() => "—".to_string(),
+                Value::Array(a) => a
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(code)
+                    .collect::<Vec<_>>()
+                    .join(", "),
                 Value::String(t) => code(&t),
                 v => code(&v.to_string()),
             };

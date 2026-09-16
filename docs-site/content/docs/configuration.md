@@ -55,7 +55,7 @@ more about some of them.
 | GameStream encryption | `PUNKTFUNK_GAMESTREAM_ENCRYPT` | `supported` · `video` · `off` · `required` | `supported` | after a restart |
 | Moonlight adaptive bitrate | `PUNKTFUNK_GAMESTREAM_ADAPT` | `on` · `off` | `on` | after a restart |
 | ChaCha20 cipher | `PUNKTFUNK_CHACHA20` | `on` · `off` | `on` | next session |
-| Browser origins | `PUNKTFUNK_WEBTRANSPORT_ORIGINS` | comma list | built-in list | after a restart |
+| Browser origins | `PUNKTFUNK_WEBTRANSPORT_ORIGINS` | comma list | — | after a restart |
 | Encoder | `PUNKTFUNK_ENCODER` | `auto` · `nvenc` · `vaapi` · `vulkan` · `pyrowave` · `software` | `auto` | next session |
 | 10-bit and HDR | `PUNKTFUNK_10BIT` | `on` · `off` | `on` | next session |
 | Full color 4:4:4 | `PUNKTFUNK_444` | `on` · `off` | `on` | next session |
@@ -69,8 +69,8 @@ more about some of them.
 | Where audio plays (Linux, Windows) | `PUNKTFUNK_AUDIO_OUTPUT_MODE` | `client_only` · `host_and_client` · `follow_default` | `client_only` | next session |
 | Audio quality | `PUNKTFUNK_AUDIO_QUALITY` | `low` · `standard` · `high` | `high` | next session |
 | Lossless audio | `PUNKTFUNK_AUDIO_HIRES` | `on` · `off` | `on` | next session |
-| Voice chat (Linux) | `PUNKTFUNK_AUDIO_VOICE_CHAT` | `stream` · `host` | `stream` | next session |
-| Voice chat apps (Linux) | `PUNKTFUNK_AUDIO_VOICE_APPS` | comma list | built-in list | next session |
+| Voice chat (Linux, Windows) | `PUNKTFUNK_AUDIO_VOICE_CHAT` | `stream` · `host` | `stream` | next session |
+| Voice chat apps (Linux, Windows) | `PUNKTFUNK_AUDIO_VOICE_APPS` | comma list | — | next session |
 | Controller speaker (Linux, Windows) | `PUNKTFUNK_PAD_AUDIO` | `on` · `off` | `on` | next session |
 | Audio redundancy | `PUNKTFUNK_AUDIO_REDUNDANCY` | `auto` · `on` · `off` | `auto` | next session |
 | Default gamepad (Linux, Windows) | `PUNKTFUNK_GAMEPAD` | `auto` · `xbox360` · `xboxone` · `dualsense` · `dualsenseedge` · `dualshock4` · `steamdeck` · `steamcontroller` · `steamcontroller2` · `switchpro` | `auto` | next session |
@@ -82,7 +82,7 @@ more about some of them.
 | Force managed mode (Linux) | `PUNKTFUNK_GAMESCOPE_MANAGED` | `on` · `off` | `off` | next session |
 | Adaptive sync (Linux) | `PUNKTFUNK_GAMESCOPE_VRR` | `on` · `off` | `on` | next session |
 | SDR brightness (Linux) | `PUNKTFUNK_GAMESCOPE_SDR_NITS` | 1–10000 nits | `203` | next session |
-| Extra refresh rates (Linux) | `PUNKTFUNK_GAMESCOPE_REFRESH_RATES` | comma list | built-in list | next session |
+| Extra refresh rates (Linux) | `PUNKTFUNK_GAMESCOPE_REFRESH_RATES` | comma list | — | next session |
 | Steam integration (Linux) | `PUNKTFUNK_GAMESCOPE_STEAM` | `on` · `off` | `off` | next session |
 | Startup splash (Linux) | `PUNKTFUNK_GAMESCOPE_SPLASH` | `on` · `off` | `on` | next session |
 | Per-session isolation (Linux) | `PUNKTFUNK_GAMESCOPE_ISOLATE` | `on` · `off` | `on` | next session |
