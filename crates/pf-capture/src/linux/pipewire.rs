@@ -27,9 +27,11 @@ fn map_format(f: VideoFormat) -> Option<PixelFormat> {
         VideoFormat::RGB => PixelFormat::Rgb,
         VideoFormat::BGR => PixelFormat::Bgr,
         VideoFormat::NV12 => PixelFormat::Nv12,
-        // Packed 2:10:10:10; only the `want_hdr` offer negotiates these (MANDATORY PQ/BT.2020).
+        // Only the `want_hdr` offer negotiates these (MANDATORY PQ/BT.2020): packed
+        // 2:10:10:10, or gamescope's own P010.
         VideoFormat::xRGB_210LE => PixelFormat::X2Rgb10,
         VideoFormat::xBGR_210LE => PixelFormat::X2Bgr10,
+        VideoFormat::P010_10LE => PixelFormat::P010,
         _ => return None,
     })
 }
@@ -196,6 +198,9 @@ pub(super) struct NegotiationPlan {
     pub nvenc_raw: bool,
     pub vaapi_passthrough: bool,
     pub prefer_native_nv12: bool,
+    /// The HDR twin of [`prefer_native_nv12`](Self::prefer_native_nv12): gamescope's P010
+    /// pod goes first.
+    pub prefer_native_p010: bool,
     /// Carried so [`want_dmabuf`](Self::want_dmabuf) needs no second copy.
     pub force_shm: bool,
     /// Would have taken raw passthrough, but its latch is set.
@@ -210,9 +215,10 @@ pub(super) struct NegotiationPlan {
 /// 1. HDR never takes the tiled EGL de-tile blit (8-bit `GL_RGBA8`). It may still build the
 ///    importer: HDR pods advertise LINEAR only ([`build_hdr_dmabuf_format`]), so the frame
 ///    takes the Vulkan-bridge arm. The per-frame gate in `.process` enforces the tiled half.
-/// 2. 4:4:4 never prefers producer NV12 (must not subsample).
-/// 3. Producer-native NV12 only on a `native_nv12_session` under active raw passthrough
-///    (the VAAPI session takes RGB; the CUDA importer expects packed RGB).
+/// 2. 4:4:4 never prefers producer NV12 or P010 (must not subsample).
+/// 3. Producer-native planar only on a `native_nv12_session` under active raw passthrough
+///    (the VAAPI session takes RGB; the CUDA importer expects packed RGB): NV12 for SDR,
+///    P010 for HDR.
 /// 4. Raw passthrough is off once its latch has fired.
 pub(super) fn negotiation_plan(i: NegotiationInputs) -> NegotiationPlan {
     // Consumer imports raw dmabufs: VAAPI (libva + GPU CSC) or PyroWave (its Vulkan device).
@@ -228,13 +234,14 @@ pub(super) fn negotiation_plan(i: NegotiationInputs) -> NegotiationPlan {
         && (!i.want_hdr || i.hdr_cuda_ok);
     let vaapi_passthrough =
         i.zerocopy && !i.force_shm && raw_passthrough && !i.raw_dmabuf_import_disabled;
-    let prefer_native_nv12 = i.native_nv12_env_on
+    let native_planar = i.native_nv12_env_on
         && i.native_nv12_session
         && i.backend_is_vaapi
         && vaapi_passthrough
         && !i.pyrowave_session
-        && !i.want_444
-        && !i.want_hdr;
+        && !i.want_444;
+    let prefer_native_nv12 = native_planar && !i.want_hdr;
+    let prefer_native_p010 = native_planar && i.want_hdr;
     NegotiationPlan {
         build_importer,
         import_policy: ImportPolicy {
@@ -244,6 +251,7 @@ pub(super) fn negotiation_plan(i: NegotiationInputs) -> NegotiationPlan {
         nvenc_raw: build_importer && i.nvenc_raw && !i.force_shm && !i.raw_dmabuf_import_disabled,
         vaapi_passthrough,
         prefer_native_nv12,
+        prefer_native_p010,
         force_shm: i.force_shm,
         raw_dmabuf_latched: i.zerocopy
             && !i.force_shm
@@ -1042,10 +1050,11 @@ fn consume_frame(
             let chunk = datas[0].chunk();
             let offset = chunk.offset();
             let stride = chunk.stride().max(0) as u32;
-            // NV12 is usually two SPA planes on one BO; plane 1's chunk has the real UV
+            // NV12/P010 are usually two SPA planes on one BO; plane 1's chunk has the real UV
             // offset/stride. BO identity is inode, not fd number. A two-BO frame cannot
             // travel the single-fd import — drop it rather than stream garbage chroma.
-            let plane1 = if fmt == PixelFormat::Nv12 && datas.len() >= 2 && datas[1].fd() > 0 {
+            let planar = matches!(fmt, PixelFormat::Nv12 | PixelFormat::P010);
+            let plane1 = if planar && datas.len() >= 2 && datas[1].fd() > 0 {
                 // SAFETY: zeroed `libc::stat` is a valid POD initializer; both fds are
                 // owned by the live PipeWire buffer for this callback, and `fstat`
                 // only writes the out-param structs, whose fields are read only after
@@ -1059,7 +1068,7 @@ fn consume_frame(
                 };
                 if !same_bo {
                     warn_once(
-                        "NV12 planes live in different buffer objects — frames \
+                        "the planes live in different buffer objects — frames \
                                  dropped (single-fd import only)",
                     );
                     // Dropped, not downgraded: de-padding as linear would scramble chroma.
@@ -1111,7 +1120,7 @@ fn consume_frame(
                     hold,
                 }),
                 // RGB→NV12 backends blend cursor-as-metadata. Gamescope burns the pointer in;
-                // native NV12 has none.
+                // native NV12/P010 has none.
                 cursor: ud.cursor.overlay(),
             });
             // Once per geometry, not once: a resize renegotiates the pool, and a stale
@@ -1132,10 +1141,10 @@ fn consume_frame(
                     fd_size = dmabuf_len(dup),
                     modifier = ud.modifier,
                     fourcc = format_args!("{:#010x}", fourcc),
-                    source = if fmt == PixelFormat::Nv12 {
-                        "producer-native NV12"
-                    } else {
-                        "packed RGB (encoder GPU CSC)"
+                    source = match fmt {
+                        PixelFormat::Nv12 => "producer-native NV12",
+                        PixelFormat::P010 => "producer-native P010",
+                        _ => "packed RGB (encoder GPU CSC)",
                     },
                     "zero-copy: handing the raw DMA-BUF to the encoder"
                 );
@@ -1280,11 +1289,11 @@ fn consume_frame(
                                                // native NV12 buffer (`stride ≈ w`, two planes) always trips `stride < row` and blames
                                                // the producer. The second plane is not in `datas[0]`; arriving here is a host bug
                                                // (NV12 offer without the raw-dmabuf passthrough that consumes it).
-    if matches!(fmt, PixelFormat::Nv12) {
+    if matches!(fmt, PixelFormat::Nv12 | PixelFormat::P010) {
         warn_once(
-            "negotiated producer-native NV12 but this capture fell back to the CPU de-pad path, \
-             which handles single-plane packed formats only — frames dropped (the NV12 offer is \
-             only valid under the raw-dmabuf passthrough that imports it directly)",
+            "negotiated a producer-native planar format but this capture fell back to the CPU \
+             de-pad path, which handles single-plane packed formats only — frames dropped (the \
+             planar offer is only valid under the raw-dmabuf passthrough that imports it)",
         );
         return;
     }
@@ -1468,6 +1477,7 @@ pub fn pipewire_thread(
     let force_shm = plan.force_shm;
     let vaapi_passthrough = plan.vaapi_passthrough;
     let prefer_native_nv12 = plan.prefer_native_nv12;
+    let prefer_native_p010 = plan.prefer_native_p010;
     // Isolated worker (design/zerocopy-worker-isolation.md): a driver fault kills the worker,
     // not this host. Construction failure → CPU path (no dmabuf request). `plan.build_importer`
     // already encodes when to try.
@@ -1488,9 +1498,10 @@ pub fn pipewire_thread(
     } else {
         None
     };
-    if prefer_native_nv12 {
+    if prefer_native_nv12 || prefer_native_p010 {
         tracing::info!(
-            "zero-copy: preferring gamescope producer-side NV12 LINEAR DMA-BUF (no host \
+            container = if prefer_native_p010 { "P010" } else { "NV12" },
+            "zero-copy: preferring gamescope's producer-side planar LINEAR DMA-BUF (no host \
              RGB CSC; PUNKTFUNK_PIPEWIRE_NV12=0 restores the packed-RGB negotiation)"
         );
     }
@@ -1571,6 +1582,7 @@ pub fn pipewire_thread(
         // on `pyrowave_modifiers.is_empty()` — that dropped a zero-copy PyroWave session to CPU.
         tracing::info!(
             native_nv12_preferred = prefer_native_nv12,
+            native_p010_preferred = prefer_native_p010,
             modifier_count = modifiers.len(),
             pyrowave_extended = !policy.pyrowave_modifiers.is_empty(),
             "zero-copy: advertising DMA-BUF modifiers for direct encoder import (LINEAR \
@@ -2106,11 +2118,19 @@ pub fn pipewire_thread(
         if want_hdr {
             // Offering SDR alongside lets the producer pick it, and a timeout latches SDR
             // downgrade. Order is the fix — see the NVIDIA note on `HDR_FORMAT_ORDER`. First
-            // compatible pod wins.
-            return HDR_FORMAT_ORDER
-                .iter()
-                .map(|fmt| build_hdr_dmabuf_format(*fmt, preferred, pacing))
-                .collect::<Result<Vec<_>>>();
+            // compatible pod wins, so gamescope's P010 pass leads when the encoder takes it.
+            let mut pods = Vec::with_capacity(HDR_FORMAT_ORDER.len() + 1);
+            if prefer_native_p010 {
+                pods.push(build_hdr_dmabuf_format(
+                    VideoFormat::P010_10LE,
+                    preferred,
+                    pacing,
+                )?);
+            }
+            for fmt in HDR_FORMAT_ORDER {
+                pods.push(build_hdr_dmabuf_format(fmt, preferred, pacing)?);
+            }
+            return Ok(pods);
         }
         if !want_dmabuf {
             // The fixed bisect pod stays exactly what the operator typed.
@@ -2803,20 +2823,31 @@ mod tests {
             "the HDR-only guard must not touch an SDR session"
         );
 
-        // 2. 4:4:4 never prefers producer NV12 (a 4:4:4 session must not be subsampled).
+        // 2. 4:4:4 never prefers producer NV12 or P010 (a 4:4:4 session must not be subsampled).
+        for want_hdr in [false, true] {
+            let p = negotiation_plan(NegotiationInputs {
+                want_444: true,
+                want_hdr,
+                ..vaapi_native_nv12()
+            });
+            assert!(!p.prefer_native_nv12, "4:4:4 must not take NV12");
+            assert!(!p.prefer_native_p010, "4:4:4 must not take P010");
+        }
+        // HDR takes the producer's P010 where SDR takes its NV12: one gate, the depth
+        // picks the container.
         let p = negotiation_plan(NegotiationInputs {
-            want_444: true,
+            want_hdr: true,
             ..vaapi_native_nv12()
         });
-        assert!(!p.prefer_native_nv12, "4:4:4 must not take NV12");
-        // Nor does HDR (no 10-bit NV12 path).
         assert!(
-            !negotiation_plan(NegotiationInputs {
-                want_hdr: true,
-                ..vaapi_native_nv12()
-            })
-            .prefer_native_nv12
+            !p.prefer_native_nv12,
+            "an HDR session must not take 8-bit NV12"
         );
+        assert!(
+            p.prefer_native_p010,
+            "an HDR session takes the producer's P010"
+        );
+        assert!(!negotiation_plan(vaapi_native_nv12()).prefer_native_p010);
 
         // Producer-native NV12 needs a `native_nv12_session` and an active raw passthrough:
         // the VAAPI session takes RGB, and so does the CUDA importer.
@@ -2838,13 +2869,14 @@ mod tests {
             "no passthrough (force_shm) ⇒ no native NV12"
         );
         // A PyroWave session takes the passthrough but its CSC ingests packed RGB only.
-        assert!(
-            !negotiation_plan(NegotiationInputs {
+        for want_hdr in [false, true] {
+            let p = negotiation_plan(NegotiationInputs {
                 pyrowave_session: true,
+                want_hdr,
                 ..vaapi_native_nv12()
-            })
-            .prefer_native_nv12
-        );
+            });
+            assert!(!p.prefer_native_nv12 && !p.prefer_native_p010);
+        }
 
         // Passthrough (and the pyrowave-modifier extension) is off once the raw-dmabuf latch fires.
         let p = negotiation_plan(NegotiationInputs {
@@ -2989,6 +3021,7 @@ mod tests {
             assert!(!p.build_importer);
             assert!(!p.vaapi_passthrough);
             assert!(!p.prefer_native_nv12);
+            assert!(!p.prefer_native_p010);
             assert!(!p.want_dmabuf(false, &[0]));
         }
     }

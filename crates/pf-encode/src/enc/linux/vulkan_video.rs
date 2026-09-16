@@ -720,10 +720,11 @@ impl VulkanVideoEncoder {
         bitrate_bps: u64,
         cursor_blend: bool,
     ) -> Result<Self> {
-        let native_nv12 = format == PixelFormat::Nv12;
-        // Packed 10-bit PQ/BT.2020. Dispatcher already consulted `probe_encode_caps`; the
-        // profile query inside open re-checks.
-        let ten_bit = format.is_hdr_rgb10();
+        // A producer's own planar picture: NV12 at eight bits, P010 at ten.
+        let native_nv12 = matches!(format, PixelFormat::Nv12 | PixelFormat::P010);
+        // Packed 10-bit PQ/BT.2020, or P010. Dispatcher already consulted `probe_encode_caps`;
+        // the profile query inside open re-checks.
+        let ten_bit = format.is_hdr_rgb10() || format == PixelFormat::P010;
         // RGB-direct needs the captured format as the session picture format. BGRA default is
         // only for CPU-only layouts, which never reach that arm.
         let src_rgb_fmt = pixel_to_vk(format).unwrap_or(vk::Format::B8G8R8A8_UNORM);

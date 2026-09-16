@@ -198,6 +198,23 @@ pub(super) fn build_hdr_dmabuf_format(
     if let Some(p) = max_framerate_prop(pacing) {
         obj.properties.push(p);
     }
+    // P010 is YUV: pin the matrix the bitstream declares, as the NV12 offer does.
+    if format == VideoFormat::P010_10LE {
+        obj.properties.push(pw::spa::pod::Property {
+            key: pw::spa::sys::SPA_FORMAT_VIDEO_colorMatrix,
+            flags: pw::spa::pod::PropertyFlags::MANDATORY,
+            value: pw::spa::pod::Value::Id(pw::spa::utils::Id(
+                pw::spa::sys::SPA_VIDEO_COLOR_MATRIX_BT2020,
+            )),
+        });
+        obj.properties.push(pw::spa::pod::Property {
+            key: pw::spa::sys::SPA_FORMAT_VIDEO_colorRange,
+            flags: pw::spa::pod::PropertyFlags::MANDATORY,
+            value: pw::spa::pod::Value::Id(pw::spa::utils::Id(
+                pw::spa::sys::SPA_VIDEO_COLOR_RANGE_16_235,
+            )),
+        });
+    }
     obj.properties.push(pw::spa::pod::Property {
         key: pw::spa::sys::SPA_FORMAT_VIDEO_modifier,
         flags: pw::spa::pod::PropertyFlags::MANDATORY,
@@ -528,7 +545,11 @@ mod tests {
         use spa::pod::{deserialize::PodDeserializer, ChoiceValue, Value};
         use spa::utils::{Choice, ChoiceEnum};
 
-        for fmt in [VideoFormat::xRGB_210LE, VideoFormat::xBGR_210LE] {
+        for fmt in [
+            VideoFormat::xRGB_210LE,
+            VideoFormat::xBGR_210LE,
+            VideoFormat::P010_10LE,
+        ] {
             let pod = build_hdr_dmabuf_format(fmt, None, Pacing::Producer).unwrap();
             for (name, key) in [
                 (
@@ -577,10 +598,14 @@ mod tests {
         }
     }
 
+    /// The YUV offers pin the matrix the bitstream declares; packed RGB never does.
     #[test]
-    fn only_the_nv12_offer_pins_the_colour_matrix() {
+    fn only_the_planar_offers_pin_the_colour_matrix() {
         let nv12 = build_dmabuf_format(VideoFormat::NV12, &[0], None, Pacing::Producer).unwrap();
         let bgrx = build_dmabuf_format(VideoFormat::BGRx, &[0], None, Pacing::Producer).unwrap();
+        let p010 = build_hdr_dmabuf_format(VideoFormat::P010_10LE, None, Pacing::Producer).unwrap();
+        let xbgr =
+            build_hdr_dmabuf_format(VideoFormat::xBGR_210LE, None, Pacing::Producer).unwrap();
         for (name, key) in [
             ("colorMatrix", spa::sys::SPA_FORMAT_VIDEO_colorMatrix),
             ("colorRange", spa::sys::SPA_FORMAT_VIDEO_colorRange),
@@ -590,10 +615,23 @@ mod tests {
                 "NV12 offer is missing {name}"
             );
             assert!(
+                p010.windows(4).any(|w| w == key.to_ne_bytes()),
+                "P010 offer is missing {name}"
+            );
+            assert!(
                 !bgrx.windows(4).any(|w| w == key.to_ne_bytes()),
                 "packed-RGB offer should not pin {name}"
             );
+            assert!(
+                !xbgr.windows(4).any(|w| w == key.to_ne_bytes()),
+                "packed 10-bit offer should not pin {name}"
+            );
         }
+        assert!(
+            p010.windows(4)
+                .any(|w| w == spa::sys::SPA_VIDEO_COLOR_MATRIX_BT2020.to_ne_bytes()),
+            "P010 pins BT.2020"
+        );
     }
 
     /// Hand-written PQ id vs the real libspa binding, wherever the symbol
