@@ -266,6 +266,43 @@ pub fn copy_stream_sync() -> Result<()> {
     unsafe { sync_copy_stream() }
 }
 
+/// [`copy_stream_sync`] with a ceiling. `cuStreamSynchronize` has no timeout, and a wait on an
+/// external semaphore whose signaller died can never be satisfied — polling an event instead
+/// costs the encode thread a bounded stall rather than the whole session.
+pub fn copy_stream_sync_deadline(budget: std::time::Duration) -> Result<()> {
+    let mut event: CUevent = std::ptr::null_mut();
+    // SAFETY: context current (doc contract). `&mut event` is a live out-param; the event is
+    // destroyed on every path below, and `cuEventRecord`/`cuEventQuery` take it by value.
+    unsafe {
+        ck(cuEventCreate(&mut event, 0), "cuEventCreate")?;
+        if let Err(e) = ck(cuEventRecord(event, copy_stream()), "cuEventRecord") {
+            cuEventDestroy_v2(event);
+            return Err(e);
+        }
+        let deadline = std::time::Instant::now() + budget;
+        loop {
+            let r = cuEventQuery(event);
+            if r == 0 {
+                cuEventDestroy_v2(event);
+                return Ok(());
+            }
+            if r != CUDA_ERROR_NOT_READY {
+                cuEventDestroy_v2(event);
+                return ck(r, "cuEventQuery");
+            }
+            if std::time::Instant::now() >= deadline {
+                cuEventDestroy_v2(event);
+                bail!(
+                    "the copy stream did not drain within {:?} — the fused pass never signalled \
+                     (a dead convert worker leaves its timeline value unreachable)",
+                    budget
+                );
+            }
+            std::thread::sleep(std::time::Duration::from_micros(50));
+        }
+    }
+}
+
 /// `sync: false` carries `copy_async`'s source-lifetime contract.
 unsafe fn copy_issue(copy: &CUDA_MEMCPY2D, what: &str, sync: bool) -> Result<()> {
     // SAFETY: caller: context current and `copy` describes live in-bounds memory.

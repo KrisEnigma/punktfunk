@@ -890,7 +890,10 @@ impl NvencCudaEncoder {
             cursor_tried: false,
             cursor_serial: u64::MAX,
             cursor_blend_warned: false,
-            raw_wanted: pf_zerocopy::nvenc_raw_enabled(),
+            // Same terms capture negotiated its arm on, sampled once here: a latch that
+            // tripped in an earlier session must not re-arm the lane behind capture's back.
+            raw_wanted: pf_zerocopy::nvenc_raw_enabled()
+                && !pf_zerocopy::raw_dmabuf_import_disabled(),
             worker: None,
             worker_slots: HashSet::new(),
             worker_cursor_serial: u64::MAX,
@@ -1897,6 +1900,13 @@ impl NvencCudaEncoder {
                 return Err(e).context("NVENC (Linux): fused convert");
             }
         };
+        // A worker that died after replying may never signal the value we are about to wait on,
+        // and a CUDA external-semaphore wait has no timeout — refuse the frame while the failure
+        // is still an error rather than a hang.
+        if self.worker.as_ref().is_none_or(|w| w.dead()) {
+            pf_zerocopy::note_raw_dmabuf_import_failure("convert worker died mid-pass");
+            bail!("NVENC (Linux): the convert worker died before its pass could be waited on");
+        }
         // The pass lands on the GPU; its value gates the copy stream, which is NVENC's input
         // stream. An unordered submit, or a reframe reading the staging slot on another queue,
         // waits here instead.
@@ -1906,7 +1916,11 @@ impl NvencCudaEncoder {
             .wait(value)
             .context("NVENC (Linux): wait the fused pass")?;
         if !ordered || self.reframe.is_some() {
-            cuda::copy_stream_sync().context("NVENC (Linux): sync the fused pass")?;
+            // Bounded: the value came from another process, so a lost signal must cost this
+            // frame, not the encode thread. Generous against a slow 4K pass under load.
+            cuda::copy_stream_sync_deadline(std::time::Duration::from_secs(2))
+                .inspect_err(|_| pf_zerocopy::note_raw_dmabuf_import_failure("fused pass stalled"))
+                .context("NVENC (Linux): sync the fused pass")?;
         }
         if let Some(r) = &self.reframe {
             let (crop, out) = (r.crop, r.out);
