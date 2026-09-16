@@ -29,6 +29,9 @@ pub struct SessionParams {
     pub compositor: CompositorPref,
     pub gamepad: GamepadPref,
     pub bitrate_kbps: u32,
+    /// Automatic's ceiling in kbps; `0` = no limit. Read only while
+    /// `bitrate_kbps` is 0. `PUNKTFUNK_ABR_MAX_MBPS` overrides it in core.
+    pub abr_max_kbps: u32,
     /// Requested count (2/6/8); the host echoes the resolved value.
     pub audio_channels: u8,
     /// Requested [`AUDIO_FORMATS`] spelling (`"opus"` ordinarily). A request, never a
@@ -480,6 +483,7 @@ struct ConnectPlan {
     pad_audio_on: bool,
     advertised_codecs: u8,
     bitrate_kbps: u32,
+    abr_max_kbps: u32,
     video_caps: u8,
 }
 
@@ -518,16 +522,17 @@ fn connect_plan(params: &SessionParams) -> ConnectPlan {
     // PyroWave is always Automatic bitrate: a fixed kbps is ill-defined for the
     // all-intra codec (bpp is the operating point) and used to bypass the host
     // ceiling. Send 0; the stored preset value is untouched.
-    let bitrate_kbps = if pyrowave {
-        if params.bitrate_kbps != 0 {
+    let (bitrate_kbps, abr_max_kbps) = if pyrowave {
+        if params.bitrate_kbps != 0 || params.abr_max_kbps != 0 {
             tracing::info!(
                 stored_kbps = params.bitrate_kbps,
+                stored_max_kbps = params.abr_max_kbps,
                 "PyroWave forces Automatic bitrate — asking the host for its per-mode pin"
             );
         }
-        0
+        (0, 0)
     } else {
-        params.bitrate_kbps
+        (params.bitrate_kbps, params.abr_max_kbps)
     };
     // PyroWave decodes 4:4:4 on any GPU, so it asks on the switch alone. The host pins
     // its rate from the chroma it grants.
@@ -549,6 +554,7 @@ fn connect_plan(params: &SessionParams) -> ConnectPlan {
         pad_audio_on,
         advertised_codecs,
         bitrate_kbps,
+        abr_max_kbps,
         video_caps,
     }
 }
@@ -730,6 +736,7 @@ fn pump(
         pad_audio_on,
         advertised_codecs,
         bitrate_kbps,
+        abr_max_kbps,
         video_caps,
     } = connect_plan(&params);
     // Lossless opt-in, filtered by what this box can play. `CLIENT_CAP_AUDIO_HIRES`
@@ -764,6 +771,7 @@ fn pump(
         params.compositor,
         params.gamepad,
         bitrate_kbps,
+        abr_max_kbps,
         video_caps,
         params.audio_channels,
         audio_rate_hz,
