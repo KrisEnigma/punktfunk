@@ -45,6 +45,10 @@ struct CaptureOpts {
     /// Offer only 10-bit PQ/BT.2020 as LINEAR dmabufs. SHM cannot: Mutter's
     /// SHM path paints 8-bit ARGB32, and the tiled EGL blit is 8-bit.
     want_hdr: bool,
+    /// 10-bit SDR: keep packed RGB (skip the NV12 convert) so direct-NVENC widens 8→10. A
+    /// planar 8-bit surface fails a 10-bit NVENC session; packed RGB is the only 8-bit input
+    /// it accepts there.
+    ten_bit_sdr: bool,
     /// Skip buffers until negotiated size matches `preferred` — KWin virtual
     /// outputs birth a sacrificial mode then renegotiate (`kwin.rs` `create`).
     /// `false` elsewhere: Mutter sizes from negotiation; gamescope fixates.
@@ -261,6 +265,7 @@ impl PortalCapturer {
                 allow_zerocopy: true,
                 want_444: false,
                 want_hdr,
+                ten_bit_sdr: false,
                 expect_exact_dims: false,
                 // Portal-monitor is Mutter's stale-meta id-0 contract. KWin
                 // portal capture would rewrite per buffer; nothing routes
@@ -289,6 +294,7 @@ impl PortalCapturer {
         allow_zerocopy: bool,
         want_444: bool,
         want_hdr: bool,
+        ten_bit_sdr: bool,
         policy: ZeroCopyPolicy,
         expect_exact_dims: bool,
         cursor_id0_hides: bool,
@@ -319,6 +325,7 @@ impl PortalCapturer {
                 allow_zerocopy,
                 want_444,
                 want_hdr,
+                ten_bit_sdr,
                 expect_exact_dims,
                 cursor_id0_hides,
                 producer_is_gamescope,

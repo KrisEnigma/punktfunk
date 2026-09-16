@@ -863,7 +863,7 @@ async fn negotiate_video_format(
     // SDR-10 needs a backend that writes 10 bits from an SDR desktop's 8-bit capture:
     // direct-NVENC (`backend_carries_sdr10`). A Linux 4:4:4 session is clamped to 8-bit
     // separately at the resolved-chroma gate below, so depth needs no chroma input here.
-    let sdr10_chain_ok = codec_carries_sdr10(codec) && crate::encode::backend_carries_sdr10();
+    let sdr10_chain_ok = codec_carries_sdr10(codec) && crate::encode::backend_carries_sdr10(codec);
     let depth_reachable = (client_wants_hdr && capture_supports_hdr) || sdr10_chain_ok;
     // Probe may open a tiny encoder; spawn_blocking, short-circuited behind the cheap gates.
     let gpu_can_10bit =
