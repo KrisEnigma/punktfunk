@@ -34,6 +34,8 @@ pub enum SlotId {
     Qam,
     /// Controller mouse: the pad drives the host pointer instead of its virtual pad.
     PadMouse,
+    /// Silence this client's speakers. Local: the host keeps playing for anyone joined to it.
+    StreamMute,
     Host(String),
     Shortcut(String),
 }
@@ -53,6 +55,7 @@ impl SlotId {
             SlotId::Guide => "guide".into(),
             SlotId::Qam => "qam".into(),
             SlotId::PadMouse => "pad_mouse".into(),
+            SlotId::StreamMute => "stream_mute".into(),
             SlotId::Host(id) => format!("host:{id}"),
             SlotId::Shortcut(id) => format!("shortcut:{id}"),
         }
@@ -72,6 +75,7 @@ impl SlotId {
             "guide" => SlotId::Guide,
             "qam" => SlotId::Qam,
             "pad_mouse" => SlotId::PadMouse,
+            "stream_mute" => SlotId::StreamMute,
             _ => {
                 if let Some(id) = s.strip_prefix("host:").filter(|id| !id.is_empty()) {
                     SlotId::Host(id.into())
@@ -396,7 +400,10 @@ pub fn catalogue(cfg: &OverlayConfig, platform: RingPlatform) -> Vec<CatalogueGr
         },
         CatalogueGroup {
             title: "Audio",
-            entries: vec![e("mic", "Microphone", "")],
+            entries: vec![
+                e("mic", "Microphone", ""),
+                e("stream_mute", "Mute this stream", "This device only"),
+            ],
         },
         CatalogueGroup {
             title: "Host",
@@ -449,6 +456,7 @@ pub fn slot_icon(id: &str, state: &str) -> Option<&'static str> {
         "guide" => "house",
         "qam" => "panel-right",
         "pad_mouse" => "mouse",
+        "stream_mute" => "volume-2",
         "more" => "ellipsis",
         "host:power.sleep" => "moon",
         "host:power.reboot" => "rotate-cw",
@@ -661,6 +669,7 @@ mod tests {
             "guide",
             "qam",
             "pad_mouse",
+            "stream_mute",
             "host:power.reboot",
             "shortcut:s2",
         ] {
