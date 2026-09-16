@@ -831,14 +831,18 @@ fn webhook_authority(url: &str) -> &str {
         .unwrap_or(authority)
 }
 
-/// Log `url`: `scheme://host[:port]` + [`short_id`]. Path, query, and userinfo dropped —
-/// the token is often a path segment, and `GET /api/v1/logs` serves the ring verbatim.
-fn webhook_origin(url: &str) -> String {
+/// Log `url`: `scheme://host[:port]` + [`short_id`]. Path, query, userinfo and control
+/// characters dropped — the token is often a path segment, and `GET /api/v1/logs` serves the
+/// ring verbatim. Artwork fetches log through this too.
+pub(crate) fn webhook_origin(url: &str) -> String {
     let scheme = url
         .split_once("://")
         .map(|(s, _)| format!("{s}://"))
         .unwrap_or_default();
     format!("{scheme}{} {}", webhook_authority(url), short_id(url))
+        .chars()
+        .filter(|c| !c.is_control())
+        .collect()
 }
 
 fn post_webhook(url: &str, json: &str, secret_file: Option<&std::path::Path>) {
@@ -1398,6 +1402,8 @@ mod tests {
         for secret in ["pw", "zzz", "qqq"] {
             assert!(!creds.contains(secret), "{secret} leaked: {creds}");
         }
+        let forged = webhook_origin("https://cdn.example\r\nforged line/x.png");
+        assert!(!forged.contains(['\r', '\n']), "{forged:?}");
 
         let cmd = "/usr/local/bin/notify.sh --token=SEKRIT-zz 'Living Room'";
         let label = cmd_label(cmd);

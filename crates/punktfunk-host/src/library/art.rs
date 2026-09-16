@@ -47,9 +47,10 @@ enum Fetch {
 }
 
 /// Fetch one cover. `data:` decodes inline; `http(s)` streams at most [`MAX_ART_BYTES`] and
-/// accepts a declared, sniffed image on 200 only. Redirects are refused so an artwork URL cannot
-/// aim the host at an internal endpoint. Diagnostics keep only the origin because userinfo,
-/// paths, and queries can carry CDN credentials. Blocking (`ureq`) — call off the async runtime.
+/// accepts a declared image on 200 only. Sniffing decides the stored type; `etag` makes it
+/// conditional. Redirects are refused so an artwork URL cannot aim the host at an internal
+/// endpoint. Logs carry only the origin: userinfo, paths and queries can hold CDN credentials.
+/// Blocking (`ureq`) — call off the async runtime.
 fn fetch_art(url: &str, etag: Option<&str>) -> Fetch {
     use base64::Engine as _;
     if let Some(rest) = url.strip_prefix("data:") {
@@ -77,7 +78,7 @@ fn fetch_art(url: &str, etag: Option<&str>) -> Fetch {
     if !(url.starts_with("http://") || url.starts_with("https://")) {
         return Fetch::Refused;
     }
-    let log_url = art_url_origin(url);
+    let log_url = crate::hooks::webhook_origin(url);
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .timeout_global(Some(std::time::Duration::from_secs(10)))
         .max_redirects(0)
@@ -155,19 +156,6 @@ fn fetch_art(url: &str, etag: Option<&str>) -> Fetch {
         // A cut transfer is the network, not the URL: leave the URL usable.
         Err(_) => Fetch::Keep,
     }
-}
-
-/// Keep enough of an artwork URL to identify its receiver without retaining its credential.
-fn art_url_origin(url: &str) -> String {
-    let (scheme, rest) = url.split_once("://").unwrap_or(("", url));
-    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
-    let host = authority
-        .rsplit_once('@')
-        .map_or(authority, |(_, host)| host);
-    format!(
-        "{scheme}://{}",
-        host.chars().filter(|c| !c.is_control()).collect::<String>()
-    )
 }
 
 /// Seconds a `Cache-Control` header allows, 0 when it names no `max-age`. Directives are
@@ -760,23 +748,6 @@ pub fn fetch_box_art(id: &str) -> Option<(Vec<u8>, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn art_log_origin_drops_url_credentials() {
-        let shown = art_url_origin(
-            "https://user:password@cdn.example:8443\r\n/private/bearer-token.png?X-Amz-Signature=secret",
-        );
-        assert_eq!(shown, "https://cdn.example:8443");
-        for secret in [
-            "user",
-            "password",
-            "bearer-token",
-            "X-Amz-Signature",
-            "secret",
-        ] {
-            assert!(!shown.contains(secret), "{secret} leaked: {shown}");
-        }
-    }
 
     #[test]
     fn art_kind_parses_known_names_only() {
