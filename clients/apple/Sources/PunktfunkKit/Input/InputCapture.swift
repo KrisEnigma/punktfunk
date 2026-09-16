@@ -139,6 +139,13 @@ public final class InputCapture {
     /// absolute-vs-relative forwarding lives entirely in StreamLayerView. Main queue.
     public var onToggleMouseMode: (() -> Void)?
 
+    #if os(macOS)
+    /// Whether a key event belongs to this capture's window. Every capture's key monitor sees
+    /// every key the app receives, so one that swallowed a chord for another window would
+    /// leave that window's stream without it. nil = every event.
+    public var ownsEvent: ((NSEvent) -> Bool)?
+    #endif
+
     /// The cross-client combos (Windows/Linux parity: Ctrl+Alt+Shift+Q/D/S), fired from the macOS
     /// keyDown monitor only WHILE FORWARDING — that's the state in which the app's menu (which
     /// carries the same key equivalents for discoverability) can't see them, so the monitor is the
@@ -292,7 +299,7 @@ public final class InputCapture {
         keyEventMonitor = NSEvent.addLocalMonitorForEvents(
             matching: [.keyDown]
         ) { [weak self] event in
-            guard let self else { return event }
+            guard let self, self.ownsEvent?(event) ?? true else { return event }
             let flags = Self.chordFlags(event)
             if event.keyCode == 53 /* Esc */, flags == .command {
                 self.suppressedVK = 0x1B // VK_ESC — its keyUp still reaches the responder chain
@@ -351,19 +358,9 @@ public final class InputCapture {
                 self.onToggleFullscreen?()
                 return nil
             }
-            // Every OTHER ⌘ chord belongs to the HOST while captured — the cross-client "capture
-            // system shortcuts" setting, which the Apple client had no answer to because SDL's
-            // keyboard grab is what implements it everywhere else. Without this the app menu's key
-            // equivalents fire first, so ⌘Q quits the client instead of reaching the compositor as
-            // Super+Q — one of the most-bound chords on a Linux desktop, and the reported break.
-            //
-            // It has to SEND from here: returning nil is what keeps the menu out, and it takes
-            // StreamLayerView's keyDown — the host's only key path on macOS — out with it.
-            // Chords with no host VK are swallowed but not sent: doing nothing beats a menu
-            // opening under a captured stream. The ⌘ itself needs no handling — modifiers arrive
-            // as flagsChanged, which this monitor never sees, so it was already forwarded as
-            // VK_LWIN/VK_RWIN (or Alt, under the Windows modifier layout) when it went down.
-            //
+            // Every OTHER ⌘ chord is the HOST's while captured, or the menu takes ⌘Q first. It is
+            // sent from here, since returning nil also skips StreamLayerView's keyDown; a chord
+            // with no host VK is swallowed. The ⌘ itself already went out as a flagsChanged.
             if self.forwarding, flags.contains(.command), Self.forwardsCommandChord(
                 keyCode: event.keyCode, flags: flags, forwarding: self.forwarding,
                 inhibitShortcuts: self.connection.settings.inhibitShortcuts

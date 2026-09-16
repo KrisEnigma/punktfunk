@@ -108,6 +108,8 @@ struct ContentView: View {
     @State private var macDestination: MacDestination = .hosts
     /// What a host window hands over: this window streams, browses, wakes and pairs for it.
     @ObservedObject private var hostRouter = MacHostRouter.shared
+    /// `.key` while this window is the one in front.
+    @Environment(\.controlActiveState) private var controlActiveState
     #endif
     /// Wakes a sleeping host and waits for it to come back online before connecting (drives the
     /// "Waking…" phase of the connect overlay). Available on every platform now that the iOS/tvOS
@@ -519,10 +521,13 @@ struct ContentView: View {
             micMuted: model.micMuted,
             toggleMicMute: { model.toggleMicMute() },
             cycleStats: { model.cycleStats() },
+            toggleQuickActions: { if model.phase == .streaming { ring.toggleCentred() } },
             disconnect: { model.disconnect() }))
         // ⌃⌥⇧A fired while input was CAPTURED (InputCapture's chord path posts it — the menu's
-        // identical equivalent can't reach a captured stream). Same toggle either way.
-        .onReceive(NotificationCenter.default.publisher(for: .punktfunkToggleMicMute)) { _ in
+        // identical equivalent can't reach a captured stream). Same toggle either way. It names
+        // its session; iOS's one scene posts none.
+        .onReceive(NotificationCenter.default.publisher(for: .punktfunkToggleMicMute)) { note in
+            guard note.object == nil || note.object as AnyObject === model.connection else { return }
             model.toggleMicMute()
         }
         #endif
@@ -555,6 +560,15 @@ struct ContentView: View {
             takeHostRequest()
         }
         .onDisappear { hostRouter.mainWindows -= 1 }
+        // The controllers follow the front window: its stream takes them, or its menus do.
+        .onChange(of: controlActiveState) { _, state in
+            guard state == .key else { return }
+            if model.phase == .streaming {
+                model.claimControllers()
+            } else {
+                GamepadCapture.releaseControllers()
+            }
+        }
         #endif
         // On the outer Group so the sheet survives the trust-prompt → home transition
         // (the "Pair with PIN instead" path disconnects first — the host's accept loop
@@ -1423,14 +1437,13 @@ struct ContentView: View {
                 }
                 #endif
                 #if os(macOS)
-                // ⌃⌥⇧O and the Stream menu's Quick Actions item, which post the same notification
-                // whether input is captured (InputCapture's monitor sees the chord first) or not
-                // (the menu's key equivalent fires). Guarded on the phase: the menu item is
-                // disabled off-session, but the chord's monitor is app-wide.
+                // ⌃⌥⇧O while input is captured (InputCapture's monitor sees the chord first). It
+                // names its session; the Stream menu's item goes through `sessionFocus` instead.
                 .onReceive(NotificationCenter.default.publisher(
                     for: .punktfunkToggleQuickActions
-                )) { _ in
-                    guard captureEnabled, model.phase == .streaming else { return }
+                )) { note in
+                    guard captureEnabled, model.phase == .streaming,
+                          note.object as AnyObject === conn else { return }
                     ring.toggleCentred()
                 }
                 #endif

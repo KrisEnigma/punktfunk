@@ -842,6 +842,9 @@ final class SessionModel: ObservableObject {
     /// Advance this session's overlay one tier (⌃⌥⇧S, the three-finger tap, the Stream menu).
     func cycleStats() { setStatsVerbosity(statsVerbosity.next()) }
 
+    /// Take the physical controllers for this session (its window came to the front).
+    func claimControllers() { gamepadCapture?.claim() }
+
     /// The user confirmed the fingerprint: returns it for pinning and enters streaming.
     func confirmTrust() -> Data? {
         guard case .awaitingTrust(let fingerprint) = phase else { return nil }
@@ -1160,6 +1163,7 @@ final class SessionModel: ObservableObject {
         let feedback = GamepadFeedback(connection: conn, manager: .shared)
         feedback.start()
         gamepadFeedback = feedback
+        capture.onOwnershipChange = { [weak feedback] owned in feedback?.setSilenced(!owned) }
         // Steam Controller 2 as-is passthrough (opt-in): capture an OS-paired SC2's vendor GATT
         // service and forward its raw reports — the host mirrors a real 28DE:1302 that its
         // Steam drives directly, and Steam's rumble/settings writes come back through the

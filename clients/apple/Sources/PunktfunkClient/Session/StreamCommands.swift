@@ -33,6 +33,7 @@ struct SessionFocus {
     var micMuted: Bool
     var toggleMicMute: () -> Void
     var cycleStats: () -> Void
+    var toggleQuickActions: () -> Void
     var disconnect: () -> Void
 }
 
@@ -87,10 +88,8 @@ struct StreamCommands: Commands {
             // The quick-action ring (design/touch-client-overlay.md §2). A Mac has no two-finger
             // twist, so this menu item and its ⌃⌥⇧O — the desktop clients' own chord for the ring
             // — are how it opens; a pad opens it with Select+A. Captured, InputCapture's monitor
-            // catches the combo and posts the same notification, so both states end at one toggle.
-            Button("Quick Actions") {
-                NotificationCenter.default.post(name: .punktfunkToggleQuickActions, object: nil)
-            }
+            // catches the combo and toggles the same ring.
+            Button("Quick Actions") { session?.toggleQuickActions() }
             .keyboardShortcut("o", modifiers: [.control, .option, .shift])
             .disabled(session?.isStreaming != true)
             // Toggle the window's fullscreen. ⌃⌘F is the macOS-standard fullscreen combo; here it's

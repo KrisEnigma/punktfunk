@@ -895,6 +895,7 @@ public final class StreamLayerView: NSView {
         // The view owns the session's input capture: handlers attach now, but nothing is
         // forwarded until capture engages (captureEnabled + auto-engage or a click).
         let capture = InputCapture(connection: connection)
+        capture.ownsEvent = { [weak self] event in event.window === self?.window }
         capture.onToggleCapture = { [weak self] in
             // The ⌘⎋ monitor is app-wide — only the key window's stream owns the toggle
             // (two stream windows would otherwise flip each other's capture).
@@ -946,17 +947,17 @@ public final class StreamLayerView: NSView {
             NotificationCenter.default.post(name: .punktfunkToggleFullscreen, object: nil)
         }
         capture.onToggleMicMute = { [weak self] in
-            // Session-level state the view doesn't own — post to the app (same routing as the
-            // fullscreen chord), so the captured and released paths end at one toggle.
-            guard self?.window?.isKeyWindow == true else { return }
-            NotificationCenter.default.post(name: .punktfunkToggleMicMute, object: nil)
+            // Session-level state the view doesn't own — post to this session's window, so the
+            // captured and released paths end at one toggle.
+            guard let self, self.window?.isKeyWindow == true else { return }
+            NotificationCenter.default.post(name: .punktfunkToggleMicMute, object: self.connection)
         }
         capture.onQuickActions = { [weak self] in
             // The quick-action ring is the session VIEW's, not this layer's — post it (the same
             // routing as the fullscreen and mic chords), so the captured chord and the Stream
             // menu's identical equivalent end at one toggle.
-            guard self?.window?.isKeyWindow == true else { return }
-            NotificationCenter.default.post(name: .punktfunkToggleQuickActions, object: nil)
+            guard let self, self.window?.isKeyWindow == true else { return }
+            NotificationCenter.default.post(name: .punktfunkToggleQuickActions, object: self.connection)
         }
         capture.onCycleStats = { [weak self] in
             guard let self, self.window?.isKeyWindow == true else { return }
