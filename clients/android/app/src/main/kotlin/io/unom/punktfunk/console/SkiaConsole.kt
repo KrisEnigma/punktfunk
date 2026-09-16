@@ -705,7 +705,11 @@ object SkiaConsole {
         ioPool.execute {
             val timeout = if (requestAccess) REQUEST_ACCESS_TIMEOUT_MS else CONNECT_TIMEOUT_MS
             val h = kotlinx.coroutines.runBlocking {
-                connectToHost(app, effective, id, addr, port, fp, launchId, timeout)
+                connectToHost(
+                    app, effective, id, addr, port, fp, launchId,
+                    dialer = if (launchId != null) "console/library" else "console/desktop",
+                    timeoutMs = timeout,
+                )
             }
             main.post {
                 if (d.cancelled.get()) {
@@ -746,10 +750,14 @@ object SkiaConsole {
                     // swap the console for the stream view mid-wait, which is the seam this
                     // whole screen exists to remove. `ShowStream` releases it.
                     NativeBridge.nativeConsoleSessionPhase(handle, 1, "")
-                    if (holdsLaunch) {
-                        pendingSession = session
-                    } else {
-                        onConnected?.invoke(session)
+                    val take = onConnected
+                    when {
+                        holdsLaunch -> pendingSession = session
+                        take != null -> take(session)
+                        // Nothing on screen to hand it to (the console is parked behind a
+                        // stream): close it rather than leave the host feeding a session
+                        // nobody will ever see.
+                        else -> ioPool.execute { NativeBridge.nativeClose(h) }
                     }
                 } else {
                     val token = NativeBridge.nativeTakeLastError()

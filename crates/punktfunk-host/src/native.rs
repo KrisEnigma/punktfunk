@@ -1459,27 +1459,37 @@ pub(crate) async fn run_admitted(
         });
     }
 
-    let (hello, welcome, udp_port, data_sock, start, compositor, gamescope_route, prep, joined) =
-        tokio::time::timeout(
-            HANDSHAKE_TIMEOUT,
-            handshake::negotiate(
-                &conn,
-                &mut send,
-                &mut recv,
-                &first,
-                source,
-                frames,
-                // No UDP socket for a browser: its video rides the connection it is already on.
-                matches!(data_plane, DataPlane::Udp).then_some(data_port),
-                &bringup,
-                quit.clone(),
-                stop.clone(),
-                initial_grants,
-                expires_in_secs,
-            ),
-        )
-        .await
-        .map_err(|_| anyhow!("handshake timed out after {HANDSHAKE_TIMEOUT:?}"))??;
+    let (
+        hello,
+        welcome,
+        udp_port,
+        data_sock,
+        start,
+        client_label,
+        compositor,
+        gamescope_route,
+        prep,
+        joined,
+    ) = tokio::time::timeout(
+        HANDSHAKE_TIMEOUT,
+        handshake::negotiate(
+            &conn,
+            &mut send,
+            &mut recv,
+            &first,
+            source,
+            frames,
+            // No UDP socket for a browser: its video rides the connection it is already on.
+            matches!(data_plane, DataPlane::Udp).then_some(data_port),
+            &bringup,
+            quit.clone(),
+            stop.clone(),
+            initial_grants,
+            expires_in_secs,
+        ),
+    )
+    .await
+    .map_err(|_| anyhow!("handshake timed out after {HANDSHAKE_TIMEOUT:?}"))??;
     let (ctrl_send, ctrl_recv) = (send, recv);
     let join_live = joined.is_some();
     let reframe_to = joined.as_ref().map(|(_, view)| {
@@ -1517,6 +1527,9 @@ pub(crate) async fn run_admitted(
         mode = ?hello.mode,
         compositor = compositor.map(|c| c.id()).unwrap_or("none"),
         gamepad = welcome.gamepad.as_str(),
+        // Build + the shell that dialled, so two sessions from one device are told apart here.
+        // "-" is a client too old to send one.
+        client = client_label.as_deref().unwrap_or("-"),
         "handshake complete — streaming"
     );
 

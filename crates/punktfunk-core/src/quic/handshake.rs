@@ -129,6 +129,26 @@ pub const AUDIO_CODEC_PCM: u8 = 2;
 /// that skips an unknown id cannot tell two meanings apart.
 pub const EXT_TAG_PADDING: u16 = 1;
 
+/// Extension tag `2` on `Start`: what the client calls itself, UTF-8, no NUL — its build and
+/// the shell that dialled (`"android 0.38.0 console/library"`). A label for the host's log, never
+/// a fact it acts on: two sessions from one device are told apart here instead of by capture.
+/// Bounded by [`EXT_CLIENT_MAX`]; a longer value is truncated on a char boundary by
+/// [`client_label`].
+pub const EXT_TAG_CLIENT: u16 = 2;
+
+/// Longest [`EXT_TAG_CLIENT`] value in UTF-8 bytes. A log field, so short.
+pub const EXT_CLIENT_MAX: usize = 96;
+
+/// `s` as an [`EXT_TAG_CLIENT`] value: trimmed, control characters dropped, truncated to
+/// [`EXT_CLIENT_MAX`] on a char boundary. Empty in means empty out, which is "say nothing".
+pub fn client_label(s: &str) -> String {
+    let mut out: String = s.trim().chars().filter(|c| !c.is_control()).collect();
+    while out.len() > EXT_CLIENT_MAX {
+        out.pop();
+    }
+    out
+}
+
 /// Largest extension block on the wire, its `ext_len` header included. The block is read
 /// before the peer is trusted, so this bounds what one message makes the other side hold.
 pub const EXT_MAX_BYTES: usize = 4096;
@@ -2497,5 +2517,26 @@ mod tests {
         assert!(encode_ext_block(&[(EXT_TAG_PADDING, &[0u8; EXT_MAX_BYTES][..])]).is_err());
         let flood: Vec<(u16, &[u8])> = (0..=EXT_MAX_ENTRIES as u16).map(|t| (t, &[][..])).collect();
         assert!(encode_ext_block(&flood).is_err());
+    }
+
+    #[test]
+    fn client_label_is_bounded_and_rides_start() {
+        // A ≤ 96-byte label survives whole; the tag is skipped by a peer that does not know it.
+        let label = client_label("  android 0.38.0 console/library\n ");
+        assert_eq!(label, "android 0.38.0 console/library");
+        let enc = Start {
+            client_udp_port: 4770,
+        }
+        .encode_ext(&[(EXT_TAG_CLIENT, label.as_bytes())])
+        .unwrap();
+        assert_eq!(Start::decode(&enc).unwrap().client_udp_port, 4770);
+        assert_eq!(
+            Start::decode_ext(&enc).unwrap(),
+            vec![(EXT_TAG_CLIENT, label.as_bytes())]
+        );
+        // A multi-byte tail truncates on a char boundary, never mid-code-point.
+        let long = client_label(&"é".repeat(80));
+        assert!(long.len() <= EXT_CLIENT_MAX);
+        assert_eq!(long.chars().count(), EXT_CLIENT_MAX / 2);
     }
 }

@@ -84,6 +84,25 @@ use self::pump::run_pump;
 use self::recovery::{RecoveryAsk, RfiRecovery};
 use self::worker::WorkerArgs;
 
+/// What this client calls itself in the host's `handshake complete` line: build plus the shell
+/// and path that dialled. Process-wide because it describes the embedder, not one session; set it
+/// before the dial. Empty (the default) sends no `Start` extension at all.
+static CLIENT_LABEL: Mutex<String> = Mutex::new(String::new());
+
+/// Set the label [`EXT_TAG_CLIENT`](crate::quic::EXT_TAG_CLIENT) carries. Bounded and stripped
+/// on the way in, so the wire never has to trust the caller.
+pub fn set_client_label(label: &str) {
+    *CLIENT_LABEL.lock().unwrap_or_else(|e| e.into_inner()) = crate::quic::client_label(label);
+}
+
+/// The label a dial should send, already bounded.
+pub(crate) fn client_label() -> String {
+    CLIENT_LABEL
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+}
+
 /// Bracket a bare IPv6 literal so `SocketAddr` parse succeeds (`fd00::1` → `[fd00::1]:4770`).
 /// Without brackets the joined string never parses and the error blames the caller's input.
 /// V4, hostnames, and already-bracketed input pass through. A v6 dial still fails at connect
