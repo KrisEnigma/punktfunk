@@ -854,5 +854,9 @@
 	"sessions_muted": "Muted",
 	"action_mute": "Mute",
 	"action_unmute": "Unmute",
-	"action_mute_failed": "Couldn't change the session's audio"
+	"action_mute_failed": "Couldn't change the session's audio",
+	"sessions_player": "Player",
+	"sessions_player_auto": "Any player",
+	"sessions_player_n": "Player {n}",
+	"action_player_failed": "Couldn't place the session's player"
 }
