@@ -7095,6 +7095,35 @@
           },
           {
             "type": "object",
+            "description": "Fires when the game's own window reaches the screen, which is often far\nlater than its process: a Proton prefix build, a splash on a black\nwindow, an emulator loading a ROM.",
+            "required": [
+              "game",
+              "title",
+              "app_id",
+              "kind"
+            ],
+            "properties": {
+              "app_id": {
+                "type": "string",
+                "description": "Wayland `app_id`, or the X11 class on an Xwayland window."
+              },
+              "game": {
+                "$ref": "#/components/schemas/GameRefPayload"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "game.window"
+                ]
+              },
+              "title": {
+                "type": "string",
+                "description": "Title the compositor reports for that window."
+              }
+            }
+          },
+          {
+            "type": "object",
             "required": [
               "game",
               "reason",
@@ -8762,8 +8791,29 @@
       },
       "OnWindow": {
         "type": "object",
-        "description": "Per-entry window placement — one knob today: which workspace the launch\nopens on. Absent follows the host's `launch_workspace` display policy.",
+        "description": "Per-entry window placement, applied once when the game's own window first\nreaches the screen. Absent keys take the defaults below; `workspace` alone\nfalls back to the host's `launch_workspace` display policy.",
         "properties": {
+          "focus": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Raise it. Default on: the player launched it, so it is what they want\nin front — a launcher that steals focus back leaves them on the desk."
+          },
+          "fullscreen": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Make it full-screen. Default off: most games set their own mode, and\nforcing it fights a title that wanted a window."
+          },
+          "move_to_stream_output": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Move it onto the streamed head if it opened elsewhere. Default on: a\ngame the player cannot see is the whole failure this stage exists for."
+          },
           "workspace": {
             "oneOf": [
               {

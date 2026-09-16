@@ -713,6 +713,15 @@ impl StreamState {
                     procs: launch_claim.as_ref().and_then(|c| c.procs()),
                     #[cfg(target_os = "linux")]
                     workspace: launch_workspace,
+                    // Absent on a backend that names no head: the lease then
+                    // runs exactly as it did before the window stage.
+                    #[cfg(target_os = "linux")]
+                    window_stage: streamed_head
+                        .clone()
+                        .map(|head| crate::gamelease::WindowStage {
+                            head,
+                            on_window: target.on_window,
+                        }),
                 },
                 on_exit,
             )

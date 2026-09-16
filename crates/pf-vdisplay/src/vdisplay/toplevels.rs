@@ -91,8 +91,12 @@ impl WindowVerb {
 #[cfg(target_os = "linux")]
 pub fn list_toplevels(compositor: Compositor, output: &str) -> Vec<Toplevel> {
     match compositor {
-        Compositor::Hyprland if hyprland::is_managed_output(output) => hyprland::toplevels(output),
-        Compositor::Wlroots if wlroots::is_managed_output(output) => wlroots::toplevels(output),
+        Compositor::Hyprland if hyprland::is_managed_output(output) => {
+            hyprland::toplevels(Some(output))
+        }
+        Compositor::Wlroots if wlroots::is_managed_output(output) => {
+            wlroots::toplevels(Some(output))
+        }
         // No `_` arm: a new backend must decide here. KWin drives a privileged
         // Wayland protocol, not a script channel, so its list is new machinery;
         // Mutter exposes no toplevel list; gamescope nests one app; Windows has
@@ -108,6 +112,44 @@ pub fn list_toplevels(compositor: Compositor, output: &str) -> Vec<Toplevel> {
                 "this compositor does not report a window list — the client sees the stream only"
             );
             Vec::new()
+        }
+    }
+}
+
+/// Every window on every head, for the host's own placement decisions.
+///
+/// Never a client's answer: it names the operator's other monitors, which is
+/// what [`list_toplevels`] exists to keep out. The window stage needs it to
+/// notice a game that opened on the wrong screen.
+#[cfg(target_os = "linux")]
+pub fn list_all_toplevels(compositor: Compositor) -> Vec<Toplevel> {
+    match compositor {
+        Compositor::Hyprland => hyprland::toplevels(None),
+        Compositor::Wlroots => wlroots::toplevels(None),
+        // No `_` arm; same backends as [`list_toplevels`].
+        Compositor::Kwin | Compositor::Mutter | Compositor::Gamescope | Compositor::Windows => {
+            Vec::new()
+        }
+    }
+}
+
+/// Carry window `id` onto head `output`.
+///
+/// Host-side placement, not a client verb: the game opened where the
+/// compositor put it, and the player can only see the streamed head.
+#[cfg(target_os = "linux")]
+pub fn move_toplevel_to_output(
+    compositor: Compositor,
+    id: &str,
+    output: &str,
+) -> anyhow::Result<()> {
+    match compositor {
+        Compositor::Hyprland => hyprland::move_to_output(id, output),
+        Compositor::Wlroots => wlroots::move_to_output(id, output),
+        // No `_` arm. KWin/Mutter/gamescope/Windows never list, so nothing
+        // here has an id to move.
+        Compositor::Kwin | Compositor::Mutter | Compositor::Gamescope | Compositor::Windows => {
+            anyhow::bail!("{} cannot move a window", compositor.id())
         }
     }
 }

@@ -398,6 +398,10 @@ fn run(
                     client: client_label.clone(),
                     plane: crate::events::Plane::Gamestream,
                     spec: t.detect.clone(),
+                    // Native plane only: this one has no per-session head to
+                    // watch, so a Moonlight launch keeps the `running` stage.
+                    #[cfg(target_os = "linux")]
+                    window_stage: None,
                     nested,
                     launcher: t.launcher,
                     child,

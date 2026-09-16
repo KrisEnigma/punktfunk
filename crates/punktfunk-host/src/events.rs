@@ -142,6 +142,17 @@ pub enum EventKind {
     /// Fires once the host has seen the game process, not merely spawned its launcher.
     #[serde(rename = "game.running")]
     GameRunning { game: GameRefPayload },
+    /// Fires when the game's own window reaches the screen, which is often far
+    /// later than its process: a Proton prefix build, a splash on a black
+    /// window, an emulator loading a ROM.
+    #[serde(rename = "game.window")]
+    GameWindow {
+        game: GameRefPayload,
+        /// Title the compositor reports for that window.
+        title: String,
+        /// Wayland `app_id`, or the X11 class on an Xwayland window.
+        app_id: String,
+    },
     #[serde(rename = "game.exited")]
     GameExited {
         game: GameRefPayload,
@@ -240,6 +251,7 @@ impl EventKind {
             EventKind::StreamStarted { .. } => "stream.started",
             EventKind::StreamStopped { .. } => "stream.stopped",
             EventKind::GameRunning { .. } => "game.running",
+            EventKind::GameWindow { .. } => "game.window",
             EventKind::GameExited { .. } => "game.exited",
             EventKind::PairingPending { .. } => "pairing.pending",
             EventKind::PairingCompleted { .. } => "pairing.completed",
@@ -274,9 +286,9 @@ impl EventKind {
             EventKind::StreamStarted { stream } | EventKind::StreamStopped { stream } => {
                 Some(&stream.client)
             }
-            EventKind::GameRunning { game } | EventKind::GameExited { game, .. } => {
-                Some(&game.client)
-            }
+            EventKind::GameRunning { game }
+            | EventKind::GameWindow { game, .. }
+            | EventKind::GameExited { game, .. } => Some(&game.client),
             EventKind::PairingPending { device }
             | EventKind::PairingCompleted { device }
             | EventKind::PairingDenied { device }
@@ -312,9 +324,9 @@ impl EventKind {
             EventKind::StreamStarted { stream } | EventKind::StreamStopped { stream } => {
                 Some(stream.plane)
             }
-            EventKind::GameRunning { game } | EventKind::GameExited { game, .. } => {
-                Some(game.plane)
-            }
+            EventKind::GameRunning { game }
+            | EventKind::GameWindow { game, .. }
+            | EventKind::GameExited { game, .. } => Some(game.plane),
             EventKind::PairingPending { device }
             | EventKind::PairingCompleted { device }
             | EventKind::PairingDenied { device }
@@ -331,9 +343,9 @@ impl EventKind {
                 stream.app.as_deref()
             }
             // No library id: operator-typed command; title is the only hook-filter handle.
-            EventKind::GameRunning { game } | EventKind::GameExited { game, .. } => {
-                game.app.as_deref().or(Some(&game.title))
-            }
+            EventKind::GameRunning { game }
+            | EventKind::GameWindow { game, .. }
+            | EventKind::GameExited { game, .. } => game.app.as_deref().or(Some(&game.title)),
             _ => None,
         }
     }

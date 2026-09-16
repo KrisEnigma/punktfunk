@@ -410,11 +410,11 @@ fn focus_argv(name: &str) -> [&str; 3] {
     ["focus", "output", name]
 }
 
-/// Windows on output `name` (`swaymsg -t get_tree`), for the client's switcher.
+/// Windows on output `name`, or on every output when `name` is `None`.
 ///
 /// Empty on any failure — this list is never worth an error. The tree already
 /// nests output → workspace → containers, so one read answers the whole shape.
-pub(crate) fn toplevels(name: &str) -> Vec<crate::toplevels::Toplevel> {
+pub(crate) fn toplevels(name: Option<&str>) -> Vec<crate::toplevels::Toplevel> {
     match swaymsg_query("get_tree") {
         Ok(tree) => {
             let mut out = Vec::new();
@@ -422,20 +422,21 @@ pub(crate) fn toplevels(name: &str) -> Vec<crate::toplevels::Toplevel> {
             out
         }
         Err(e) => {
-            tracing::debug!(output = %name, error = %format!("{e:#}"), "wlroots: no window list");
+            tracing::debug!(output = ?name, error = %format!("{e:#}"), "wlroots: no window list");
             Vec::new()
         }
     }
 }
 
-/// Descend `get_tree`, collecting leaf containers on output `want`.
+/// Descend `get_tree`, collecting leaf containers — on output `want`, or on
+/// every output when it is `None`.
 ///
 /// `output`/`workspace` are the names of the enclosing nodes, threaded down —
 /// sway states each only at its own level. A leaf is a `con` with no children:
 /// a split or tabbed container is a `con` too, and holds windows, not pixels.
 fn walk_tree(
     node: &serde_json::Value,
-    want: &str,
+    want: Option<&str>,
     output: &str,
     workspace: &str,
     out: &mut Vec<crate::toplevels::Toplevel>,
@@ -453,9 +454,10 @@ fn walk_tree(
         .filter_map(|v| v.as_array())
         .flatten()
         .collect();
-    // A scratchpad window's output is `__i3`; the `want` test drops it with
-    // everything else that is not the streamed head.
-    if kids.is_empty() && matches!(kind, "con" | "floating_con") && output == want {
+    // A scratchpad window's output is `__i3`, and it is on no screen, so it is
+    // never in a list even when every output is wanted.
+    let on_screen = want.map_or(output != "__i3", |w| output == w);
+    if kids.is_empty() && matches!(kind, "con" | "floating_con") && on_screen {
         if let Some(id) = node.get("id").and_then(|v| v.as_i64()) {
             out.push(crate::toplevels::Toplevel {
                 id: id.to_string(),
@@ -496,6 +498,15 @@ fn app_id_of(node: &serde_json::Value) -> String {
         })
         .unwrap_or_default()
         .to_string()
+}
+
+/// Carry con `id` onto output `dest`. Best-effort: the game stays where it
+/// opened on a refusal.
+pub(crate) fn move_to_output(id: &str, dest: &str) -> Result<()> {
+    let con: i64 = id
+        .parse()
+        .map_err(|_| anyhow!("window id {id} is not ours"))?;
+    swaymsg(&[&format!("[con_id={con}]"), "move", "to", "output", dest]).map(|_| ())
 }
 
 /// Run one window verb on con `id`.
@@ -1206,7 +1217,7 @@ mod tests {
     fn a_window_list_holds_the_streamed_output_and_nothing_else() {
         let tree: serde_json::Value = serde_json::from_str(TREE).unwrap();
         let mut out = Vec::new();
-        walk_tree(&tree, "HEADLESS-1", "", "", &mut out);
+        walk_tree(&tree, Some("HEADLESS-1"), "", "", &mut out);
         assert_eq!(
             out.iter().map(|w| w.id.as_str()).collect::<Vec<_>>(),
             ["13", "14", "15"],

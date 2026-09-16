@@ -864,14 +864,14 @@ fn active_workspace_id(name: &str) -> Option<i64> {
         .as_i64()
 }
 
-/// Windows on head `name` (`hyprctl -j clients`), for the client's switcher.
+/// Windows on head `name`, or on every head when `name` is `None`.
 ///
 /// Two reads: `clients` names a workspace, `workspaces` names each workspace's
 /// monitor, and `clients`' own `monitor` is an index that does not survive a
 /// hotplug. Empty on any failure — this list is never worth an error.
-pub(crate) fn toplevels(name: &str) -> Vec<crate::toplevels::Toplevel> {
+pub(crate) fn toplevels(name: Option<&str>) -> Vec<crate::toplevels::Toplevel> {
     let Ok(clients) = hyprctl(&["-j", "clients"]) else {
-        tracing::debug!(output = %name, "hyprland: no client list");
+        tracing::debug!(output = ?name, "hyprland: no client list");
         return Vec::new();
     };
     let (Ok(clients), Ok(spaces)) = (
@@ -879,21 +879,22 @@ pub(crate) fn toplevels(name: &str) -> Vec<crate::toplevels::Toplevel> {
         hyprctl(&["-j", "workspaces"])
             .and_then(|raw| Ok(serde_json::from_str::<serde_json::Value>(&raw)?)),
     ) else {
-        tracing::debug!(output = %name, "hyprland: unreadable client list");
+        tracing::debug!(output = ?name, "hyprland: unreadable client list");
         return Vec::new();
     };
     parse_clients(&clients, &spaces, name)
 }
 
-/// `hyprctl -j clients` + `-j workspaces` reduced to the head's own windows.
+/// `hyprctl -j clients` + `-j workspaces` reduced to windows, filtered to head
+/// `monitor` when one is named.
 ///
 /// A window whose workspace no workspace list claims is dropped rather than
-/// guessed onto this head. Unmapped and hidden windows are not on screen, so
-/// they are not in a switcher.
+/// guessed onto a head. Unmapped and hidden windows are not on screen, so they
+/// are not in a switcher.
 fn parse_clients(
     clients: &serde_json::Value,
     spaces: &serde_json::Value,
-    monitor: &str,
+    monitor: Option<&str>,
 ) -> Vec<crate::toplevels::Toplevel> {
     let (Some(clients), Some(spaces)) = (clients.as_array(), spaces.as_array()) else {
         return Vec::new();
@@ -912,7 +913,7 @@ fn parse_clients(
                 .find(|w| w.get("id").and_then(|v| v.as_i64()) == Some(id))?
                 .get("monitor")?
                 .as_str()?;
-            (on == monitor).then_some(())?;
+            monitor.is_none_or(|want| want == on).then_some(())?;
             Some(crate::toplevels::Toplevel {
                 id: c.get("address")?.as_str()?.to_string(),
                 title: string_field(c, "title"),
@@ -929,7 +930,7 @@ fn parse_clients(
                     .get("name")
                     .and_then(|v| v.as_str())
                     .map_or_else(|| id.to_string(), str::to_string),
-                output: monitor.to_string(),
+                output: on.to_string(),
             })
         })
         .collect()
@@ -973,6 +974,16 @@ pub(crate) fn window_action(verb: crate::toplevels::WindowVerb, address: &str) -
         }
         WindowVerb::Close => hyprctl_dispatch(&["dispatch", "closewindow", &target]),
     }
+}
+
+/// Carry window `address` onto head `dest`, then follow it there.
+///
+/// `movewindow` acts on the focused window, so focus it first. Best-effort:
+/// the game stays where it opened on a refusal.
+pub(crate) fn move_to_output(address: &str, dest: &str) -> Result<()> {
+    let target = format!("address:{address}");
+    hyprctl_dispatch(&["dispatch", "focuswindow", &target])?;
+    hyprctl_dispatch(&["dispatch", "movewindow", &format!("mon:{dest}")])
 }
 
 /// Workspace this launch gets on head `name`, as `(claimed, restore)`.
@@ -2267,7 +2278,7 @@ mod tests {
     fn a_window_list_holds_the_streamed_head_and_nothing_else() {
         let clients: serde_json::Value = serde_json::from_str(CLIENTS).unwrap();
         let spaces: serde_json::Value = serde_json::from_str(WORKSPACES).unwrap();
-        let list = parse_clients(&clients, &spaces, "PF-1234-1");
+        let list = parse_clients(&clients, &spaces, Some("PF-1234-1"));
         assert_eq!(
             list.iter().map(|w| w.id.as_str()).collect::<Vec<_>>(),
             ["0x55a1", "0x55a2"],
@@ -2295,7 +2306,7 @@ mod tests {
         )
         .unwrap();
         let spaces: serde_json::Value = serde_json::from_str(WORKSPACES).unwrap();
-        assert!(parse_clients(&clients, &spaces, "PF-1234-1").is_empty());
+        assert!(parse_clients(&clients, &spaces, Some("PF-1234-1")).is_empty());
     }
 
     /// Both spellings of `fullscreen`, and the field missing entirely.

@@ -68,7 +68,9 @@ pub use session::{session_epoch, session_x11_env};
 #[path = "vdisplay/toplevels.rs"]
 pub(crate) mod toplevels;
 #[cfg(target_os = "linux")]
-pub use toplevels::{list_toplevels, toplevels_token, window_action};
+pub use toplevels::{
+    list_all_toplevels, list_toplevels, move_toplevel_to_output, toplevels_token, window_action,
+};
 pub use toplevels::{Toplevel, WindowVerb};
 
 #[path = "vdisplay/routing.rs"]

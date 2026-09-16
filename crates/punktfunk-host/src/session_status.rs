@@ -616,6 +616,8 @@ mod tests {
                 procs: None,
                 #[cfg(target_os = "linux")]
                 workspace: None,
+                #[cfg(target_os = "linux")]
+                window_stage: None,
             },
             Box::new(|| {}),
         );
