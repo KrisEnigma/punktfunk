@@ -1,6 +1,8 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
 import { useState } from "react";
 import type { HostSettingsState, SettingState } from "@/api/gen/model";
+import { labelOf } from "@/sections/HostSettings/controls";
+import { RestartBanner } from "@/sections/HostSettings/RestartBanner";
 import { HostSettingsView } from "@/sections/HostSettings/view";
 import { Routed } from "./lib/routed";
 
@@ -135,6 +137,21 @@ function Live({ initial }: { initial: HostSettingsState }) {
 			pending={new Set()}
 			onSet={onSet}
 			playingApps={["discord", "firefox", "spotify"]}
+			banner={
+				<RestartBanner
+					names={state.settings.filter((r) => r.restart_pending).map(labelOf)}
+					action={{
+						id: "host.restart",
+						title: "Restart Punktfunk",
+						group: "host",
+						danger: true,
+						available: true,
+						permitted: true,
+					}}
+					restarting={false}
+					onRestart={() => {}}
+				/>
+			}
 		/>
 	);
 }

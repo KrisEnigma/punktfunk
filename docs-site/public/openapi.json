@@ -57,7 +57,7 @@
           {
             "name": "id",
             "in": "path",
-            "description": "Action id (`power.sleep`, `power.reboot`, `power.shutdown`)",
+            "description": "Action id (`power.sleep`, `power.reboot`, `power.shutdown`, `host.restart`)",
             "required": true,
             "schema": {
               "type": "string"
@@ -7906,7 +7906,7 @@
               },
               "id": {
                 "type": "string",
-                "description": "`power.sleep`, `power.reboot`, `power.shutdown`."
+                "description": "`power.sleep`, `power.reboot`, `power.shutdown`, `host.restart`."
               },
               "kind": {
                 "type": "string",

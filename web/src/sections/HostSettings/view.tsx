@@ -6,7 +6,7 @@
 import { Link } from "@tanstack/react-router";
 import Section from "@unom/ui/section";
 import { Lock, RotateCcw, Search } from "lucide-react";
-import { type FC, useEffect, useMemo, useState } from "react";
+import { type FC, type ReactNode, useEffect, useMemo, useState } from "react";
 import type {
 	HostSettingsState,
 	SettingGroup,
@@ -149,7 +149,9 @@ export const HostSettingsView: FC<{
 	pending: ReadonlySet<string>;
 	onSet: (id: string, value: unknown) => void;
 	playingApps?: string[];
-}> = ({ state, pending, onSet, playingApps }) => {
+	/** Above the groups: what waits for a restart. */
+	banner?: ReactNode;
+}> = ({ state, pending, onSet, playingApps, banner }) => {
 	const [query, setQuery] = useState("");
 	const [advanced, setAdvanced] = useAdvanced();
 	const q = query.trim().toLowerCase();
@@ -220,6 +222,7 @@ export const HostSettingsView: FC<{
 					{m.host_settings_intro()}{" "}
 					<DocsLink path="configuration#settings-in-the-web-console" />
 				</p>
+				{banner}
 
 				<QueryState
 					isLoading={state.isLoading}

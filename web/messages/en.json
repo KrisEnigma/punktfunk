@@ -911,7 +911,7 @@
 	"host_settings_locked_env": "Set by {name} in host.env.",
 	"host_settings_locked_flag": "Set by the {name} flag.",
 	"host_settings_applies_restart": "Applies after a restart.",
-	"host_settings_restart_pending": "Restart the host to apply this.",
+	"host_settings_restart_pending": "Waiting for a restart.",
 	"host_settings_reset": "Reset",
 	"host_settings_save_failed": "Couldn't save the setting.",
 	"host_settings_add": "Add",
@@ -951,5 +951,11 @@
 	"setting_audio_voice_chat_stream": "In the stream",
 	"setting_audio_voice_chat_host": "On the host",
 	"setting_audio_voice_apps": "Voice chat apps",
-	"setting_audio_voice_apps_hint": "Apps that count as voice chat."
+	"setting_audio_voice_apps_hint": "Apps that count as voice chat.",
+	"host_power_restart_service": "Restart Punktfunk",
+	"host_settings_restart_banner": "Restart Punktfunk to apply: {names}.",
+	"host_settings_restarting": "Restarting…",
+	"host_settings_restarted": "Punktfunk restarted. Every setting is in effect.",
+	"host_settings_restart_slow": "Punktfunk hasn't come back yet. Check the host.",
+	"diag_restart_pending_title": "Restart pending"
 }

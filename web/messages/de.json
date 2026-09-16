@@ -891,7 +891,7 @@
 	"host_settings_locked_env": "Durch {name} in host.env festgelegt.",
 	"host_settings_locked_flag": "Durch das Flag {name} festgelegt.",
 	"host_settings_applies_restart": "Gilt nach einem Neustart.",
-	"host_settings_restart_pending": "Starte den Host neu, damit das gilt.",
+	"host_settings_restart_pending": "Wartet auf einen Neustart.",
 	"host_settings_reset": "Zurücksetzen",
 	"host_settings_save_failed": "Die Einstellung konnte nicht gespeichert werden.",
 	"host_settings_add": "Hinzufügen",
@@ -931,5 +931,11 @@
 	"setting_audio_voice_chat_stream": "Im Stream",
 	"setting_audio_voice_chat_host": "Auf dem Host",
 	"setting_audio_voice_apps": "Sprachchat-Apps",
-	"setting_audio_voice_apps_hint": "Apps, die als Sprachchat gelten."
+	"setting_audio_voice_apps_hint": "Apps, die als Sprachchat gelten.",
+	"host_power_restart_service": "Punktfunk neu starten",
+	"host_settings_restart_banner": "Starte Punktfunk neu, damit das gilt: {names}.",
+	"host_settings_restarting": "Startet neu…",
+	"host_settings_restarted": "Punktfunk wurde neu gestartet. Alle Einstellungen gelten.",
+	"host_settings_restart_slow": "Punktfunk ist noch nicht zurück. Prüfe den Host.",
+	"diag_restart_pending_title": "Neustart ausstehend"
 }

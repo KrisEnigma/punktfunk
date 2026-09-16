@@ -26,6 +26,7 @@ import { type QueryClient, useQueryClient } from "@tanstack/react-query";
 import { toast } from "@unom/ui/toast";
 import { useEffect, useSyncExternalStore } from "react";
 import { getListPairedClientsQueryKey } from "@/api/gen/clients/clients";
+import { getGetDiagnosticsQueryKey } from "@/api/gen/diagnostics/diagnostics";
 import { getGetDisplayStateQueryKey } from "@/api/gen/display/display";
 import {
 	getGetHostSettingsQueryKey,
@@ -101,8 +102,9 @@ function keysFor(kind: string): readonly (readonly unknown[])[] {
 				storeKeys.installed,
 				storeKeys.runtime,
 			];
+		// A restart-class change also moves the restart-pending check on Home.
 		case "settings.changed":
-			return [getGetHostSettingsQueryKey()];
+			return [getGetHostSettingsQueryKey(), getGetDiagnosticsQueryKey()];
 		// The host came back: everything we hold predates it.
 		case "host.started":
 			return [];

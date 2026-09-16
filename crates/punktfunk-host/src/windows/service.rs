@@ -296,6 +296,9 @@ fn run_service() -> Result<()> {
     // Before the warner thread: `load_host_env` mutates the process env; the warner's child
     // snapshots it.
     load_host_env();
+    // SAFETY: still single-threaded, as for `load_host_env` above. Tells the host child a
+    // restart request is answered (`crate::power::RESTART_EXIT_CODE`).
+    unsafe { std::env::set_var("PUNKTFUNK_SERVICE_CHILD", "1") };
 
     // Own thread: `Get-NetConnectionProfile` is slow and must not delay the host.
     std::thread::spawn(warn_if_public_network);
@@ -423,8 +426,18 @@ fn supervise(stop: HANDLE, session_ev: HANDLE) -> Result<()> {
                 continue;
             }
             _ => {
+                let mut code: u32 = 0;
+                // SAFETY: `proc_h` copies the still-live `child.process` OwnedHandle (dropped only at
+                // end of iteration); `code` is a live local out-param.
+                let _ = unsafe { GetExitCodeProcess(proc_h, &mut code) };
+                if code == crate::power::RESTART_EXIT_CODE {
+                    tracing::info!(pid = child.pid, "host restarting on request — relaunching");
+                    restarts = 0;
+                    continue;
+                }
                 tracing::warn!(
                     pid = child.pid,
+                    exit_code = format!("{code:#x}"),
                     "host process exited on its own — relaunching"
                 );
             }

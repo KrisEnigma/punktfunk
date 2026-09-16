@@ -233,7 +233,7 @@ async fn host_actions_follow_the_power_grant() {
     let (status, body) = send(&app, discover(guest_fp)).await;
     assert_eq!(status, StatusCode::OK);
     let rows = body["actions"].as_array().unwrap();
-    assert_eq!(rows.len(), 3, "{body}");
+    assert_eq!(rows.len(), 4, "{body}");
     assert!(
         rows.iter().all(|a| a["permitted"] == false),
         "a controller-only guest must not be offered power: {body}"

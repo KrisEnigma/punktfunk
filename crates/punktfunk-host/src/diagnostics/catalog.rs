@@ -32,6 +32,32 @@ pub(crate) fn register_all(reg: &Diagnostics) {
     reg.register(vdisplay_driver);
     reg.register(pad_audio);
     reg.register(plugin_sandbox);
+    reg.register(restart_pending);
+}
+
+/// Host settings changed that only a restart applies. Pushed again after every settings write.
+pub(crate) fn restart_pending() -> HostCheck {
+    let id = ids::RESTART_PENDING;
+    let names: Vec<&str> = pf_host_config::restart_pending()
+        .into_iter()
+        .map(|id| pf_host_config::registry::find(id).map_or(id, |s| s.title))
+        .collect();
+    if names.is_empty() {
+        return HostCheck::ok(id, "Every host setting is in effect.");
+    }
+    HostCheck::problem(
+        id,
+        CheckStatus::Warn,
+        Severity::Warning,
+        format!("Restart the host to apply: {}", names.join(", ")),
+        "Until then the host runs with the values it started with.",
+    )
+    .with_remedy(Remedy {
+        text: "Restart it from Host → Settings in the web console.".into(),
+        command: None,
+        relogin_required: false,
+    })
+    .with_param("settings", names.join(", "))
 }
 
 /// Plugins run in their own sandbox, or they do not run: a box that cannot build one says so

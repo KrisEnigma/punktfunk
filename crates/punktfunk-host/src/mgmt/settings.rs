@@ -276,6 +276,7 @@ pub(crate) async fn patch_host_settings(ApiJson(patch): ApiJson<HostSettingsPatc
     }
     let ids: Vec<String> = patch.keys().cloned().collect();
     tracing::info!(settings = ?ids, "management API: host settings updated");
+    crate::diagnostics::registry().set(crate::diagnostics::catalog::restart_pending());
     crate::events::emit(crate::events::EventKind::SettingsChanged { ids });
     Json(state()).into_response()
 }
