@@ -3138,6 +3138,101 @@ mod tests {
         );
     }
 
+    /// Live: the D3D11 video processor converts 8-bit BGRA to a P010 target under BT.709 studio on
+    /// AMD. This is the SDR-10 converter half (`EncodeInput::P010Sdr`) — the "renders green" caveat
+    /// on RGB→P010 is NVIDIA-only, so prove AMD writes plausible luma. Mid-grey in → studio Y near
+    /// 504 (10-bit); a failed render is black (0) or clipped.
+    #[test]
+    fn videoconverter_bgra_to_p010_bt709_live() {
+        use crate::convert::VideoConverter;
+        use windows::Win32::Graphics::Direct3D11::{
+            D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, D3D11_CPU_ACCESS_READ,
+            D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_READ, D3D11_SUBRESOURCE_DATA, D3D11_USAGE_STAGING,
+        };
+        use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
+        let Some(device) = amd_d3d11_device() else {
+            eprintln!("skipping: no AMD adapter on this box");
+            return;
+        };
+        let (w, h) = (256u32, 256u32);
+        // SAFETY: the device is live on this thread.
+        let ctx = unsafe { device.GetImmediateContext() }.expect("immediate context");
+
+        // BGRA filled mid-grey (128,128,128,255), one subresource upload.
+        let pixels = vec![128u8; (w * h * 4) as usize];
+        let bgra_desc = D3D11_TEXTURE2D_DESC {
+            Width: w,
+            Height: h,
+            MipLevels: 1,
+            ArraySize: 1,
+            Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+            SampleDesc: DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0,
+            },
+            Usage: D3D11_USAGE_DEFAULT,
+            // Match the driver's captured-BGRA binds (`Targets::new` InputKind::Bgra); a
+            // shader-resource-only texture is not a valid video-processor input surface on AMD.
+            BindFlags: (D3D11_BIND_RENDER_TARGET.0 | D3D11_BIND_SHADER_RESOURCE.0) as u32,
+            CPUAccessFlags: 0,
+            MiscFlags: 0,
+        };
+        let init = D3D11_SUBRESOURCE_DATA {
+            pSysMem: pixels.as_ptr() as *const _,
+            SysMemPitch: w * 4,
+            SysMemSlicePitch: 0,
+        };
+        let mut bgra: Option<ID3D11Texture2D> = None;
+        // SAFETY: descriptor + init data are fully populated; out-param filled on success.
+        unsafe { device.CreateTexture2D(&bgra_desc, Some(&init), Some(&mut bgra)) }
+            .expect("BGRA texture");
+        let bgra = bgra.expect("BGRA texture");
+
+        let p010_desc = D3D11_TEXTURE2D_DESC {
+            Format: DXGI_FORMAT_P010,
+            BindFlags: D3D11_BIND_RENDER_TARGET.0 as u32,
+            ..bgra_desc
+        };
+        let mut p010: Option<ID3D11Texture2D> = None;
+        // SAFETY: as above.
+        unsafe { device.CreateTexture2D(&p010_desc, None, Some(&mut p010)) }.expect("P010 texture");
+        let p010 = p010.expect("P010 texture");
+
+        let conv = VideoConverter::new(&device, &ctx, w, h, false).expect("VideoConverter");
+        // The load-bearing assertion: AMD's video processor accepts a P010 output view.
+        conv.convert(&bgra, &p010)
+            .expect("BGRA->P010 on the AMD video processor (a green render would still Ok here)");
+
+        // Read back the Y plane's first sample through a staging copy.
+        let stag_desc = D3D11_TEXTURE2D_DESC {
+            Usage: D3D11_USAGE_STAGING,
+            BindFlags: 0,
+            CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,
+            ..p010_desc
+        };
+        let mut stag: Option<ID3D11Texture2D> = None;
+        // SAFETY: as above.
+        unsafe { device.CreateTexture2D(&stag_desc, None, Some(&mut stag)) }.expect("staging P010");
+        let stag = stag.expect("staging P010");
+        let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+        // SAFETY: `stag` and `p010` are live same-device textures; `ctx` is their immediate context.
+        // `Map` fills `mapped`; `Unmap` releases it before the function returns.
+        let y10 = unsafe {
+            ctx.CopyResource(&stag, &p010);
+            ctx.Map(&stag, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
+                .expect("map staging");
+            // P010 Y plane: row 0, first 16-bit sample; the 10-bit code sits in the high bits.
+            let sample = *(mapped.pData as *const u16);
+            ctx.Unmap(&stag, 0);
+            sample >> 6
+        };
+        eprintln!("VideoConverter BGRA(128)->P010 on AMD: Y10={y10} (expect ~504 studio grey)");
+        assert!(
+            (400..=620).contains(&y10),
+            "P010 luma {y10} off BT.709 studio grey — the AMD video processor mis-rendered P010"
+        );
+    }
+
     /// Live intra-refresh property on a scratch component (does not mutate process env).
     #[test]
     fn amf_intra_refresh_property_live() {
