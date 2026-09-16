@@ -715,6 +715,30 @@ pub fn games() -> Vec<GameSnapshot> {
     out
 }
 
+/// Leases on games that are still on a streaming session, filtered by `app_id`
+/// (`None` = all of them). What `POST /game/end` reaches when a title is up
+/// rather than waiting out a reconnect window.
+pub fn live_games(app_id: Option<&str>) -> Vec<Arc<crate::gamelease::LeaseShared>> {
+    let mine =
+        |g: &Arc<crate::gamelease::LeaseShared>| app_id.is_none() || g.game.id.as_deref() == app_id;
+    let mut out: Vec<Arc<crate::gamelease::LeaseShared>> = registry()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .filter_map(|s| s.game.clone())
+        .filter(&mine)
+        .collect();
+    out.extend(
+        gs_game()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .filter(|g| mine(g))
+            .cloned(),
+    );
+    out
+}
+
 /// Tear down every live native session. Best-effort: loops observe the
 /// flag and exit; the guard then clears the entry. Not intended teardown —
 /// prefer [`stop_all_quit`] for an operator action.
@@ -925,6 +949,7 @@ mod tests {
                 workspace: None,
                 #[cfg(target_os = "linux")]
                 window_stage: None,
+                outcome: None,
             },
             Box::new(|| {}),
         );
@@ -943,8 +968,16 @@ mod tests {
             // Not `grace` while the stream is up: the console keys
             // countdown / End now off that state.
             assert_ne!(row.state, "grace");
+            // The same row is what `POST /game/end` reaches with `streaming`,
+            // and only ever under its own id.
+            assert_eq!(live_games(Some(id)).len(), 1);
+            assert!(live_games(Some("steam:9999")).is_empty());
         }
         assert!(mine().is_none(), "the row goes with the stream");
+        assert!(
+            live_games(Some(id)).is_empty(),
+            "a game with no stream left is the grace registry's, not this list's"
+        );
     }
 
     fn one_summary(id: u64) -> SessionSummary {

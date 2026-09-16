@@ -2,8 +2,10 @@ package io.unom.punktfunk.kit.library
 
 import android.util.Log
 import okhttp3.Cache
+import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayInputStream
@@ -27,8 +29,9 @@ import javax.net.ssl.X509TrustManager
 // Android game-library client — the mirror of the Apple client's LibraryClient.swift. Fetches a
 // host's unified game library from its management REST API (`GET /api/v1/library`) over **mTLS**: the
 // paired client presents its persistent cert/key (the same identity the host paired over QUIC), and
-// the host's self-signed cert is pinned by SHA-256(DER). Read-only. Mirrors the GameEntry/Artwork
-// schema in crates/punktfunk-host/src/library.rs.
+// the host's self-signed cert is pinned by SHA-256(DER). Reads the library and what is running;
+// [LibraryClient.endGame] is the one write. Mirrors the GameEntry/Artwork schema in
+// crates/punktfunk-host/src/library.rs.
 
 /** The management API's default port — matches `mgmt::DEFAULT_PORT` on the host and the Apple client. */
 const val DEFAULT_MGMT_PORT = 47990
@@ -261,6 +264,37 @@ object LibraryClient {
             }
         } catch (_: Exception) {
             emptyList()
+        }
+    }
+
+    /**
+     * `POST /api/v1/game/end` for one title, live session included (`streaming`).
+     *
+     * The move a player has when a launch never produced a game: the host drops what it thinks is
+     * running for the title, so the next attempt starts it. `true` on 200; `false` on a 409 (the
+     * host had nothing to end) and on any error, which reads the same to the player. BLOCKING;
+     * call from IO.
+     */
+    fun endGame(
+        address: String,
+        mgmtPort: Int = DEFAULT_MGMT_PORT,
+        certPem: String,
+        keyPem: String,
+        fpHex: String,
+        appId: String,
+    ): Boolean {
+        if (fpHex.isBlank() || appId.isBlank()) return false
+        return try {
+            val body = JSONObject().put("app_id", appId).put("streaming", true)
+            val req = Request.Builder()
+                .url("https://$address:$mgmtPort/api/v1/game/end")
+                .post(body.toString().toRequestBody("application/json".toMediaType()))
+                .build()
+            mtlsHttpClient(certPem, keyPem, address, fpHex).newCall(req).execute()
+                .use { it.code == 200 }
+        } catch (e: Exception) {
+            Log.w(TAG, "end game failed", e)
+            false
         }
     }
 

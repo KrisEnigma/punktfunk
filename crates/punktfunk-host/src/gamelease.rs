@@ -166,6 +166,8 @@ pub struct LeaseShared {
     was_running: AtomicBool,
     /// Last seen running, unix ms. 0 = never.
     last_seen_ms: AtomicU64,
+    /// Client to tell when this launch dies on the spot ([`LeaseRequest::outcome`]).
+    outcome: Option<OutcomeTx>,
 }
 
 impl LeaseShared {
@@ -278,6 +280,9 @@ pub struct LeaseRequest {
     /// exactly as it did before the window stage existed.
     #[cfg(target_os = "linux")]
     pub window_stage: Option<WindowStage>,
+    /// Where to say this launch died on the spot. `None` leaves the finding in
+    /// the log, as it was before the client could be told.
+    pub outcome: Option<OutcomeTx>,
 }
 
 /// Where the window stage looks, and what it does with the first window it
@@ -300,6 +305,32 @@ pub fn launch_clock() -> Option<f64> {
 
 pub type OnExit = Box<dyn Fn() + Send + Sync>;
 
+/// Where a launch outcome goes: the session's control task writes it to the
+/// client. `None` for a lease with nobody streaming to tell.
+pub type OutcomeTx = tokio::sync::mpsc::UnboundedSender<punktfunk_core::quic::LaunchOutcome>;
+
+/// Did this launch die on the spot, or is it a hand-off to a game still coming up?
+///
+/// Only a *failing* exit inside [`SHIM_WINDOW`] with nothing left to recognize.
+/// A launcher hands off cleanly, and a Proton prefix build never reaches here at
+/// all: its shell exits with success and the scan waits out [`START_GRACE`].
+fn died_on_the_spot(quick: bool, success: bool, fallback: &LeaseKind) -> bool {
+    quick && !success && matches!(fallback, LeaseKind::Untracked)
+}
+
+/// What the player is told when a launch exits on the spot.
+///
+/// 127 and 126 are the shell's own "no such command" / "cannot execute"; named,
+/// because a number is not a next move. Anything else gets how long it lasted.
+fn early_exit_message(title: &str, code: Option<i32>, secs: f32) -> String {
+    let cause = match code {
+        Some(127) => "this host doesn't have that command".to_string(),
+        Some(126) => "this host can't run that command".to_string(),
+        _ => format!("it closed again after {secs:.1} s"),
+    };
+    format!("Couldn't start {title} — {cause}.")
+}
+
 /// Open a lease and start watching. `on_exit` fires **at most once**: game
 /// was seen running, then confirmed gone. Never for never-started, a shim,
 /// or a host-requested end.
@@ -319,6 +350,7 @@ pub fn open(req: LeaseRequest, on_exit: OnExit) -> GameLease {
         workspace,
         #[cfg(target_os = "linux")]
         window_stage,
+        outcome,
     } = req;
 
     // Pin pid to start time before recycle. Unresolvable is dropped: a bare
@@ -365,6 +397,7 @@ pub fn open(req: LeaseRequest, on_exit: OnExit) -> GameLease {
         created_ms: now_ms(),
         was_running: AtomicBool::new(false),
         last_seen_ms: AtomicU64::new(0),
+        outcome,
     });
 
     if launcher {
@@ -579,6 +612,33 @@ fn apply_on_window(stage: &WindowStage, win: &crate::vdisplay::Toplevel) {
     }
 }
 
+/// The launch exited on the spot: say so, and un-launch the registry record so
+/// the next attempt starts the title instead of adopting a corpse. That drop is
+/// what turns "needs a host restart" into "press it again".
+///
+/// Not [`finish`]: nothing ran, so there is no play time to credit and no game
+/// exit to end the session on.
+fn report_early_exit(shared: &LeaseShared, code: Option<i32>, ran: Duration) {
+    let said = early_exit_message(&shared.game.title, code, ran.as_secs_f32());
+    tracing::warn!(
+        title = %shared.game.title,
+        status = ?code,
+        ran_s = ran.as_secs_f32(),
+        "the launch command exited on the spot and nothing of this title is on the box — \
+         reporting the launch as failed and un-launching its record"
+    );
+    shared.set_state(GameState::Exited);
+    if let Some(p) = &shared.procs {
+        crate::launchreg::unlaunched(p);
+    }
+    if let Some(tx) = &shared.outcome {
+        let _ = tx.send(punktfunk_core::quic::LaunchOutcome::new(
+            punktfunk_core::quic::LaunchOutcomeKind::Failed,
+            &said,
+        ));
+    }
+}
+
 /// Wait for the game to appear, then for its window, then for it to stay gone.
 #[cfg(any(target_os = "linux", windows))]
 fn watch(
@@ -709,6 +769,10 @@ fn watch(
                         // Outlived the window, or failed. Game is gone; only
                         // a success after a real run counts as "played".
                         kind = fallback_kind();
+                        if died_on_the_spot(quick, status.success(), &kind) {
+                            report_early_exit(&shared, status.code(), spawned_at.elapsed());
+                            return;
+                        }
                         if matches!(kind, LeaseKind::Untracked) {
                             if spawned_at.elapsed() >= SHIM_WINDOW {
                                 shared.was_running.store(true, Ordering::Relaxed);
@@ -1635,6 +1699,7 @@ mod tests {
             workspace: None,
             #[cfg(target_os = "linux")]
             window_stage: None,
+            outcome: None,
         }
     }
 
@@ -1816,6 +1881,83 @@ mod tests {
         let _ = victim.wait();
     }
 
+    /// The one rule that separates the reporter's dead launch from a Proton
+    /// prefix build: a *failing* exit inside the shim window with nothing left
+    /// to recognize. A launcher hands off with success and keeps its grace; a
+    /// title with detect signals keeps its grace whatever its wrapper did.
+    #[test]
+    fn only_a_failing_exit_with_nothing_left_to_watch_is_a_dead_launch() {
+        assert!(died_on_the_spot(true, false, &LeaseKind::Untracked));
+
+        // A launcher handing off. This is every Steam and Heroic launch.
+        assert!(!died_on_the_spot(true, true, &LeaseKind::Untracked));
+        // The game is recognizable another way — the scan gets START_GRACE.
+        assert!(!died_on_the_spot(true, false, &LeaseKind::Matched));
+        assert!(!died_on_the_spot(true, false, &LeaseKind::Reported));
+        // Past the shim window it ran; that exit is the game's, not a failure
+        // to start, and `finish` reports it with the play time.
+        assert!(!died_on_the_spot(false, false, &LeaseKind::Untracked));
+        assert!(!died_on_the_spot(false, true, &LeaseKind::Untracked));
+    }
+
+    /// The shell's own two codes are named; anything else gets how long it lasted.
+    #[test]
+    fn a_dead_launch_says_what_the_player_can_act_on() {
+        assert_eq!(
+            early_exit_message("Quail", Some(127), 0.2),
+            "Couldn't start Quail \u{2014} this host doesn't have that command."
+        );
+        assert_eq!(
+            early_exit_message("Quail", Some(126), 0.2),
+            "Couldn't start Quail \u{2014} this host can't run that command."
+        );
+        assert_eq!(
+            early_exit_message("Quail", Some(1), 0.24),
+            "Couldn't start Quail \u{2014} it closed again after 0.2 s."
+        );
+        // Killed by a signal: no code, same shape.
+        assert!(early_exit_message("Quail", None, 1.0).starts_with("Couldn't start Quail"));
+    }
+
+    /// The whole of ask 2 in one place: the client hears `failed`, and the
+    /// record stops covering — so the retry that follows starts the title
+    /// instead of adopting the launch that just died.
+    #[test]
+    fn a_dead_launch_is_reported_and_stops_covering_the_next_attempt() {
+        let (fp, app) = (Some("fp-dead"), Some("custom:dead"));
+        let first = crate::launchreg::claim(fp, app, false, Some(10.0));
+        first.launched();
+        let procs = first.procs().expect("recorded");
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let lease = open(
+            LeaseRequest {
+                procs: Some(procs),
+                outcome: Some(tx),
+                ..req(app.unwrap(), DetectSpec::default(), false)
+            },
+            Box::new(|| {}),
+        );
+        let shared = lease.shared();
+        report_early_exit(&shared, Some(127), Duration::from_millis(200));
+
+        let said = rx.try_recv().expect("the client is told");
+        assert_eq!(said.kind, punktfunk_core::quic::LaunchOutcomeKind::Failed);
+        assert!(
+            said.message.contains("doesn't have that command"),
+            "{said:?}"
+        );
+        assert_eq!(shared.state(), GameState::Exited);
+
+        let retry = crate::launchreg::claim(fp, app, false, Some(99.0));
+        assert!(
+            retry.must_spawn(),
+            "the attempt after a dead launch must start the title, not adopt it"
+        );
+        retry.abandon();
+        drop(first);
+    }
+
     #[test]
     fn an_untracked_lease_is_never_terminated() {
         let l = open(
@@ -1934,6 +2076,7 @@ mod tests {
                 workspace: None,
                 #[cfg(target_os = "linux")]
                 window_stage: None,
+                outcome: None,
             },
             Box::new(|| {
                 EXITS.fetch_add(1, Ordering::SeqCst);
@@ -2178,6 +2321,7 @@ mod tests {
                 workspace: None,
                 #[cfg(target_os = "linux")]
                 window_stage: None,
+                outcome: None,
             },
             Box::new(|| {
                 EXITS.fetch_add(1, Ordering::SeqCst);

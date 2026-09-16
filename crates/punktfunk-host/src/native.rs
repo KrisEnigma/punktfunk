@@ -1643,6 +1643,11 @@ pub(crate) async fn run_admitted(
     let (access_tx, access_rx) = tokio::sync::mpsc::unbounded_channel::<AccessUpdate>();
     let (audio_tx, audio_rx) =
         tokio::sync::mpsc::unbounded_channel::<punktfunk_core::quic::AudioState>();
+    // Launch verdict lane. Unbounded and opened here so the library resolve below
+    // can refuse onto it before the stream thread exists.
+    let (launch_outcome_tx, launch_outcome_rx) =
+        tokio::sync::mpsc::unbounded_channel::<punktfunk_core::quic::LaunchOutcome>();
+    let launch_outcome_dp = launch_outcome_tx.clone();
     // What `DELETE /session/{id}` and its siblings act on. `ceiling` is the pairing's own
     // mask: a live re-point clamps to it, so the console never grants past the pairing.
     let controls = crate::session_status::SessionControls {
@@ -1692,6 +1697,7 @@ pub(crate) async fn run_admitted(
         session_grants: session_grants.clone(),
         access_rx,
         audio_rx,
+        launch_outcome_rx,
     }));
     // Only a fingerprint has a record to watch; with no record there is nothing to expire.
     match (session_fp_hex.clone(), access_watch) {
@@ -2117,6 +2123,11 @@ pub(crate) async fn run_admitted(
                         launch_id = id,
                         "client requested a launch id not in this host's library — ignoring"
                     );
+                    let _ = launch_outcome_tx.send(punktfunk_core::quic::LaunchOutcome::new(
+                        punktfunk_core::quic::LaunchOutcomeKind::Refused,
+                        "Couldn't start that title — this host doesn't have it in its library \
+                         any more.",
+                    ));
                     None
                 }
             }
@@ -2373,6 +2384,7 @@ pub(crate) async fn run_admitted(
                         client_name,
                         launch: launch_for_dp,
                         launch_target,
+                        launch_outcome: launch_outcome_dp,
                         client_hdr,
                         join_live,
                         controls,

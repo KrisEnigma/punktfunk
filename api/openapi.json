@@ -1439,7 +1439,7 @@
           "session"
         ],
         "summary": "End waiting games",
-        "description": "Ends games waiting out the reconnect window. Does not touch a live session\n(`DELETE /session` plus `game_on_session_end`).",
+        "description": "Ends games waiting out the reconnect window. With `streaming` and an\n`app_id`, also ends that title where it is still on a live session — the\nmove a player has after a launch that never produced a game. The session\nitself stays up (`DELETE /session` plus `game_on_session_end`).",
         "operationId": "endGame",
         "requestBody": {
           "content": {
@@ -7097,6 +7097,10 @@
               "null"
             ],
             "description": "Store-qualified id (`steam:570`); omit to end every waiting game."
+          },
+          "streaming": {
+            "type": "boolean",
+            "description": "Also end `app_id` where it is on a live session, not only where it is\nwaiting out a reconnect window. Ignored without `app_id`."
           }
         }
       },
