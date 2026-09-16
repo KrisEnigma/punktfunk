@@ -914,8 +914,8 @@
 // [`AudioState`]. 0x59: next after [`MSG_ACCESS_UPDATE`].
 #define PUNKTFUNK_MSG_AUDIO_STATE 89
 
-// [`PadSlots`]. 0x5A: next after [`MSG_AUDIO_STATE`].
-#define PUNKTFUNK_MSG_PAD_SLOTS 90
+// [`PadSlots`]. 0x5B: 0x5A is the launch outcome.
+#define PUNKTFUNK_MSG_PAD_SLOTS 91
 
 #define PUNKTFUNK_AUDIO_MAGIC 201
 
