@@ -22,8 +22,6 @@ pub mod manifest;
 mod windows;
 #[cfg(target_os = "windows")]
 use self::windows as plat;
-#[cfg(all(target_os = "windows", not(test)))]
-pub(crate) use self::windows::listener_is_runner;
 #[cfg(not(target_os = "windows"))]
 mod posix;
 #[cfg(not(target_os = "windows"))]
