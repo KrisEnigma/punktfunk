@@ -92,10 +92,11 @@ that can encode it; if any gate fails the host says 4:2:0 before your decoder is
 
 **10-bit SDR** — *default: off.* Encodes at 10-bit precision without HDR: gradients that band under
 an 8-bit encode — skies, fog, dark scenes — come through smooth, and the displays keep their colour
-settings. It's the *encoder's* precision, not a 10-bit capture — the desktop stays 8-bit. Needs a
-Windows host on an NVIDIA GPU and HEVC; anywhere else the session stays 8-bit and the handshake
-says so. When HDR engages it takes over and the row dims. Every client except the TV apps: unlike
-HDR it asks nothing of your display.
+settings. It's the *encoder's* precision, not a 10-bit capture — the desktop stays 8-bit. Needs
+an NVIDIA or AMD host, or Intel under Linux, on HEVC; AV1 works too except on AMD under Windows.
+Anywhere else the session stays 8-bit and the handshake says so. When HDR engages it takes over and
+the row dims. Unlike HDR it asks nothing of your display, so the TV apps offer it too; on webOS it
+needs HEVC.
 
 **Prioritize** — *default: Lowest latency.* **Lowest latency** shows every frame the moment the
 display can take it — a network hiccup becomes an occasional repeated or skipped frame.

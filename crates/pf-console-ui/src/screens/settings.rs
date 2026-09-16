@@ -1008,10 +1008,9 @@ pub fn row_on(id: RowId, platform: crate::platform::Platform) -> bool {
         RowId::Pad => &[Desktop, WebOS],
         // That client's own audio plane and its remote's missing second button.
         RowId::AudioRoute | RowId::CursorGestures => &[WebOS],
-        // Main10 at BT.709 asks nothing of the panel, and MediaCodec decodes it from the SPS, so
-        // Android obeys this one. The TV does not: NDL decodes what it is given and exposes no
-        // bit-depth ask.
-        RowId::TenBitSdr => &[Desktop, Android],
+        // Main10 at BT.709 asks nothing of the panel, and MediaCodec and NDL both decode it from
+        // the SPS.
+        RowId::TenBitSdr => &[Desktop, Android, WebOS],
         // Decoder choice, chroma and the window-manager knobs: the TV decodes through NDL and has
         // no window manager, so none of these is a control it could obey. The browser is out for
         // the same shape of reason — WebCodecs picks the decoder, a page binds no system chord,
@@ -1544,7 +1543,8 @@ pub fn detail(id: RowId, ctx: &Ctx) -> &'static str {
         }
         RowId::TenBitSdr => {
             "Smoother gradients without HDR — the picture is encoded at 10-bit \
-             precision. Needs an NVIDIA host; HDR takes over when it engages."
+             precision. Needs an NVIDIA or AMD host, or Intel on Linux; HDR takes over \
+             when it engages."
         }
         RowId::PresentPriority => {
             "Lowest latency shows each frame the moment the display can take it — a \
@@ -3218,7 +3218,7 @@ pub(crate) mod tests {
                 RowId::Decoder,
                 RowId::Chroma444,
                 // TenBitSdr is NOT here: MediaCodec decodes Main10 from the SPS and the depth
-                // asks nothing of the panel, so Android obeys it. webOS still does not.
+                // asks nothing of the panel, so Android obeys it.
                 RowId::Vsync,
                 RowId::AllowVrr,
                 RowId::AudioRoute,
