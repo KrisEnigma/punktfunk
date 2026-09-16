@@ -204,7 +204,8 @@ in
         description = ''
           `host.env` key/value pairs passed to the service via `EnvironmentFile`. See
           `''${package}/share/punktfunk-host/host.env.example` for the full surface. Booleans render
-          as `1`/`0`. Leave empty to rely on the host's per-connect auto-detection of the
+          as `1`/`0`. A key the web console also offers (Host → Settings) is locked there while it
+          is set here. Leave empty to rely on the host's per-connect auto-detection of the
           compositor + input backend. Secrets are REFUSED here (this renders to a world-readable
           store path) — use `environmentFile`, or let the host generate them.
         '';

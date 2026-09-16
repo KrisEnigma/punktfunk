@@ -1,13 +1,17 @@
 ---
 title: Configuration
-description: The host.env settings and PUNKTFUNK_* environment variables you'd actually set — compositor, video, audio, input, gamepads, clipboard, tuning — and what each one does.
+description: Host settings in the web console, the host.env file that pins them, and the PUNKTFUNK_* environment variables that stay env-only — what each one does.
 ---
 
-The host reads its settings from **`~/.config/punktfunk/host.env`** (a simple `KEY=value` file, `#`
-starts a comment; keys are **case-sensitive** — `punktfunk_compositor` sets nothing, use the exact
-uppercase names). On Windows the service reads **`%ProgramData%\punktfunk\host.env`** instead. Your
-[setup guide](/docs/requirements) gives you a starting `host.env` for your desktop; this page is the
-reference for the settings you set there. A few settings are documented on the page that owns their
+Most host settings are on the web console's **Host → Settings** page: the table under
+[Settings in the web console](#settings-in-the-web-console) lists them, with the `host.env` name each
+one also answers to. Change them there; there is no file to edit.
+
+**`host.env`** is for the rest, and for pinning. It lives at **`~/.config/punktfunk/host.env`** on
+Linux and **`%ProgramData%\punktfunk\host.env`** on Windows: a `KEY=value` file where `#` starts a
+comment and keys are **case-sensitive**. A console setting set there is locked in the console until
+the line is gone. The sections after the table are the env-only variables: backend pins, network and
+port tuning, paths, and diagnostics. A few settings are documented on the page that owns their
 feature instead — they're listed under [Settings documented
 elsewhere](#settings-documented-elsewhere) at the end.
 
@@ -36,10 +40,11 @@ variables the **clients** read, several devices at once, and codecs.
 
 ## Settings in the web console
 
-These settings are also on the web console's **Host → Settings** page, which changes them without
-editing a file. A value in `host.env`, or a flag on the host's command line, wins over the console,
-and the console shows that setting as locked. Remove the line and restart the host to hand the
-setting back to the console.
+Each of these is on **Host → Settings**. Advanced ones show once **Show advanced** is ticked, and a
+search for the `host.env` name finds the setting. A value in `host.env`, or a flag on the host's
+command line, wins over the console, and the console shows that setting as locked. Remove the line
+and restart the host to hand the setting back to the console. The rows in the sections below say
+more about some of them.
 
 | Setting | `host.env` | Values | Default | Applies |
 |---|---|---|---|---|
