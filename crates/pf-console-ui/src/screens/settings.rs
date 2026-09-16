@@ -401,13 +401,14 @@ const SMOOTH_BUFFERS: [(u8, &str); 4] = [
     (2, "2 frames"),
     (3, "3 frames"),
 ];
-const PAD_TYPES: [(&str, &str); 6] = [
+const PAD_TYPES: [(&str, &str); 7] = [
     ("auto", "Automatic"),
     ("xbox360", "Xbox 360"),
     ("xboxone", "Xbox One"),
     ("dualsense", "DualSense"),
     ("dualshock4", "DualShock 4"),
     ("steamdeck", "Steam Deck"),
+    ("steamcontroller2", "Steam Controller 2"),
 ];
 /// Shared `system_buttons` key. Auto sends to the host except in Gaming Mode,
 /// where Steam on this device would open a second overlay on the same press.
