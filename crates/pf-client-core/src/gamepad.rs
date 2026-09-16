@@ -1,7 +1,7 @@
 //! App-lifetime SDL3 gamepad service: Settings pad list, a forwarded slot per connected
 //! pad (a user pin narrows it to one), and in-session buttons/axes, DualSense touchpad +
-//! motion (`0xCC`), rumble, lightbar, and DualSense raw effects. Held state is zeroed on
-//! slot close or detach.
+//! motion (`0xCC`), rumble, lightbar, DualSense raw effects, and Steam Controller 2 raw
+//! passthrough ([`crate::sc2_capture`]). Held state is zeroed on slot close or detach.
 //!
 //! Idle never opens a device and keeps Valve HIDAPI off ([`set_valve_hidapi`]): the
 //! Deck driver kills lizard mode (trackpad-mouse) at *enumeration*. Settings uses
@@ -651,6 +651,10 @@ struct Slot {
     /// bit0 = haptics, bit1 = speaker. Nonzero only for tier-A; bit0 also suppresses wire rumble.
     audio_caps: u8,
     rumble_suppressed_logged: bool,
+    /// Raw passthrough for a Steam Controller 2 declared as one.
+    sc2: Option<crate::sc2_capture::Sc2Capture>,
+    /// The host sent raw writes, so its `0x80` reports own the motors and wire rumble is skipped.
+    raw_rumble: bool,
 }
 
 impl Slot {
@@ -679,6 +683,8 @@ impl Slot {
             gesture: SelectGesture::default(),
             audio_caps: 0,
             rumble_suppressed_logged: false,
+            sc2: None,
+            raw_rumble: false,
         }
     }
 
@@ -867,12 +873,15 @@ impl Worker {
             self.subsystem.vendor_for_id(jid).unwrap_or(0),
             self.subsystem.product_for_id(jid).unwrap_or(0),
         );
-        // SDL has no Deck / Steam Controller type; VID/PID picks the matching hid-steam pad.
+        // SDL has no Valve pad types; VID/PID picks the matching Deck / Steam Controller kind.
         if vid == 0x28DE && pid == 0x1205 {
             pref = GamepadPref::SteamDeck;
         }
         if vid == 0x28DE && matches!(pid, 0x1102 | 0x1142) {
             pref = GamepadPref::SteamController;
+        }
+        if let Some(sc2) = crate::sc2_capture::pref_for(vid, pid) {
+            pref = sc2;
         }
         // Edge reports as PS5; VID/PID so paddles land on native slots, not the fold/drop policy.
         if vid == 0x054C && pid == 0x0DF2 {
@@ -1014,7 +1023,12 @@ impl Worker {
         match self.subsystem.open(sdl3::sys::joystick::SDL_JoystickID(id)) {
             Ok(pad) => {
                 let mut slot = Slot::new(id, index, pref, declared, pad);
-                Self::set_slot_sensors(&mut slot, true);
+                let raw_sc2 =
+                    crate::sc2_capture::is_sc2(pref) && crate::sc2_capture::is_sc2(declared);
+                // A raw SC2's IMU mode is Steam's to set, through the raw plane.
+                if !raw_sc2 {
+                    Self::set_slot_sensors(&mut slot, true);
+                }
                 slot.audio_caps = self.pad_audio_caps_for(id, &slot.pad);
                 // Kind before any input so the host builds a matching virtual device. Core
                 // re-sends against datagram loss; an older host ignores it.
@@ -1040,6 +1054,17 @@ impl Worker {
                         ActuatorQuirks::default()
                     };
                     c.set_rumble_quirks(index as u16, quirks);
+                    // After the arrival, so the host builds the as-is pad before raw reports.
+                    if raw_sc2 {
+                        slot.sc2 = slot.pad.path().and_then(|path| {
+                            crate::sc2_capture::Sc2Capture::open(
+                                &path,
+                                c.clone(),
+                                index,
+                                self.sc2_gate(),
+                            )
+                        });
+                    }
                 }
                 if slot.audio_caps != 0 {
                     if slot.audio_caps & 0x01 != 0 {
@@ -1086,6 +1111,7 @@ impl Worker {
                     index,
                     pref = ?pref,
                     declared = ?declared,
+                    raw = slot.sc2.is_some(),
                     "gamepad forwarding (slot opened)"
                 );
                 self.slots.push(slot);
@@ -1122,6 +1148,8 @@ impl Worker {
 
     /// Flush held wire state and drop the SDL handle. Flush is wire-only, so unplug is safe.
     fn close_slot_at(&mut self, i: usize) {
+        // Raw reports stop first: one landing after the remove would outlive the slot.
+        self.slots[i].sc2 = None;
         // Silence before the handle drops; do not depend on SDL at close. Errors if already gone.
         let _ = self.slots[i].pad.set_rumble(0, 0, 100);
         Self::reset_slot_feedback(&mut self.slots[i]);
@@ -1165,6 +1193,21 @@ impl Worker {
     fn close_all_slots(&mut self) {
         while !self.slots.is_empty() {
             self.close_slot_at(0);
+        }
+    }
+
+    /// The typed plane's mask and system-button routing, for raw SC2 reports.
+    fn sc2_gate(&self) -> crate::sc2_capture::Gate {
+        crate::sc2_capture::Gate {
+            masked: self.masked,
+            system_forward: self.system_forward,
+        }
+    }
+
+    fn push_sc2_gate(&self) {
+        let gate = self.sc2_gate();
+        for cap in self.slots.iter().filter_map(|s| s.sc2.as_ref()) {
+            cap.set_gate(gate);
         }
     }
 
@@ -1574,6 +1617,7 @@ impl Worker {
                     gesture,
                 }) => {
                     self.system_forward = forward_raw;
+                    self.push_sc2_gate();
                     if self.guide_gesture == gesture {
                         continue;
                     }
@@ -1603,6 +1647,7 @@ impl Worker {
                         continue;
                     }
                     self.masked = on;
+                    self.push_sc2_gate();
                     if on {
                         // Neutral now, slots stay open — the host must not see an unplug.
                         if let Some(c) = self.attached.clone() {
@@ -1950,13 +1995,16 @@ impl Worker {
     }
 
     /// Single consumer of rumble + HID output. Engine commands are already effective;
-    /// this worker applies them verbatim and keeps no rumble state.
+    /// this worker applies them verbatim. A raw SC2 hands its motors to the host's raw writes.
     fn render_feedback(&mut self) {
         let Some(connector) = self.attached.clone() else {
             return;
         };
         while let Ok(cmd) = connector.next_rumble_command(Duration::ZERO) {
             if let Some(slot) = self.slots.iter_mut().find(|s| s.index as u16 == cmd.pad) {
+                if slot.raw_rumble {
+                    continue;
+                }
                 // SDL rumble sets ucEnableBits1 0x01|0x02, muting the 0xD1 coils.
                 if slot.audio_caps & 0x01 != 0 {
                     if !slot.rumble_suppressed_logged {
@@ -2007,9 +2055,21 @@ impl Worker {
                         .pad
                         .send_effect(&Ds5Feedback::audio_ctl_packet(flags, &raw));
                 }
+                HidOutput::HidRaw { kind, data, .. } => {
+                    if slot.sc2.is_none() {
+                        continue;
+                    }
+                    if !slot.raw_rumble {
+                        // The host drives the motors raw from here on; drop SDL's held level.
+                        slot.raw_rumble = true;
+                        let _ = slot.pad.set_rumble(0, 0, 100);
+                    }
+                    if let Some(cap) = &slot.sc2 {
+                        cap.write(kind, data);
+                    }
+                }
                 HidOutput::Trigger { .. }
                 | HidOutput::TrackpadHaptic { .. }
-                | HidOutput::HidRaw { .. }
                 | HidOutput::AudioCtl { .. } => {}
             }
         }
