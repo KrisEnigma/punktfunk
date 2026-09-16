@@ -60,6 +60,8 @@ pub type RfiSlot = Arc<std::sync::Mutex<Option<(i64, i64)>>>;
 pub struct GameLifetime {
     /// [`super::AppState::quit`]: a decision may end the game; a drop gets a reconnect window.
     pub quit: Arc<AtomicBool>,
+    /// [`super::AppState::preempted`]: the stop flag admission raises on a steal.
+    pub preempted: Arc<AtomicBool>,
     /// Paired client's cert fingerprint; only it can reclaim the launch. `None` if unread.
     pub fingerprint: Option<String>,
     /// Launching peer's source IP ([`super::LaunchSession::peer_ip`]). Bound when the video
@@ -248,7 +250,7 @@ fn run(
         let _admission_guard = crate::vdisplay::admission::register(
             None,
             (cfg.width, cfg.height, cfg.fps),
-            life.quit.clone(),
+            life.preempted.clone(),
             "gamestream".to_string(),
             crate::vdisplay::admission::LiveDisplay {
                 compositor: Some(compositor),

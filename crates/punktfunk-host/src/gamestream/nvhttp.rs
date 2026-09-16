@@ -222,6 +222,22 @@ async fn h_launch(
     addr: Option<Extension<PeerAddr>>,
     Query(q): Query<HashMap<String, String>>,
 ) -> Response {
+    // Native default: `separate` → reject. A second Moonlight client then gets 503
+    // instead of wedging the shared monitor's capture.
+    // GameStream has no per-device overlay to apply: its peer identity is the
+    // pairing cert, not the native fingerprint the overlay is keyed by.
+    let conflict = crate::vdisplay::admission::effective_conflict(None);
+    launch_under(st, peer, addr, q, conflict).await
+}
+
+/// `/launch` under an explicit mode-conflict policy.
+async fn launch_under(
+    st: Arc<AppState>,
+    peer: Option<Extension<PeerCertFingerprint>>,
+    addr: Option<Extension<PeerAddr>>,
+    q: HashMap<String, String>,
+    conflict: crate::vdisplay::policy::ModeConflict,
+) -> Response {
     // GRANT_LAUNCH + unexpired, besides pairing. GameStream has no join of an owner-launched
     // session, and no reject vocabulary — the client sees the generic error XML.
     match peer_grants(&peer, &st) {
@@ -239,6 +255,7 @@ async fn h_launch(
 
     // Snapshot owner + mode (Copy) so the launch lock is not held over admission.
     let mut forced_mode: Option<(u32, u32, u32)> = None;
+    let mut steal = false;
     {
         let live = st
             .launch
@@ -246,13 +263,9 @@ async fn h_launch(
             .unwrap()
             .as_ref()
             .map(|s| (s.owner_fp, (s.width, s.height, s.fps)));
-        // Native default: `separate` → reject. A second Moonlight client then gets 503
-        // instead of wedging the shared monitor's capture.
-        // GameStream has no per-device overlay to apply: its peer identity is the
-        // pairing cert, not the native fingerprint the overlay is keyed by.
-        let conflict = crate::vdisplay::admission::effective_conflict(None);
         match gamestream_admission(live, req_fp, conflict) {
             GsDecision::Serve => {}
+            GsDecision::Steal => steal = true,
             GsDecision::Join((w, h, f)) => {
                 forced_mode = Some((w, h, f));
                 tracing::info!(
@@ -270,6 +283,17 @@ async fn h_launch(
 
     match launch(&st, &q) {
         Ok(mut session) => {
+            if steal {
+                // A drop, not a quit — the same as a native steal victim. `launch` clears
+                // first, so the control tick tells the old client while its media stop.
+                tracing::info!("GameStream launch STEAL — ending the live session");
+                use std::sync::atomic::Ordering::SeqCst;
+                let before = st.media_exited.load(SeqCst);
+                let live = u64::from(st.streaming.load(SeqCst))
+                    + u64::from(st.audio_streaming.load(SeqCst));
+                st.end_session("another client took the session");
+                wait_media_exit(&st, before, live).await;
+            }
             // Bind unauthenticated RTSP/UDP to this paired client's source IP.
             session.peer_ip = addr.map(|Extension(PeerAddr(a))| a.ip());
             session.owner_fp = req_fp;
@@ -323,9 +347,7 @@ async fn h_resume(
         tracing::warn!("resume rejected — caller does not own the session");
         return xml(error_xml());
     }
-    // PLAY skips if `streaming` is still true. Clear flags and wait for exit so teardown
-    // cannot stomp the new session's capturer/flags. 2 s bound: do not hang; timeout is
-    // the old media-less outcome. 20 ms poll is well under thread-exit time.
+    // PLAY skips if `streaming` is still true, so clear the flags and wait for exit.
     let before = st.media_exited.load(std::sync::atomic::Ordering::SeqCst);
     let expected = u64::from(
         st.streaming
@@ -334,20 +356,7 @@ async fn h_resume(
         st.audio_streaming
             .swap(false, std::sync::atomic::Ordering::SeqCst),
     );
-    if expected > 0 {
-        tracing::info!(
-            threads = expected,
-            "resume — stopping the previous connection's media threads"
-        );
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-        while st.media_exited.load(std::sync::atomic::Ordering::SeqCst) < before + expected {
-            if std::time::Instant::now() >= deadline {
-                tracing::warn!("resume — old media threads still exiting after 2 s; proceeding");
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
-    }
+    wait_media_exit(&st, before, expected).await;
     // Resume mints new rikey; control-GCM and audio-CBC derive from it. Present → replace;
     // malformed → refuse (streaming on keys the client does not hold is worse); absent → keep.
     // Teardown during the wait can clear `launch`. ANNOUNCE re-negotiates audio — ignore
@@ -404,6 +413,26 @@ async fn h_cancel(
     xml("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<root status_code=\"200\"><cancel>1</cancel></root>\n".to_string())
 }
 
+/// Wait for `expected` stopped media threads to exit, so their teardown cannot stomp a
+/// successor's capturer or flags. 2 s bound: a timeout proceeds, media-less at worst.
+async fn wait_media_exit(st: &AppState, before: u64, expected: u64) {
+    if expected == 0 {
+        return;
+    }
+    tracing::info!(
+        threads = expected,
+        "stopping the previous connection's media threads"
+    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while st.media_exited.load(std::sync::atomic::Ordering::SeqCst) < before + expected {
+        if std::time::Instant::now() >= deadline {
+            tracing::warn!("previous media threads still exiting after 2 s; proceeding");
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
 /// `rikey` (16-byte AES hex) and signed `rikeyid` (negative values wrap to a BE u32 IV).
 fn parse_rikey(q: &HashMap<String, String>) -> Result<([u8; 16], i32)> {
     let rikey = q.get("rikey").ok_or_else(|| anyhow!("missing rikey"))?;
@@ -449,8 +478,10 @@ fn parse_mode(mode: &str) -> Option<(u32, u32, u32)> {
 type LiveGs = (Option<[u8; 32]>, (u32, u32, u32));
 
 enum GsDecision {
-    /// No session, same client, or `steal`/`separate` taking the one session.
+    /// No session, or the same client again.
     Serve,
+    /// End the live session, then serve (`steal`/`separate`: there is one session).
+    Steal,
     /// Admit at the live mode (`join`).
     Join((u32, u32, u32)),
     /// 503 (`reject`).
@@ -458,8 +489,7 @@ enum GsDecision {
 }
 
 /// Single-session mode-conflict. No session or same client → Serve. A different client
-/// applies `policy`; GameStream has no `separate`, so `steal`/`separate` both Serve
-/// (take the one session).
+/// applies `policy`; GameStream has no `separate`, so `steal`/`separate` both Steal.
 fn gamestream_admission(
     live: Option<LiveGs>,
     req_fp: Option<[u8; 32]>,
@@ -479,7 +509,7 @@ fn gamestream_admission(
     match policy {
         ModeConflict::Reject => GsDecision::Reject,
         ModeConflict::Join => GsDecision::Join(mode),
-        ModeConflict::Steal | ModeConflict::Separate => GsDecision::Serve,
+        ModeConflict::Steal | ModeConflict::Separate => GsDecision::Steal,
     }
 }
 
@@ -755,11 +785,11 @@ mod tests {
         ));
         assert!(matches!(
             gamestream_admission(live, Some(b), ModeConflict::Steal),
-            GsDecision::Serve
+            GsDecision::Steal
         ));
         assert!(matches!(
             gamestream_admission(live, Some(b), ModeConflict::Separate),
-            GsDecision::Serve
+            GsDecision::Steal
         ));
         // No cert: treat as a different client.
         assert!(matches!(
@@ -1027,5 +1057,98 @@ mod tests {
         .await;
         assert!(ok.contains("<resume>1</resume>"), "keyless resume: {ok}");
         assert_eq!(st.launch.lock().unwrap().as_ref().unwrap().rikeyid, -5);
+    }
+
+    fn owned_session(der: &[u8]) -> LaunchSession {
+        LaunchSession {
+            gcm_key: [0x11; 16],
+            rikeyid: 1,
+            width: 2560,
+            height: 1440,
+            fps: 120,
+            appid: 1,
+            peer_ip: None,
+            owner_fp: Some(punktfunk_core::quic::endpoint::cert_fingerprint(der)),
+        }
+    }
+
+    async fn resumes(st: &Arc<AppState>, der: &[u8]) -> bool {
+        let peer = Some(Extension(PeerCertFingerprint(Some(fp_of(der)))));
+        let resp = h_resume(State(st.clone()), peer, None, Query(HashMap::new()))
+            .await
+            .into_response();
+        let body = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        String::from_utf8_lossy(&body).contains("<resume>1</resume>")
+    }
+
+    /// A `/launch` steal stops the owner's media and hands the session over as a drop, not a
+    /// quit. Only the new owner may resume.
+    #[tokio::test]
+    async fn a_launch_steal_ends_the_live_session_and_hands_resume_over() {
+        use crate::vdisplay::policy::ModeConflict;
+        use std::sync::atomic::Ordering::SeqCst;
+        let st = test_state();
+        let (owner, thief) = (b"steal-owner".to_vec(), b"steal-thief".to_vec());
+        *st.launch.lock().unwrap() = Some(owned_session(&owner));
+        st.streaming.store(true, SeqCst);
+        st.audio_streaming.store(true, SeqCst);
+        // Stand-in for the two media threads: they exit once their flags drop.
+        let threads = {
+            let st = st.clone();
+            tokio::spawn(async move {
+                while st.streaming.load(SeqCst) || st.audio_streaming.load(SeqCst) {
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                }
+                st.media_exited.fetch_add(2, SeqCst);
+            })
+        };
+
+        let q = HashMap::from([
+            ("rikey".to_string(), "22".repeat(16)),
+            ("rikeyid".to_string(), "9".to_string()),
+            ("mode".to_string(), "1920x1080x60".to_string()),
+        ]);
+        let peer = Some(Extension(PeerCertFingerprint(Some(fp_of(&thief)))));
+        let resp = launch_under(st.clone(), peer, None, q, ModeConflict::Steal).await;
+        let body = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        assert!(String::from_utf8_lossy(&body).contains("<gamesession>1</gamesession>"));
+        assert!(
+            !st.streaming.load(SeqCst) && !st.audio_streaming.load(SeqCst),
+            "the owner's media must stop"
+        );
+        threads.await.unwrap();
+        assert!(!st.quit.load(SeqCst), "a steal is a drop, not a quit");
+        assert_eq!(
+            st.launch.lock().unwrap().as_ref().unwrap().owner_fp,
+            Some(punktfunk_core::quic::endpoint::cert_fingerprint(&thief))
+        );
+        assert!(!resumes(&st, &owner).await, "the victim cannot resume");
+        assert!(resumes(&st, &thief).await);
+    }
+
+    /// A display stolen through admission ends the session on the control tick, as a drop,
+    /// once. The victim then has nothing to resume.
+    #[tokio::test]
+    async fn a_stolen_display_ends_the_session_and_refuses_resume() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let st = test_state();
+        let owner = b"stolen-display-owner".to_vec();
+        *st.launch.lock().unwrap() = Some(owned_session(&owner));
+        st.streaming.store(true, SeqCst);
+        st.audio_streaming.store(true, SeqCst);
+        assert!(!st.end_if_preempted(), "nothing stole it");
+        assert!(st.streaming.load(SeqCst));
+
+        st.preempted.store(true, SeqCst); // what `Admission::Steal` does to each victim
+        assert!(st.end_if_preempted());
+        assert!(!st.streaming.load(SeqCst) && !st.audio_streaming.load(SeqCst));
+        assert!(st.launch.lock().unwrap().is_none());
+        assert!(!st.quit.load(SeqCst), "a steal is a drop, not a quit");
+        assert!(!st.end_if_preempted(), "handled once");
+        assert!(!resumes(&st, &owner).await);
     }
 }

@@ -319,6 +319,7 @@ fn handle_request(req: &Request, state: &Arc<AppState>, peer: Option<SocketAddr>
                         // distinction as the native close code; teardown policy keys off it.
                         stream::GameLifetime {
                             quit: state.quit.clone(),
+                            preempted: state.preempted.clone(),
                             fingerprint: ls.owner_fp.map(hex::encode),
                             owner_ip: ls.peer_ip,
                             av_ping: state.av_ping_payload(),

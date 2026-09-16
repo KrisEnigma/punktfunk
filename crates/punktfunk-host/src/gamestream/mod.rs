@@ -290,6 +290,10 @@ pub struct AppState {
     /// leaves it clear. Virtual-display linger and end-game policy both read it. Cleared
     /// by `/launch`.
     pub quit: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// The display's admission stop flag: raised when another client steals it.
+    /// Read by [`AppState::end_if_preempted`].
+    #[cfg(feature = "gamestream")]
+    pub preempted: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// Audio thread running, and its keep-running flag.
     pub audio_streaming: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// Bumped by each media thread as the last thing it does on exit, after teardown.
@@ -361,6 +365,20 @@ impl AppState {
         self.end_session(reason)
     }
 
+    /// End the session if another client stole its display since the last call. A steal is
+    /// a drop, not a quit: the display lingers for the stealer, as a native victim's does.
+    #[cfg(feature = "gamestream")]
+    pub(crate) fn end_if_preempted(&self) -> bool {
+        if !self
+            .preempted
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            return false;
+        }
+        self.end_session("another client took the display");
+        true
+    }
+
     /// Mint a fresh A/V ping for `/launch` or `/resume`. Must run before the client's RTSP SETUP.
     #[cfg(feature = "gamestream")]
     pub fn mint_av_ping(&self) -> [u8; AV_PING_LEN] {
@@ -400,6 +418,7 @@ impl AppState {
             audio_params: std::sync::Mutex::new(audio::AudioParams::default()),
             streaming: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             quit: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            preempted: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             audio_streaming: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             force_idr: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             rfi_range: std::sync::Arc::new(std::sync::Mutex::new(None)),
