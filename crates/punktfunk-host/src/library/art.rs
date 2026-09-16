@@ -46,11 +46,11 @@ enum Fetch {
     Refused,
 }
 
-/// Fetch one cover. `data:` decodes inline (Lutris inlines art); `http(s)` is a GET with
-/// [`MAX_ART_BYTES`] enforced while the body streams, a declared `image/*` type, and 200 only.
-/// A `3xx` is refused rather than chased: a plugin or a typed entry supplies this URL, and it
-/// must not aim the privileged host at an internal endpoint. Sniffing decides the type that is
-/// stored. `etag` makes it conditional. Blocking (`ureq`) — call off the async runtime.
+/// Fetch one cover. `data:` decodes inline; `http(s)` streams at most [`MAX_ART_BYTES`] and
+/// accepts a declared image on 200 only. Sniffing decides the stored type; `etag` makes it
+/// conditional. Redirects are refused so an artwork URL cannot aim the host at an internal
+/// endpoint. Logs carry only the origin: userinfo, paths and queries can hold CDN credentials.
+/// Blocking (`ureq`) — call off the async runtime.
 fn fetch_art(url: &str, etag: Option<&str>) -> Fetch {
     use base64::Engine as _;
     if let Some(rest) = url.strip_prefix("data:") {
@@ -78,6 +78,7 @@ fn fetch_art(url: &str, etag: Option<&str>) -> Fetch {
     if !(url.starts_with("http://") || url.starts_with("https://")) {
         return Fetch::Refused;
     }
+    let log_url = crate::hooks::webhook_origin(url);
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .timeout_global(Some(std::time::Duration::from_secs(10)))
         .max_redirects(0)
@@ -90,7 +91,7 @@ fn fetch_art(url: &str, etag: Option<&str>) -> Fetch {
         req = req.header("If-None-Match", tag);
     }
     let Ok(mut resp) = req.call() else {
-        tracing::debug!(url, "art store: cover fetch did not complete");
+        tracing::debug!(url = %log_url, "art store: cover fetch did not complete");
         return Fetch::Keep;
     };
     let status = resp.status().as_u16();
@@ -101,11 +102,11 @@ fn fetch_art(url: &str, etag: Option<&str>) -> Fetch {
         // 5xx and 429 are the CDN having a bad minute, not a bad URL. Refusing would leave a
         // marker behind and keep this cover out of the store until someone clears it by hand.
         if status >= 500 || status == 429 {
-            tracing::debug!(url, status, "art store: cover fetch deferred");
+            tracing::debug!(url = %log_url, status, "art store: cover fetch deferred");
             return Fetch::Keep;
         }
         tracing::debug!(
-            url,
+            url = %log_url,
             status,
             "art store: refusing a cover the CDN did not serve"
         );
@@ -130,7 +131,7 @@ fn fetch_art(url: &str, etag: Option<&str>) -> Fetch {
         .to_ascii_lowercase()
         .starts_with("image/")
     {
-        tracing::debug!(url, ctype = %declared, "art store: refusing a cover that is not an image");
+        tracing::debug!(url = %log_url, ctype = %declared, "art store: refusing a cover that is not an image");
         return Fetch::Refused;
     }
     match resp
@@ -149,7 +150,7 @@ fn fetch_art(url: &str, etag: Option<&str>) -> Fetch {
             None => Fetch::Refused,
         },
         Err(ureq::Error::BodyExceedsLimit(_)) => {
-            tracing::debug!(url, "art store: refusing a cover over the size ceiling");
+            tracing::debug!(url = %log_url, "art store: refusing a cover over the size ceiling");
             Fetch::Refused
         }
         // A cut transfer is the network, not the URL: leave the URL usable.
