@@ -34,11 +34,6 @@ pub(super) struct DataPump {
     /// The pinned rate this client could not hold, kbps; `0` until it sheds
     /// its backlog [`PIN_SHEDS_TO_WARN`] times. Embedders show it once.
     pub(super) unsustainable_pin_kbps: Arc<AtomicU32>,
-    /// Previous session's marks for this host ([`crate::abr::AbrMemory`]);
-    /// `None` = start at the host's echo, as before the memory existed.
-    pub(super) abr_seed: Option<crate::abr::AbrMemory>,
-    /// This session's marks, republished every window.
-    pub(super) abr_memory: Arc<Mutex<crate::abr::AbrMemory>>,
     /// Host `BitrateChanged` acks, drained in arrival order. A queue so a
     /// corrective short retarget cannot be clobbered by a full resolve ack
     /// in the same window (host-cap learning needs two consecutive shorts).
@@ -110,8 +105,6 @@ impl DataPump {
             frames_dropped,
             fec_recovered,
             unsustainable_pin_kbps,
-            abr_seed,
-            abr_memory: pump_abr_memory,
             bitrate_ack,
             recovery_kf: pump_recovery_kf,
             pipeline_gap: pump_pipeline_gap,
@@ -158,17 +151,13 @@ impl DataPump {
         // A cap the user typed is the ceiling the probe would go looking for,
         // so it stands in for the measurement (see `capacity_probe_at`).
         let ceiling_cap = crate::abr::ceiling_cap_kbps(abr_max_kbps);
-        let mut abr = BitrateController::with_memory(
+        let mut abr = BitrateController::new(
             if bitrate_kbps == 0 && !rate_pinned {
                 resolved_bitrate_kbps
             } else {
                 0
             },
             abr_max_kbps,
-            // Another codec is another encoder's bitstream; the host resolves
-            // Automatic to the same 20 Mbps for all of them, so the echo guard
-            // alone would let an AV1 mark seed an H.264 fallback.
-            abr_seed.filter(|m| m.codec == negotiated_codec),
         );
         // Bound the probe by stream shape, not raw link capacity. A fat LAN
         // otherwise licenses rates no inter-coded stream can use.
@@ -177,15 +166,6 @@ impl DataPump {
         // durations they were calibrated at. 60 Hz would take SEVERE ×0.7
         // on an ordinary one-frame encode hiccup.
         abr.set_frame_budget(refresh_hz);
-        // Seeded start: ask now, not at the first window. 750 ms above what
-        // this host proved fills the path queue, and the drain costs more
-        // than the overshoot.
-        if let Some(kbps) = abr.bring_up(Instant::now()) {
-            if ctrl_tx.try_send(CtrlRequest::SetBitrate(kbps)).is_err() {
-                abr.on_request_dropped();
-                tracing::warn!(kbps, "adaptive bitrate: control queue full at bring-up");
-            }
-        }
         // Startup capacity probe (Automatic): one burst after video flows.
         // Ceiling = delivered × 0.7. Target is `2 × stream_cap` (need
         // delivered ≥ cap × 1.43; `set_ceiling` clamps to the stream cap).
@@ -620,12 +600,6 @@ impl DataPump {
                         );
                     }
                 }
-                // Republished every window: no teardown path is guaranteed
-                // to run, and a killed client still leaves a usable mark.
-                *pump_abr_memory.lock().unwrap() = crate::abr::AbrMemory {
-                    codec: negotiated_codec,
-                    ..abr.memory()
-                };
                 flush_in_window = false;
                 last_report = Instant::now();
                 last_recovered = st.fec_recovered_shards;
@@ -1092,8 +1066,6 @@ mod tests {
             mode_gen: Arc::new(AtomicU32::new(0)),
             frames_dropped: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             unsustainable_pin_kbps: Arc::new(AtomicU32::new(0)),
-            abr_seed: None,
-            abr_memory: Arc::new(Mutex::new(Default::default())),
             fec_recovered: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             bitrate_ack: Arc::new(Mutex::new(std::collections::VecDeque::new())),
             recovery_kf: Arc::new(AtomicU32::new(0)),

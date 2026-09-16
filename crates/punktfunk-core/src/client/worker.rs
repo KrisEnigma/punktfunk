@@ -89,12 +89,6 @@ pub(crate) struct WorkerArgs {
     pub(crate) frames_dropped: Arc<AtomicU64>,
     pub(crate) fec_recovered: Arc<AtomicU64>,
     pub(crate) unsustainable_pin_kbps: Arc<AtomicU32>,
-    /// What the previous Automatic session on this host proved; `None` = first
-    /// session, or an embedder that keeps no per-host state.
-    pub(crate) abr_seed: Option<crate::abr::AbrMemory>,
-    /// What this session has proved so far, republished every report window so
-    /// any teardown path leaves the embedder a current value.
-    pub(crate) abr_memory: Arc<Mutex<crate::abr::AbrMemory>>,
     /// Pump mic task counts wire sends and stale-shed drops; the producer counts
     /// queue-full drops.
     pub(crate) mic_stats: Arc<MicUplinkCounters>,

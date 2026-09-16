@@ -2593,9 +2593,6 @@ unsafe fn connect_ex_impl(
             pin,
             identity,
             std::time::Duration::from_millis(timeout_ms as u64),
-            // No ABR memory over the C ABI: these embedders keep their host list on the
-            // platform side, so Automatic starts at the host's echo here.
-            None,
             // No abort switch: connect is blocking with nothing to poll.
             None,
         ) {

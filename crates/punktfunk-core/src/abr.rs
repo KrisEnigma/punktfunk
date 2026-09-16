@@ -15,11 +15,9 @@
 //! similar decode-driven backoffs latch `decode_cap_kbps`, and so does decode
 //! headroom on a clean window (park at 80 % of the frame budget, retreat a
 //! notch at 90 %, each step kept only if the decoder's latency follows the
-//! rate). Both re-probe on [`CAP_REPROBE_WINDOWS_MIN`]. Climbs need
-//! utilization (delivered ≈ target) and stay within ×1.5 of the proven mark.
-//!
-//! [`AbrMemory`] carries that mark and the congestion wall to the next session
-//! on this host, so a thin link is not re-found. Tests pin the contract.
+//! rate). Both re-probe on [`CAP_REPROBE_WINDOWS_MIN`]. Climbs require
+//! utilization (delivered ≈ target) and stay within ×1.5 of the windowed
+//! proven mark. Tests in this module pin the contract.
 
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
@@ -103,21 +101,6 @@ const UTILIZATION_DEN: u64 = 4;
 /// `proven ≥ ¾ × current`, so the two gates cannot deadlock.
 const PROVEN_HEADROOM_NUM: u32 = 3;
 const PROVEN_HEADROOM_DEN: u32 = 2;
-/// Headroom over a remembered proven rate at bring-up (+10 %). The last
-/// session proved that rate carried video, not that it was the ceiling.
-const PROVEN_START_NUM: u32 = 11;
-const PROVEN_START_DEN: u32 = 10;
-/// Ordinary additive climb (+6.25 %) and the near-wall one (+2 %). Below
-/// [`WALL_NEAR_PCT`] of a remembered wall the step is the ordinary one.
-const CLIMB_STEP_DIV: u32 = 16;
-const WALL_STEP_DIV: u32 = 50;
-const WALL_NEAR_PCT: u32 = 85;
-/// Clean loaded windows above a remembered wall before it is forgotten. One
-/// can be a lull; the wall costs half the climb rate while it stands.
-const WALL_CLEAN_PROBES_TO_FORGET: u32 = 2;
-/// Windows a wall may go unconfirmed before it is raised 10 % (~10 min at
-/// 750 ms). Links do get better, and nothing else ever lifts a wall upward.
-const WALL_STALE_WINDOWS: u32 = 800;
 /// Host-encode rise (`0xCF` `encode_us`) that marks the encoder past its
 /// compute knee. Relative, not absolute: an escalated host inflates
 /// `encode_us` by ~a frame of retrieve-queue. 4 ms ≈ half a 120 Hz frame
@@ -327,28 +310,6 @@ impl From<Option<u32>> for WindowActivity {
     }
 }
 
-/// What one Automatic session on a host leaves for the next one.
-///
-/// The embedder persists it per host and hands it back at connect. Every
-/// field is `0` for "not known" — an absent memory and a zeroed one behave
-/// the same. `echo_kbps` is the guard: a host whose operator changed the
-/// Automatic default answers a different echo, and the rest is then stale.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct AbrMemory {
-    /// Highest clean delivered rate the session proved.
-    pub proven_kbps: u32,
-    /// Lowest rate a loss- or queue-driven backoff started from.
-    pub wall_kbps: u32,
-    /// The host's `Welcome` echo these were learned under.
-    pub echo_kbps: u32,
-    /// The negotiated codec they were learned under. Stamped and matched by the
-    /// pump; the controller never reads it.
-    pub codec: u8,
-    /// Age when handed in. Logged, never arithmetic; `0` on the way out —
-    /// the embedder owns the clock.
-    pub age_secs: u64,
-}
-
 /// One decision per report window; `Some(kbps)` = send a [`crate::quic::SetBitrate`].
 pub(crate) struct BitrateController {
     /// `false` = permanently off (explicit bitrate, old host, or ack silence).
@@ -432,20 +393,6 @@ pub(crate) struct BitrateController {
     proven_cur_kbps: u32,
     proven_prev_kbps: u32,
     proven_bucket_windows: u32,
-    /// Lowest rate a loss/queue backoff started from, remembered across
-    /// sessions. Not a cap: it only makes the climb near it gentle.
-    wall_kbps: Option<u32>,
-    /// Windows since the wall was last confirmed ([`WALL_STALE_WINDOWS`]).
-    wall_idle_windows: u32,
-    /// Consecutive clean loaded windows above the wall
-    /// ([`WALL_CLEAN_PROBES_TO_FORGET`] forget it).
-    wall_clean_probes: u32,
-    /// Rate to ask for before the first window; `None` = ride the host's echo.
-    /// Taken by [`bring_up`](Self::bring_up).
-    bring_up_kbps: Option<u32>,
-    /// The `Welcome` echo this session started at, carried into the memory so
-    /// the next one can tell an operator's changed default from a stale value.
-    echo_kbps: u32,
     /// Consecutive fully-idle windows. First active window after
     /// [`IDLE_WINDOWS_TO_REARM`] re-arms slow start. Empty windows do not count.
     idle_windows: u32,
@@ -513,11 +460,6 @@ impl BitrateController {
             proven_cur_kbps: 0,
             proven_prev_kbps: 0,
             proven_bucket_windows: 0,
-            wall_kbps: None,
-            wall_idle_windows: 0,
-            wall_clean_probes: 0,
-            bring_up_kbps: None,
-            echo_kbps: start_kbps,
             idle_windows: 0,
             low_rate_warned: false,
             bad_windows: 0,
@@ -526,82 +468,6 @@ impl BitrateController {
             unacked: 0,
             ceiling_ask_kbps: 0,
         }
-    }
-
-    /// [`new`](Self::new) seeded from the previous session on this host.
-    pub(crate) fn with_memory(start_kbps: u32, cap_kbps: u32, memory: Option<AbrMemory>) -> Self {
-        let mut c = Self::new(start_kbps, cap_kbps);
-        c.adopt(memory);
-        c
-    }
-
-    /// Take the previous session's marks, or drop them.
-    ///
-    /// The echo is the guard: a host answering a different Automatic default
-    /// is a host whose operator changed it, and everything learned under the
-    /// old one describes a different encoder. The wall bounds the start as
-    /// well as the climb — it is the rate that choked — and it ends slow
-    /// start, because doubling from a known-good rate is the overshoot the
-    /// memory exists to avoid. A user's limit is already in `ceiling_kbps`,
-    /// so the seed cannot start above a rate they capped.
-    fn adopt(&mut self, memory: Option<AbrMemory>) {
-        let Some(m) = memory.filter(|m| self.enabled && m.echo_kbps == self.echo_kbps) else {
-            if let Some(m) = memory.filter(|_| self.enabled) {
-                tracing::info!(
-                    host_echo_kbps = self.echo_kbps,
-                    learned_under_kbps = m.echo_kbps,
-                    "adaptive bitrate: this host answers a different default — dropping what \
-                     the last session learned"
-                );
-            }
-            return;
-        };
-        self.wall_kbps = (m.wall_kbps > 0).then_some(m.wall_kbps);
-        if m.proven_kbps == 0 {
-            return;
-        }
-        let want = (m.proven_kbps.saturating_mul(PROVEN_START_NUM) / PROVEN_START_DEN)
-            .min(self.wall_kbps.unwrap_or(u32::MAX))
-            .clamp(self.floor_kbps, self.ceiling_kbps);
-        self.probing = self.wall_kbps.is_none();
-        self.bring_up_kbps = (want < self.echo_kbps).then_some(want);
-        tracing::info!(
-            start_kbps = want,
-            proven_kbps = m.proven_kbps,
-            proven_age_secs = m.age_secs,
-            wall_kbps = m.wall_kbps,
-            host_echo_kbps = self.echo_kbps,
-            "adaptive bitrate: starting from what this host proved last time"
-        );
-    }
-
-    /// The rate to ask for before the first window; `None` = ride the echo.
-    ///
-    /// Sending it at bring-up rather than at the first window is the point:
-    /// 750 ms of overshoot fills the path queue, and draining that queue costs
-    /// more than the overshoot did. Asked once.
-    pub(crate) fn bring_up(&mut self, now: Instant) -> Option<u32> {
-        let kbps = self.bring_up_kbps.take()?;
-        self.request(kbps, now)
-    }
-
-    /// What this session leaves for the next one on this host. `age_secs` is
-    /// the embedder's to stamp.
-    pub(crate) fn memory(&self) -> AbrMemory {
-        AbrMemory {
-            proven_kbps: self.proven(),
-            wall_kbps: self.wall_kbps.unwrap_or(0),
-            echo_kbps: self.echo_kbps,
-            codec: 0,
-            age_secs: 0,
-        }
-    }
-
-    /// Within [`WALL_NEAR_PCT`] of a remembered wall, where the climb is gentle.
-    fn near_wall(&self) -> bool {
-        self.wall_kbps.is_some_and(|w| {
-            u64::from(self.current_kbps) * 100 >= u64::from(w) * u64::from(WALL_NEAR_PCT)
-        })
     }
 
     /// Raise the climb ceiling to a measured link capacity (caller already
@@ -891,9 +757,7 @@ impl BitrateController {
     /// Drop mode-scoped learned state. Encoder/decoder knees and rolling
     /// baselines are properties of the mode; a baseline from the old mode is a
     /// floor the new one clears on the first window. Probe-measured
-    /// `ceiling_kbps` (a link property) survives. Proven throughput and the
-    /// remembered wall re-earn: the new mode spends its bits differently, so
-    /// the rate the old one choked at describes nothing here.
+    /// `ceiling_kbps` (a link property) survives. Proven throughput re-earns.
     pub(crate) fn on_mode_switch(&mut self) {
         self.host_cap_kbps = None;
         self.short_acks = 0;
@@ -924,9 +788,6 @@ impl BitrateController {
         self.proven_cur_kbps = 0;
         self.proven_prev_kbps = 0;
         self.proven_bucket_windows = 0;
-        self.wall_kbps = None;
-        self.wall_idle_windows = 0;
-        self.wall_clean_probes = 0;
         self.idle_windows = 0;
     }
 
@@ -1145,42 +1006,6 @@ impl BitrateController {
                 }
             }
         }
-        // Remembered wall. Two clean loaded windows above it forget it (a
-        // neighbour's microwave is not a link property); ~10 minutes without
-        // meeting it raise it 10 %. Above the ceiling it is unreachable, so it
-        // stops being a wall.
-        if let Some(wall) = self.wall_kbps {
-            if bad {
-                self.wall_clean_probes = 0;
-            } else if !quiet && self.current_kbps > wall {
-                self.wall_clean_probes += 1;
-                if self.wall_clean_probes >= WALL_CLEAN_PROBES_TO_FORGET {
-                    tracing::info!(
-                        wall_kbps = wall,
-                        at_kbps = self.current_kbps,
-                        "adaptive bitrate: clean above the remembered wall — forgetting it"
-                    );
-                    self.wall_kbps = None;
-                    self.wall_clean_probes = 0;
-                }
-            }
-        }
-        if let Some(wall) = self.wall_kbps {
-            self.wall_idle_windows += 1;
-            if self.wall_idle_windows >= WALL_STALE_WINDOWS {
-                self.wall_idle_windows = 0;
-                let raised = wall.saturating_add(wall / 10);
-                // Past the ceiling nothing can meet it again, so it is not a wall.
-                self.wall_kbps = (raised < self.ceiling_kbps).then_some(raised);
-                tracing::info!(
-                    from_kbps = wall,
-                    to_kbps = raised,
-                    ceiling_kbps = self.ceiling_kbps,
-                    kept = self.wall_kbps.is_some(),
-                    "adaptive bitrate: the remembered wall has gone unmet — raising it"
-                );
-            }
-        }
         let cooled = self
             .last_change
             .is_none_or(|t| now.duration_since(t) >= CHANGE_COOLDOWN);
@@ -1198,22 +1023,6 @@ impl BitrateController {
                 || self.streak_decode_windows >= BAD_WINDOWS_TO_DECREASE
                 || (recovery_kf >= RECOVERY_KF_BAD && loss_ppm < HEAVY_LOSS_PPM)
                 || (flushed && (decode_bad || decode_mean_us.is_none()));
-            // Congestion wall: the lowest rate loss or a growing queue chokes
-            // at. Same guards as the decode knee — a drain step sits at ×0.7 of
-            // the real wall, and a starved window measures the interruption.
-            if (loss_ppm >= HEAVY_LOSS_PPM || owd_bad) && self.climb_since_backoff && !starved {
-                let rate = self.current_kbps;
-                if self.wall_kbps.is_none_or(|w| rate < w) {
-                    tracing::info!(
-                        wall_kbps = rate,
-                        loss_ppm,
-                        "adaptive bitrate: congestion wall marked — the climb turns gentle here"
-                    );
-                    self.wall_kbps = Some(rate);
-                }
-                self.wall_idle_windows = 0;
-                self.wall_clean_probes = 0;
-            }
             if !self.climb_since_backoff {
                 // Drain after ×0.7 (~100 ms ack): not a knee sample. Neither
                 // latch nor erase the reference.
@@ -1401,16 +1210,8 @@ impl BitrateController {
                 self.clean_windows = 0;
                 return self.request(next, now);
             }
-            // Near a remembered wall, creep: +2 % after twice the clean run.
-            // The wall is where this link chokes, and a +6 % step over it buys
-            // a ×0.7 plus the drain that follows.
-            let (step_div, clean_needed) = if self.near_wall() {
-                (WALL_STEP_DIV, CLEAN_WINDOWS_TO_INCREASE * 2)
-            } else {
-                (CLIMB_STEP_DIV, CLEAN_WINDOWS_TO_INCREASE)
-            };
-            if self.clean_windows >= clean_needed {
-                let next = (self.current_kbps + self.current_kbps / step_div + 1).min(cap);
+            if self.clean_windows >= CLEAN_WINDOWS_TO_INCREASE {
+                let next = (self.current_kbps + self.current_kbps / 16 + 1).min(cap);
                 self.clean_windows = 0;
                 return self.request(next, now);
             }
@@ -4545,203 +4346,5 @@ mod tests {
             }
         }
         assert_eq!(c.decode_cap_kbps, None);
-    }
-
-    /// The reporter's host: 20 Mbps echoed onto a ~11 Mbps link, walled at 12.
-    fn remembered() -> AbrMemory {
-        AbrMemory {
-            proven_kbps: 11_000,
-            wall_kbps: 12_000,
-            echo_kbps: 20_000,
-            codec: crate::quic::CODEC_HEVC,
-            age_secs: 3_600,
-        }
-    }
-
-    #[test]
-    fn a_remembered_rate_sets_the_start_at_bring_up() {
-        let mut c = BitrateController::with_memory(20_000, 0, Some(remembered()));
-        let start = Instant::now();
-        // proven + 10 %, held at the wall, asked before the first window — once.
-        assert_eq!(c.bring_up(start), Some(12_000));
-        assert_eq!(c.bring_up(start), None);
-        // A known wall means the capacity is known: doubling would re-find it.
-        assert!(!c.probing);
-    }
-
-    #[test]
-    fn a_remembered_rate_never_starts_above_the_host_echo() {
-        // Ethernet last time, and the operator has since dropped the host default.
-        let m = AbrMemory {
-            proven_kbps: 90_000,
-            echo_kbps: 8_000,
-            ..remembered()
-        };
-        let mut c = BitrateController::with_memory(8_000, 0, Some(m));
-        assert_eq!(c.bring_up(Instant::now()), None);
-        assert_eq!(c.current_kbps, 8_000);
-    }
-
-    #[test]
-    fn a_users_limit_bounds_the_remembered_start() {
-        // Proven 18 Mbps last time, but the user has since asked for at most 12.
-        let m = AbrMemory {
-            proven_kbps: 18_000,
-            wall_kbps: 0,
-            ..remembered()
-        };
-        let mut c = BitrateController::with_memory(20_000, 12_000, Some(m));
-        // Not proven x 1.1 = 19 800: the limit is the ceiling, and bring-up
-        // respects it rather than leaving the clamp-down a window to undo.
-        assert_eq!(c.bring_up(Instant::now()), Some(12_000));
-    }
-
-    #[test]
-    fn a_different_host_echo_drops_the_memory() {
-        let mut c = BitrateController::with_memory(30_000, 0, Some(remembered()));
-        assert_eq!(c.bring_up(Instant::now()), None);
-        assert_eq!(c.wall_kbps, None);
-        assert!(
-            c.probing,
-            "an operator's new default leaves nothing learned"
-        );
-    }
-
-    #[test]
-    fn without_a_memory_nothing_changes() {
-        let (mut seeded, mut plain) = (
-            BitrateController::with_memory(20_000, 0, None),
-            BitrateController::new(20_000, 0),
-        );
-        let start = Instant::now();
-        assert_eq!(seeded.bring_up(start), None);
-        assert_eq!(seeded.wall_kbps, None);
-        assert!(seeded.probing);
-        // Same first verdict from the same windows.
-        assert_eq!(
-            run_clean(&mut seeded, start, 0, 4),
-            run_clean(&mut plain, start, 0, 4)
-        );
-    }
-
-    #[test]
-    fn the_climb_creeps_near_a_remembered_wall() {
-        let start = Instant::now();
-        let mut near = BitrateController::with_memory(20_000, 0, Some(remembered()));
-        assert_eq!(near.bring_up(start), Some(12_000));
-        near.on_ack(12_000);
-        // The ordinary clean run buys nothing this close to the wall.
-        assert_eq!(run_clean(&mut near, start, 3, 6), None);
-        assert_eq!(run_clean(&mut near, start, 9, 6), Some(12_241)); // +2 %
-
-        // Same rate and the same headroom, with no wall to respect.
-        let mut open = BitrateController::new(20_000, 0);
-        open.probing = false; // slow start doubles; this test is about the step
-        open.on_ack(12_000);
-        assert_eq!(run_clean(&mut open, start, 3, 6), Some(12_751)); // +6 %
-    }
-
-    #[test]
-    fn two_clean_windows_above_the_wall_forget_it() {
-        let start = Instant::now();
-        let mut c = BitrateController::with_memory(20_000, 0, Some(remembered()));
-        assert_eq!(c.bring_up(start), Some(12_000));
-        c.on_ack(12_000);
-        // The creep is what carries the rate over the wall in the first place.
-        let over = run_clean(&mut c, start, 3, 12).expect("a creep above the wall");
-        assert_eq!(over, 12_241);
-        c.on_ack(over);
-        assert_eq!(run_clean(&mut c, start, 20, 1), None);
-        assert_eq!(c.wall_kbps, Some(12_000), "one clean window can be a lull");
-        assert_eq!(run_clean(&mut c, start, 21, 1), None);
-        assert_eq!(c.wall_kbps, None);
-    }
-
-    #[test]
-    fn a_wall_that_is_never_met_again_is_raised() {
-        let start = Instant::now();
-        let m = AbrMemory {
-            proven_kbps: 5_000,
-            ..remembered()
-        };
-        let mut c = BitrateController::with_memory(20_000, 0, Some(m));
-        assert_eq!(c.bring_up(start), Some(5_500));
-        c.on_ack(5_500);
-        // Still windows: the clock is time, and nothing here reaches the wall.
-        for i in 0..WALL_STALE_WINDOWS {
-            c.on_window(
-                ticks(start, i),
-                0,
-                0,
-                None,
-                None,
-                None,
-                0,
-                false,
-                0,
-                Some(0),
-            );
-        }
-        assert_eq!(c.wall_kbps, Some(13_200));
-    }
-
-    #[test]
-    fn a_loss_backoff_marks_the_wall_and_a_drain_does_not() {
-        let start = Instant::now();
-        let mut c = BitrateController::new(20_000, 0);
-        let bad = |c: &mut BitrateController, t: u32| {
-            c.on_window(
-                ticks(start, t),
-                0,
-                25_000,
-                None,
-                None,
-                None,
-                1_000_000,
-                false,
-                0,
-                None,
-            )
-        };
-        assert_eq!(bad(&mut c, 0), None);
-        assert_eq!(bad(&mut c, 1), Some(14_000));
-        assert_eq!(c.memory().wall_kbps, 20_000);
-        c.on_ack(14_000);
-        // Draining the same choke sits at ×0.7 of the wall — not a second sample.
-        assert_eq!(bad(&mut c, 6), None);
-        assert_eq!(bad(&mut c, 7), Some(9_800));
-        assert_eq!(c.memory().wall_kbps, 20_000);
-    }
-
-    #[test]
-    fn a_mode_switch_drops_the_wall_and_the_proven_mark() {
-        let start = Instant::now();
-        let mut c = BitrateController::with_memory(20_000, 0, Some(remembered()));
-        assert_eq!(c.bring_up(start), Some(12_000));
-        c.on_ack(12_000);
-        c.on_window(
-            ticks(start, 3),
-            0,
-            0,
-            Some(10_000),
-            None,
-            None,
-            9_000,
-            false,
-            0,
-            None,
-        );
-        assert_eq!(c.memory().proven_kbps, 9_000);
-        c.on_mode_switch();
-        assert_eq!(
-            c.memory(),
-            AbrMemory {
-                proven_kbps: 0,
-                wall_kbps: 0,
-                echo_kbps: 20_000,
-                codec: 0,
-                age_secs: 0,
-            }
-        );
     }
 }
