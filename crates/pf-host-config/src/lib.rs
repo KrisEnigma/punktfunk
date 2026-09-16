@@ -16,8 +16,8 @@ pub mod registry;
 mod store;
 
 pub use store::{
-    mark_started, pin, reload, restart_pending, save, snapshot, store_path, Resolved, SaveError,
-    Snapshot, Source,
+    knob, mark_started, pin, reload, restart_pending, save, snapshot, store_path, Resolved,
+    SaveError, Snapshot, Source,
 };
 
 /// Explicit-off for a `PUNKTFUNK_*` var: trimmed, case-insensitive
@@ -26,13 +26,17 @@ pub use store::{
 /// `"false"` as ON.
 ///
 /// Not `pf-zerocopy`'s grammar (`1|true|yes|on` on, everything else off).
+///
+/// Reads through [`knob`], so a registry row's console value counts as set.
 pub fn env_on(name: &str) -> Option<bool> {
-    std::env::var(name).ok().map(|s| {
-        !matches!(
-            s.trim().to_ascii_lowercase().as_str(),
-            "0" | "false" | "off" | "no"
-        )
-    })
+    knob(name).map(|s| is_on(&s))
+}
+
+fn is_on(s: &str) -> bool {
+    !matches!(
+        s.trim().to_ascii_lowercase().as_str(),
+        "0" | "false" | "off" | "no"
+    )
 }
 
 /// Which render endpoint the loopback captures (registry row `audio_output_mode`).
@@ -206,8 +210,6 @@ pub struct HostConfig {
     /// `PUNKTFUNK_RENDER_ADAPTER` — discrete render-GPU pin by description substring.
     /// `Some` even when empty: empty still counts as set for presence checks.
     pub render_adapter: Option<String>,
-    /// `PUNKTFUNK_IDD_DEPTH` — IDD-push pipeline depth. Default 2; the call site clamps to its `OUT_RING`.
-    pub idd_depth: usize,
     /// `PUNKTFUNK_ZEROCOPY` — Windows D3D11 zero-copy encode input. `None` defers to
     /// the per-vendor default (AMF on, QSV off).
     pub zerocopy: Option<bool>,
@@ -262,9 +264,6 @@ pub struct HostConfig {
     pub compositor: Option<String>,
     /// `PUNKTFUNK_GAMEPAD` — virtual-pad backend preference, fed to `pick_gamepad`.
     pub gamepad: Option<String>,
-    /// `PUNKTFUNK_VDISPLAY` — Windows virtual-display backend. IddCx is the only
-    /// backend; kept for shipped `host.env`.
-    pub vdisplay: Option<String>,
     /// `PUNKTFUNK_GAMESCOPE_STEAM` — force `--steam` on every bare headless gamescope
     /// launch. Steam titles already pass it; this is for non-Steam. Managed
     /// gamescope-session-plus/SteamOS sessions ignore it.
@@ -325,12 +324,14 @@ pub struct HostConfig {
 }
 
 impl HostConfig {
-    /// The env-only fields. Registry fields stay default until [`Self::apply_settings`].
-    fn from_env() -> Self {
+    /// Fields parsed from their env spelling. Each read goes through the rows, so a field whose
+    /// env name has a registry row also sees the console's value. The typed rows are
+    /// [`Self::apply_settings`].
+    fn from_rows(rows: &[Resolved]) -> Self {
+        let val = |k: &str| store::knob_in(rows, k);
         // Presence, not value.
-        let flag = |k: &str| std::env::var_os(k).is_some();
-        // `Some` (possibly empty) when set with valid UTF-8.
-        let val = |k: &str| std::env::var(k).ok();
+        let flag = |k: &str| val(k).is_some();
+        let on = |k: &str| val(k).map(|s| is_on(&s));
         Self {
             // Blank-is-unset: `PUNKTFUNK_MGMT_BIND=` means default.
             mgmt_bind: val("PUNKTFUNK_MGMT_BIND")
@@ -351,16 +352,13 @@ impl HostConfig {
             webtransport_port: val("PUNKTFUNK_WEBTRANSPORT_PORT")
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty()),
-            encoder_pref: encoder_pref(),
+            encoder_pref: encoder_pref(val("PUNKTFUNK_ENCODER")),
             render_adapter: val("PUNKTFUNK_RENDER_ADAPTER"),
-            idd_depth: val("PUNKTFUNK_IDD_DEPTH")
-                .and_then(|s| s.parse::<usize>().ok())
-                .unwrap_or(2),
-            zerocopy: env_on("PUNKTFUNK_ZEROCOPY"),
-            chacha20: env_on("PUNKTFUNK_CHACHA20").unwrap_or(true),
+            zerocopy: on("PUNKTFUNK_ZEROCOPY"),
+            chacha20: on("PUNKTFUNK_CHACHA20").unwrap_or(true),
             audio_quality: val("PUNKTFUNK_AUDIO_QUALITY").map(|s| s.trim().to_lowercase()),
-            audio_redundancy: env_on("PUNKTFUNK_AUDIO_REDUNDANCY"),
-            audio_hires: env_on("PUNKTFUNK_AUDIO_HIRES").unwrap_or(true),
+            audio_redundancy: on("PUNKTFUNK_AUDIO_REDUNDANCY"),
+            audio_hires: on("PUNKTFUNK_AUDIO_HIRES").unwrap_or(true),
             perf: flag("PUNKTFUNK_PERF"),
             // Defaults to `virtual` — the flagship per-client virtual output. It used to be unset,
             // which fell through to the synthetic test pattern: fine for a dev box that always has
@@ -377,7 +375,6 @@ impl HostConfig {
                 .filter(|s| !s.is_empty()),
             compositor: val("PUNKTFUNK_COMPOSITOR"),
             gamepad: val("PUNKTFUNK_GAMEPAD"),
-            vdisplay: val("PUNKTFUNK_VDISPLAY"),
             gamescope_steam: val("PUNKTFUNK_GAMESCOPE_STEAM").is_some_and(|s| {
                 matches!(
                     s.trim().to_ascii_lowercase().as_str(),
@@ -390,14 +387,14 @@ impl HostConfig {
                     "1" | "true" | "yes" | "on"
                 )
             }),
-            gamescope_splash: env_on("PUNKTFUNK_GAMESCOPE_SPLASH").unwrap_or(true),
-            gamescope_isolate: env_on("PUNKTFUNK_GAMESCOPE_ISOLATE").unwrap_or(true),
-            gamescope_hdr: env_on("PUNKTFUNK_GAMESCOPE_HDR").unwrap_or(true),
+            gamescope_splash: on("PUNKTFUNK_GAMESCOPE_SPLASH").unwrap_or(true),
+            gamescope_isolate: on("PUNKTFUNK_GAMESCOPE_ISOLATE").unwrap_or(true),
+            gamescope_hdr: on("PUNKTFUNK_GAMESCOPE_HDR").unwrap_or(true),
             gamescope_sdr_nits: val("PUNKTFUNK_GAMESCOPE_SDR_NITS")
                 .and_then(|s| s.trim().parse::<u32>().ok())
                 .filter(|n| (1..=10_000).contains(n)),
             // Unset is AUTO; `=0` is stock gamescope; `=1` is force.
-            gamescope_bind: env_on("PUNKTFUNK_GAMESCOPE_BIND"),
+            gamescope_bind: on("PUNKTFUNK_GAMESCOPE_BIND"),
             // Junk entries are dropped; this only widens a menu.
             gamescope_refresh_rates: parse_refresh_rates(
                 val("PUNKTFUNK_GAMESCOPE_REFRESH_RATES").as_deref(),
@@ -478,10 +475,8 @@ impl HostConfig {
 
 /// `PUNKTFUNK_ENCODER`, lower-cased. On Windows a software pin becomes `auto`: the driver
 /// encodes, so a session opened on it would pass the handshake and die at the encoder open.
-fn encoder_pref() -> String {
-    let pref = std::env::var("PUNKTFUNK_ENCODER")
-        .unwrap_or_default()
-        .to_ascii_lowercase();
+fn encoder_pref(raw: Option<String>) -> String {
+    let pref = raw.unwrap_or_default().to_ascii_lowercase();
     if cfg!(windows) && matches!(pref.as_str(), "sw" | "software" | "openh264") {
         eprintln!(
             "punktfunk: PUNKTFUNK_ENCODER={pref:?} — Windows has no software encoder since the \

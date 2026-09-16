@@ -118,6 +118,44 @@ pub fn mark_started() {
     let _ = STARTED.set(snapshot());
 }
 
+/// A raw `PUNKTFUNK_*` read that also sees the console. For a registry row: the env value when
+/// env set the row, else the console's value spelled as the env var would be, else `None`, so a
+/// reader keeps its own default and its own grammar. Any other name reads the environment.
+pub fn knob(name: &str) -> Option<String> {
+    knob_in(&snapshot().settings, name)
+}
+
+/// [`knob`] against given rows. The snapshot build uses this; [`knob`] would deadlock there.
+pub(crate) fn knob_in(rows: &[Resolved], name: &str) -> Option<String> {
+    let Some(r) = rows.iter().find(|r| r.setting.env == name) else {
+        return std::env::var(name).ok();
+    };
+    // An env value keeps its own spelling; an alias that selects a value stands for it.
+    if r.source == Source::Env {
+        let origin = r.origin?;
+        return match r.setting.aliases.iter().find(|a| a.name == origin) {
+            Some(registry::Alias { value: Some(v), .. }) => Some(v.to_string()),
+            _ => std::env::var(origin).ok(),
+        };
+    }
+    if r.source == Source::Default || r.value == r.setting.default.to_value() {
+        return None;
+    }
+    Some(match &r.value {
+        Value::Bool(b) => (if *b { "1" } else { "0" }).to_string(),
+        // Tri-state rows name their states `auto`/`on`/`off`; readers take `1`/`0`.
+        Value::String(s) if s == "on" => "1".to_string(),
+        Value::String(s) if s == "off" => "0".to_string(),
+        Value::String(s) => s.clone(),
+        Value::Array(items) => items
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>()
+            .join(","),
+        other => other.to_string(),
+    })
+}
+
 /// Restart-class rows whose value differs from what the planes started with.
 pub fn restart_pending() -> Vec<&'static str> {
     let Some(start) = STARTED.get() else {
@@ -218,7 +256,7 @@ fn build(
     pins: &[Pin],
 ) -> Snapshot {
     let settings = resolve(env, file, pins);
-    let mut config = HostConfig::from_env();
+    let mut config = HostConfig::from_rows(&settings);
     config.apply_settings(&settings);
     Snapshot { config, settings }
 }
@@ -433,6 +471,34 @@ mod tests {
         assert!(load_file(&path).is_empty());
         assert!(load_file(&dir.join("absent.json")).is_empty());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn knobs_spell_the_console_value_and_leave_defaults_to_the_reader() {
+        let file = obj(json!({
+            "max_fps": 60,
+            "ten_bit": false,
+            "gamestream": false,
+            "audio_voice_apps": ["discord", "mumble"],
+        }));
+        let rows = resolve(&env_of(&[]), &file, &[]);
+        assert_eq!(knob_in(&rows, "PUNKTFUNK_MAX_FPS").as_deref(), Some("60"));
+        assert_eq!(knob_in(&rows, "PUNKTFUNK_10BIT").as_deref(), Some("0"));
+        assert_eq!(
+            knob_in(&rows, "PUNKTFUNK_GAMESTREAM"),
+            None,
+            "a stored default is still the reader's default"
+        );
+        assert_eq!(
+            knob_in(&rows, "PUNKTFUNK_AUDIO_VOICE_APPS").as_deref(),
+            Some("discord,mumble")
+        );
+        assert_eq!(
+            knob_in(&rows, "PUNKTFUNK_444"),
+            None,
+            "at its default the reader decides"
+        );
+        assert_eq!(knob_in(&rows, "PUNKTFUNK_NOT_A_KNOB"), None);
     }
 
     #[test]

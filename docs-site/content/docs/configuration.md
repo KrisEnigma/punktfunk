@@ -47,12 +47,47 @@ setting back to the console.
 | Browser streaming | `PUNKTFUNK_WEBTRANSPORT` | `on` · `off` | `off` | after a restart |
 | Shared clipboard (Linux, Windows) | `PUNKTFUNK_CLIPBOARD` | `off` · `text` · `files` | `off` | next session |
 | Host name | `PUNKTFUNK_HOST_NAME` | text, up to 63 characters | — | after a restart |
+| GameStream encryption | `PUNKTFUNK_GAMESTREAM_ENCRYPT` | `supported` · `video` · `off` · `required` | `supported` | after a restart |
+| Moonlight adaptive bitrate | `PUNKTFUNK_GAMESTREAM_ADAPT` | `on` · `off` | `on` | after a restart |
+| ChaCha20 cipher | `PUNKTFUNK_CHACHA20` | `on` · `off` | `on` | next session |
+| Browser origins | `PUNKTFUNK_WEBTRANSPORT_ORIGINS` | comma list | built-in list | after a restart |
+| Encoder | `PUNKTFUNK_ENCODER` | `auto` · `nvenc` · `vaapi` · `vulkan` · `pyrowave` · `software` | `auto` | next session |
 | 10-bit and HDR | `PUNKTFUNK_10BIT` | `on` · `off` | `on` | next session |
 | Full color 4:4:4 | `PUNKTFUNK_444` | `on` · `off` | `on` | next session |
 | Game frame limit (Linux) | `PUNKTFUNK_MAX_FPS` | 0–240 fps | `0` | next session |
+| Cursor capture (Linux) | `PUNKTFUNK_PORTAL_CURSOR_MODE` | `auto` · `embedded` · `metadata` · `hidden` | `auto` | next session |
+| Vulkan encoding (Linux) | `PUNKTFUNK_VULKAN_ENCODE` | `on` · `off` | `on` | next session |
+| Direct capture (Linux) | `PUNKTFUNK_DIRECT_CAPTURE` | `on` · `off` | `on` | next session |
+| On-demand capture (Linux) | `PUNKTFUNK_LAZY_CAPTURE` | `on` · `off` | `on` | next session |
+| KWin capture pacing (Linux) | `PUNKTFUNK_KWIN_PACED` | `on` · `off` | `off` | next session |
+| PyroWave bitrate cap | `PUNKTFUNK_PYROWAVE_MAX_MBPS` | 0–10000 Mbps | `0` | next session |
 | Where audio plays (Linux, Windows) | `PUNKTFUNK_AUDIO_OUTPUT_MODE` | `client_only` · `host_and_client` · `follow_default` | `client_only` | next session |
+| Audio quality | `PUNKTFUNK_AUDIO_QUALITY` | `low` · `standard` · `high` | `high` | next session |
+| Lossless audio | `PUNKTFUNK_AUDIO_HIRES` | `on` · `off` | `on` | next session |
 | Voice chat (Linux) | `PUNKTFUNK_AUDIO_VOICE_CHAT` | `stream` · `host` | `stream` | next session |
 | Voice chat apps (Linux) | `PUNKTFUNK_AUDIO_VOICE_APPS` | comma list | built-in list | next session |
+| Controller speaker (Linux, Windows) | `PUNKTFUNK_PAD_AUDIO` | `on` · `off` | `on` | next session |
+| Audio redundancy | `PUNKTFUNK_AUDIO_REDUNDANCY` | `auto` · `on` · `off` | `auto` | next session |
+| Default gamepad (Linux, Windows) | `PUNKTFUNK_GAMEPAD` | `auto` · `xbox360` · `xboxone` · `dualsense` · `dualsenseedge` · `dualshock4` · `steamdeck` · `steamcontroller` · `steamcontroller2` · `switchpro` | `auto` | next session |
+| Pen input (Linux, Windows) | `PUNKTFUNK_PEN` | `on` · `off` | `on` | next session |
+| Steam USB gadget (Linux) | `PUNKTFUNK_STEAM_GADGET` | `auto` · `on` · `off` | `auto` | next session |
+| DualSense over USB/IP (Linux) | `PUNKTFUNK_DUALSENSE_USBIP` | `on` · `off` | `off` | next session |
+| Attach mode (Linux) | `PUNKTFUNK_GAMESCOPE_ATTACH` | `on` · `off` | `off` | next session |
+| Game Mode HDR (Linux) | `PUNKTFUNK_GAMESCOPE_HDR` | `on` · `off` | `on` | next session |
+| Force managed mode (Linux) | `PUNKTFUNK_GAMESCOPE_MANAGED` | `on` · `off` | `off` | next session |
+| Adaptive sync (Linux) | `PUNKTFUNK_GAMESCOPE_VRR` | `on` · `off` | `on` | next session |
+| SDR brightness (Linux) | `PUNKTFUNK_GAMESCOPE_SDR_NITS` | 1–10000 nits | `203` | next session |
+| Extra refresh rates (Linux) | `PUNKTFUNK_GAMESCOPE_REFRESH_RATES` | comma list | built-in list | next session |
+| Steam integration (Linux) | `PUNKTFUNK_GAMESCOPE_STEAM` | `on` · `off` | `off` | next session |
+| Startup splash (Linux) | `PUNKTFUNK_GAMESCOPE_SPLASH` | `on` · `off` | `on` | next session |
+| Per-session isolation (Linux) | `PUNKTFUNK_GAMESCOPE_ISOLATE` | `on` · `off` | `on` | next session |
+| Grab the cursor (Linux) | `PUNKTFUNK_GAMESCOPE_GRAB_CURSOR` | `on` · `off` | `off` | next session |
+| Bind patched gamescope (Linux) | `PUNKTFUNK_GAMESCOPE_BIND` | `auto` · `on` · `off` | `auto` | next session |
+| Follow mode switches (Linux) | `PUNKTFUNK_SESSION_WATCH` | `auto` · `on` · `off` | `auto` | next session |
+| Local discovery | `PUNKTFUNK_MDNS` | `on` · `off` | `on` | after a restart |
+| Disconnect timeout | `PUNKTFUNK_IDLE_TIMEOUT_MS` | 1000–120000 ms | `8000` | after a restart |
+| Check for updates | `PUNKTFUNK_UPDATE_CHECK` | `on` · `off` | `on` | at once |
+| Console updates | `PUNKTFUNK_UPDATE_APPLY` | `on` · `off` | `on` | at once |
 
 ## Session anchors
 
@@ -275,14 +310,13 @@ notes for context.
 | Setting | Values | Meaning |
 |---|---|---|
 | `PUNKTFUNK_FRAME_DRIVEN` | `1` *(default)* · `0` | Wake the encoder when the capture actually delivers a frame, instead of sampling on a fixed tick. On by default on both protocols (a capture backend without an arrival signal keeps the tick regardless); `0` restores the tick everywhere. The tick costs about half a frame interval of latency per frame, so leave this on unless you are bisecting a cadence problem. |
-| `PUNKTFUNK_GS_ADAPT` | `1` *(default)* · `0` | GameStream/Moonlight only: let the host act on the packet loss Moonlight reports — raising error correction as loss appears, winding it back when the link is clean, and easing the bitrate off under sustained loss (recovering as it settles). `0` pins error correction and bitrate at their configured values for the whole session. |
-| `PUNKTFUNK_GS_ENCRYPT` | `1` *(default)* · `video` · `0` | GameStream/Moonlight only: offer per-packet video encryption (`SS_ENC_VIDEO`) and the V2 control-encryption scheme (`SS_ENC_CONTROL_V2`) to clients that support them. **On by default** — the host offers, the client decides; Moonlight generally accepts both, and error correction still recovers lost packets normally. V2 gives the control channel a per-direction nonce, which the older scheme lacks. `video` offers video encryption only, leaving the control channel on the older scheme; `0` turns both offers off (the plaintext video wire earlier versions sent). Audio and the control channel are encrypted either way. |
+| `PUNKTFUNK_GAMESTREAM_ADAPT` (was `PUNKTFUNK_GS_ADAPT`) | `1` *(default)* · `0` | GameStream/Moonlight only: let the host act on the packet loss Moonlight reports — raising error correction as loss appears, winding it back when the link is clean, and easing the bitrate off under sustained loss (recovering as it settles). `0` pins error correction and bitrate at their configured values for the whole session. |
+| `PUNKTFUNK_GAMESTREAM_ENCRYPT` (was `PUNKTFUNK_GS_ENCRYPT`) | `supported` *(default)* · `video` · `off` | GameStream/Moonlight only: offer per-packet video encryption (`SS_ENC_VIDEO`) and the V2 control-encryption scheme (`SS_ENC_CONTROL_V2`) to clients that support them. **On by default** — the host offers, the client decides; Moonlight generally accepts both, and error correction still recovers lost packets normally. V2 gives the control channel a per-direction nonce, which the older scheme lacks. `video` offers video encryption only, leaving the control channel on the older scheme; `0` turns both offers off (the plaintext video wire earlier versions sent). Audio and the control channel are encrypted either way. |
 | `PUNKTFUNK_GSO` | `1` · `0` | UDP segmentation offload on the send path (coalesce a frame's packets into kernel super-buffers) — cuts send CPU ~30%, but its line-rate packet trains can cost delivered throughput on constrained links (measured on a 2.5GbE hop). The default differs by platform. **Windows: on by default** (Send Offload — the lever that gets past ~1 Gbps, since Windows otherwise does one send call per packet); set `0` if a constrained link shows lost throughput. It also latches itself off for the rest of the run the first time the OS/NIC/path rejects an offloaded send. **Linux: off by default** until send pacing spaces the super-buffers; set `1` to opt in (auto-falls back to `sendmmsg` on kernels/paths without support). |
 | `PUNKTFUNK_SPLIT_ENCODE` | `0`/`disable` · `1`/`auto` · `2` · `3` | NVENC N-way split-encode for very high pixel rates (5K@240). `auto` picks automatically above ~1 Gpix/s. H.264 never splits (not applicable per the SDK); on HEVC a *forced* split disables sub-frame readback (mutually unsupported) — set `0` to choose sub-frame instead. |
 | `PUNKTFUNK_NVENC_SUBFRAME` | `0` · `1` | NVENC sub-frame (slice-level) readback for lower latency on sync sessions. Default: on where the GPU supports it (Linux direct NVENC). `0` = never; `1` = force. On HEVC it yields to a forced split-encode (the SDK documents the pair unsupported). |
 | `PUNKTFUNK_NVENC_SPLIT_ARBITRATE` | `1` | Opt-in: let the host change its split-encode decision **live**, mid-session, as the pixel rate moves, instead of only choosing once at session start. Currently wired on the Linux direct-NVENC path. Only interesting alongside `PUNKTFUNK_SPLIT_ENCODE=auto` at very high pixel rates. |
 | `PUNKTFUNK_GPU_PRIORITY_CLASS` | `off` · `normal` · `high` · `realtime` | **(Windows)** GPU scheduling priority for capture/encode under a GPU-saturating game. Default **`realtime`** — the stream's capture and encode preempt the game instead of waiting behind it (the same lever Sunshine and OBS use), which costs the local game some fps by design. Set `high` if NVENC freezes on a HAGS setup with VRAM near-full, or as a last-resort A/B for the log's `METRONOMIC` capture-stall warning — on some AMD boxes that quiets the pattern, but it masks the underlying disturbance rather than fixing it. The vdisplay driver's own raise has the same shape: default realtime, `setx /M PFVD_NO_RT_GPU 1` + device restart disables it. Every capture session logs the resolved posture as `GPU-priority posture for this capture session`. |
-| `PUNKTFUNK_IDD_DEPTH` | `N` (default `2`) | **(Windows)** IDD-push pipeline depth. `1` cuts latency once GPU priority is raised; higher smooths a contended GPU. |
 | `PUNKTFUNK_IDD_ADAPTIVE` | `1` *(default)* · `0` | **(Windows)** The adaptive pipeline-depth machinery: the host walks the depth up under sustained encode overrun and back down when clean. `0` pins the full configured depth **and disables the whole encode-cadence detector with it** — including the "encode behind cadence" ABR climb refusal — so leave it on unless you are deliberately A/B-ing that machinery. |
 | `PYROWAVE_QUEUE_PRIORITY` | `realtime` *(default)* · `high` · `off` | [PyroWave](/docs/pyrowave) sessions only — the *intent*, forwarded to whichever process does the encode. PyroWave encodes on the same GPU shader cores a game uses, so a demanding game can starve it and the frame rate drops. This asks the driver to schedule the encode ahead of the game. `realtime` tries the strongest class and falls back to `high`; `high` asks only for the middle one; `off` disables the request. A driver that refuses simply encodes at normal priority — it can never stop a session starting. Granting the request needs the `CAP_SYS_NICE` capability, which the Linux packages give to `punktfunk-encode-worker` and **never** to `punktfunk-host` — a host holding any capability cannot be identified by KWin and loses desktop streaming entirely. Do not `setcap` the host to "make this work"; see [Running as a service](/docs/running-as-a-service#gpu-scheduling-priority). Set `off` if you see the desktop stutter while streaming. |
 | `PUNKTFUNK_ENCODE_WORKER` | path · `off` | Where the host looks for `punktfunk-encode-worker`, the small capability-carrying helper that owns the priority-elevated [PyroWave](/docs/pyrowave) encode (previous row). Unset, the host looks beside its own binary and then on `PATH`, which is right for every package — set it only when the worker lives somewhere unusual. **NixOS needs it and the module sets it for you:** a file capability cannot live on a read-only nix store path, so the worker is exposed through `security.wrappers` and this points the host at that wrapper. `off` forces the encode back into the host process at default priority — a debug escape hatch, not a tuning knob. Every failure short of that is already handled: a missing binary, a worker that will not start, or one that dies mid-session falls back to encoding in-process with one line in the log, and never drops the session. |

@@ -231,51 +231,143 @@ pub fn find(id: &str) -> Option<&'static Setting> {
 
 const LINUX: &[&str] = &["linux"];
 const LINUX_WINDOWS: &[&str] = &["linux", "windows"];
+const TRI: Kind = Kind::Enum(&["auto", "on", "off"]);
+const TRI_SPELLINGS: &[(&str, &str)] = &[
+    ("1", "on"),
+    ("true", "on"),
+    ("yes", "on"),
+    ("0", "off"),
+    ("false", "off"),
+    ("no", "off"),
+];
+
+#[cfg(target_os = "windows")]
+const ENCODERS: &[&str] = &["auto", "nvenc", "amf", "qsv", "mf"];
+#[cfg(target_os = "windows")]
+const ENCODER_SPELLINGS: &[(&str, &str)] = &[
+    ("hw", "nvenc"),
+    ("nvidia", "nvenc"),
+    ("cuda", "nvenc"),
+    ("amd", "amf"),
+    ("intel", "qsv"),
+    ("mediafoundation", "mf"),
+];
+#[cfg(not(target_os = "windows"))]
+const ENCODERS: &[&str] = &["auto", "nvenc", "vaapi", "vulkan", "pyrowave", "software"];
+#[cfg(not(target_os = "windows"))]
+const ENCODER_SPELLINGS: &[(&str, &str)] = &[
+    ("nvidia", "nvenc"),
+    ("cuda", "nvenc"),
+    ("amd", "vaapi"),
+    ("intel", "vaapi"),
+    ("vaapi_native", "vaapi"),
+    ("vulkan_video", "vulkan"),
+    ("sw", "software"),
+    ("openh264", "software"),
+];
+
+#[cfg(target_os = "windows")]
+const GAMEPADS: &[&str] = &[
+    "auto",
+    "xbox360",
+    "xboxone",
+    "xboxelite",
+    "dualsense",
+    "dualsenseedge",
+    "dualshock4",
+    "steamdeck",
+    "steamcontroller2",
+];
+#[cfg(not(target_os = "windows"))]
+const GAMEPADS: &[&str] = &[
+    "auto",
+    "xbox360",
+    "xboxone",
+    "dualsense",
+    "dualsenseedge",
+    "dualshock4",
+    "steamdeck",
+    "steamcontroller",
+    "steamcontroller2",
+    "switchpro",
+];
+const GAMEPAD_SPELLINGS: &[(&str, &str)] = &[
+    ("xbox", "xbox360"),
+    ("x360", "xbox360"),
+    ("series", "xboxone"),
+    ("ds", "dualsense"),
+    ("ps5", "dualsense"),
+    ("edge", "dualsenseedge"),
+    ("ds4", "dualshock4"),
+    ("ps4", "dualshock4"),
+    ("deck", "steamdeck"),
+    ("switch", "switchpro"),
+    ("sc2", "steamcontroller2"),
+];
+
+/// A row with the common defaults: every OS, not advanced, no aliases or spellings.
+#[allow(clippy::too_many_arguments)]
+const fn row(
+    id: &'static str,
+    env: &'static str,
+    kind: Kind,
+    default: DefaultValue,
+    group: Group,
+    apply: Apply,
+    title: &'static str,
+    docs: &'static str,
+) -> Setting {
+    Setting {
+        id,
+        env,
+        kind,
+        default,
+        group,
+        advanced: false,
+        apply,
+        os: &[],
+        title,
+        docs,
+        aliases: &[],
+        spellings: &[],
+    }
+}
+
+impl Setting {
+    const fn advanced(mut self) -> Setting {
+        self.advanced = true;
+        self
+    }
+
+    const fn only(mut self, os: &'static [&'static str]) -> Setting {
+        self.os = os;
+        self
+    }
+
+    const fn aliases(mut self, aliases: &'static [Alias]) -> Setting {
+        self.aliases = aliases;
+        self
+    }
+
+    const fn spellings(mut self, spellings: &'static [(&'static str, &'static str)]) -> Setting {
+        self.spellings = spellings;
+        self
+    }
+}
+
+use Apply::{NextSession, Now, Restart};
+use DefaultValue as D;
+use Group::{Audio, GameMode, Input, Network, Streaming, System, Video};
 
 /// Page order. Add a row where it reads best; ids are never reused.
+#[rustfmt::skip]
 pub static SETTINGS: &[Setting] = &[
     // --- Streaming
-    Setting {
-        id: "gamestream",
-        env: "PUNKTFUNK_GAMESTREAM",
-        kind: Kind::Bool,
-        default: DefaultValue::Bool(false),
-        group: Group::Streaming,
-        advanced: false,
-        apply: Apply::Restart,
-        os: &[],
-        title: "GameStream",
-        docs: "moonlight",
-        aliases: &[],
-        spellings: &[],
-    },
-    Setting {
-        id: "webtransport",
-        env: "PUNKTFUNK_WEBTRANSPORT",
-        kind: Kind::Bool,
-        default: DefaultValue::Bool(false),
-        group: Group::Streaming,
-        advanced: false,
-        apply: Apply::Restart,
-        os: &[],
-        title: "Browser streaming",
-        docs: "clients",
-        aliases: &[],
-        spellings: &[],
-    },
-    Setting {
-        id: "clipboard",
-        env: "PUNKTFUNK_CLIPBOARD",
-        kind: Kind::Enum(&["off", "text", "files"]),
-        default: DefaultValue::Str("off"),
-        group: Group::Streaming,
-        advanced: false,
-        apply: Apply::NextSession,
-        os: LINUX_WINDOWS,
-        title: "Shared clipboard",
-        docs: "clipboard",
-        aliases: &[],
-        spellings: &[
+    row("gamestream", "PUNKTFUNK_GAMESTREAM", Kind::Bool, D::Bool(false), Streaming, Restart, "GameStream", "moonlight"),
+    row("webtransport", "PUNKTFUNK_WEBTRANSPORT", Kind::Bool, D::Bool(false), Streaming, Restart, "Browser streaming", "clients"),
+    row("clipboard", "PUNKTFUNK_CLIPBOARD", Kind::Enum(&["off", "text", "files"]), D::Str("off"), Streaming, NextSession, "Shared clipboard", "clipboard")
+        .only(LINUX_WINDOWS)
+        .spellings(&[
             ("0", "off"),
             ("false", "off"),
             ("no", "off"),
@@ -286,127 +378,98 @@ pub static SETTINGS: &[Setting] = &[
             ("true", "files"),
             ("yes", "files"),
             ("all", "files"),
-        ],
-    },
-    Setting {
-        id: "host_name",
-        env: "PUNKTFUNK_HOST_NAME",
-        kind: Kind::Text { max_len: 63 },
-        default: DefaultValue::Str(""),
-        group: Group::Streaming,
-        advanced: false,
-        apply: Apply::Restart,
-        os: &[],
-        title: "Host name",
-        docs: "configuration",
-        aliases: &[],
-        spellings: &[],
-    },
+        ]),
+    row("host_name", "PUNKTFUNK_HOST_NAME", Kind::Text { max_len: 63 }, D::Str(""), Streaming, Restart, "Host name", "configuration"),
+    row("gamestream_encrypt", "PUNKTFUNK_GAMESTREAM_ENCRYPT", Kind::Enum(&["supported", "video", "off", "required"]), D::Str("supported"), Streaming, Restart, "GameStream encryption", "moonlight")
+        .advanced()
+        .aliases(&[Alias { name: "PUNKTFUNK_GS_ENCRYPT", value: None }])
+        .spellings(&[
+            ("1", "supported"),
+            ("0", "off"),
+            ("false", "off"),
+            ("no", "off"),
+            ("video_only", "video"),
+            ("require", "required"),
+        ]),
+    row("gamestream_adapt", "PUNKTFUNK_GAMESTREAM_ADAPT", Kind::Bool, D::Bool(true), Streaming, Restart, "Moonlight adaptive bitrate", "moonlight")
+        .advanced()
+        .aliases(&[Alias { name: "PUNKTFUNK_GS_ADAPT", value: None }]),
+    row("chacha20", "PUNKTFUNK_CHACHA20", Kind::Bool, D::Bool(true), Streaming, NextSession, "ChaCha20 cipher", "configuration").advanced(),
+    row("webtransport_origins", "PUNKTFUNK_WEBTRANSPORT_ORIGINS", Kind::List, D::List(&[]), Streaming, Restart, "Browser origins", "clients").advanced(),
     // --- Video
-    Setting {
-        id: "ten_bit",
-        env: "PUNKTFUNK_10BIT",
-        kind: Kind::Bool,
-        default: DefaultValue::Bool(true),
-        group: Group::Video,
-        advanced: false,
-        apply: Apply::NextSession,
-        os: &[],
-        title: "10-bit and HDR",
-        docs: "hdr",
-        aliases: &[],
-        spellings: &[],
-    },
-    Setting {
-        id: "chroma_444",
-        env: "PUNKTFUNK_444",
-        kind: Kind::Bool,
-        default: DefaultValue::Bool(true),
-        group: Group::Video,
-        advanced: false,
-        apply: Apply::NextSession,
-        os: &[],
-        title: "Full color 4:4:4",
-        docs: "configuration",
-        aliases: &[],
-        spellings: &[],
-    },
-    Setting {
-        id: "max_fps",
-        env: "PUNKTFUNK_MAX_FPS",
-        kind: Kind::Int {
-            min: 0,
-            max: 240,
-            unit: "fps",
-        },
-        default: DefaultValue::Int(0),
-        group: Group::Video,
-        advanced: false,
-        apply: Apply::NextSession,
-        os: LINUX,
-        title: "Game frame limit",
-        docs: "gamescope",
-        aliases: &[],
-        spellings: &[],
-    },
+    row("encoder", "PUNKTFUNK_ENCODER", Kind::Enum(ENCODERS), D::Str("auto"), Video, NextSession, "Encoder", "configuration").spellings(ENCODER_SPELLINGS),
+    row("ten_bit", "PUNKTFUNK_10BIT", Kind::Bool, D::Bool(true), Video, NextSession, "10-bit and HDR", "hdr"),
+    row("chroma_444", "PUNKTFUNK_444", Kind::Bool, D::Bool(true), Video, NextSession, "Full color 4:4:4", "configuration"),
+    row("max_fps", "PUNKTFUNK_MAX_FPS", Kind::Int { min: 0, max: 240, unit: "fps" }, D::Int(0), Video, NextSession, "Game frame limit", "gamescope").only(LINUX),
+    row("portal_cursor_mode", "PUNKTFUNK_PORTAL_CURSOR_MODE", Kind::Enum(&["auto", "embedded", "metadata", "hidden"]), D::Str("auto"), Video, NextSession, "Cursor capture", "configuration")
+        .advanced()
+        .only(LINUX)
+        .spellings(&[("composited", "embedded"), ("meta", "metadata"), ("none", "hidden")]),
+    row("vulkan_encode", "PUNKTFUNK_VULKAN_ENCODE", Kind::Bool, D::Bool(true), Video, NextSession, "Vulkan encoding", "configuration").advanced().only(LINUX),
+    row("direct_capture", "PUNKTFUNK_DIRECT_CAPTURE", Kind::Bool, D::Bool(true), Video, NextSession, "Direct capture", "configuration").advanced().only(LINUX),
+    row("lazy_capture", "PUNKTFUNK_LAZY_CAPTURE", Kind::Bool, D::Bool(true), Video, NextSession, "On-demand capture", "configuration").advanced().only(LINUX),
+    row("kwin_paced", "PUNKTFUNK_KWIN_PACED", Kind::Bool, D::Bool(false), Video, NextSession, "KWin capture pacing", "kde").advanced().only(LINUX),
+    row("pyrowave_max_mbps", "PUNKTFUNK_PYROWAVE_MAX_MBPS", Kind::Int { min: 0, max: 10_000, unit: "Mbps" }, D::Int(0), Video, NextSession, "PyroWave bitrate cap", "pyrowave").advanced(),
     // --- Audio
-    Setting {
-        id: "audio_output_mode",
-        env: "PUNKTFUNK_AUDIO_OUTPUT_MODE",
-        kind: Kind::Enum(&["client_only", "host_and_client", "follow_default"]),
-        default: DefaultValue::Str("client_only"),
-        group: Group::Audio,
-        advanced: false,
-        apply: Apply::NextSession,
-        os: LINUX_WINDOWS,
-        title: "Where audio plays",
-        docs: "configuration",
-        aliases: &[
-            // A stale host-audio flag must not override "do not touch my devices".
-            Alias {
-                name: "PUNKTFUNK_KEEP_DEFAULT",
-                value: Some("follow_default"),
-            },
-            Alias {
-                name: "PUNKTFUNK_HOST_AUDIO",
-                value: Some("host_and_client"),
-            },
-        ],
-        spellings: &[
+    row("audio_output_mode", "PUNKTFUNK_AUDIO_OUTPUT_MODE", Kind::Enum(&["client_only", "host_and_client", "follow_default"]), D::Str("client_only"), Audio, NextSession, "Where audio plays", "configuration")
+        .only(LINUX_WINDOWS)
+        // KEEP_DEFAULT first: a stale host-audio flag must not override "do not touch my devices".
+        .aliases(&[
+            Alias { name: "PUNKTFUNK_KEEP_DEFAULT", value: Some("follow_default") },
+            Alias { name: "PUNKTFUNK_HOST_AUDIO", value: Some("host_and_client") },
+        ])
+        .spellings(&[
             ("client", "client_only"),
             ("both", "host_and_client"),
             ("host", "host_and_client"),
             ("follow", "follow_default"),
-        ],
-    },
-    Setting {
-        id: "audio_voice_chat",
-        env: "PUNKTFUNK_AUDIO_VOICE_CHAT",
-        kind: Kind::Enum(&["stream", "host"]),
-        default: DefaultValue::Str("stream"),
-        group: Group::Audio,
-        advanced: false,
-        apply: Apply::NextSession,
-        os: LINUX,
-        title: "Voice chat",
-        docs: "configuration",
-        aliases: &[],
-        spellings: &[("client", "stream"), ("speakers", "host")],
-    },
-    Setting {
-        id: "audio_voice_apps",
-        env: "PUNKTFUNK_AUDIO_VOICE_APPS",
-        kind: Kind::List,
-        default: DefaultValue::List(crate::DEFAULT_VOICE_APPS),
-        group: Group::Audio,
-        advanced: false,
-        apply: Apply::NextSession,
-        os: LINUX,
-        title: "Voice chat apps",
-        docs: "configuration",
-        aliases: &[],
-        spellings: &[],
-    },
+        ]),
+    row("audio_quality", "PUNKTFUNK_AUDIO_QUALITY", Kind::Enum(&["low", "standard", "high"]), D::Str("high"), Audio, NextSession, "Audio quality", "configuration")
+        .spellings(&[("normal", "standard"), ("medium", "standard")]),
+    row("audio_hires", "PUNKTFUNK_AUDIO_HIRES", Kind::Bool, D::Bool(true), Audio, NextSession, "Lossless audio", "configuration"),
+    row("audio_voice_chat", "PUNKTFUNK_AUDIO_VOICE_CHAT", Kind::Enum(&["stream", "host"]), D::Str("stream"), Audio, NextSession, "Voice chat", "configuration")
+        .only(LINUX)
+        .spellings(&[("client", "stream"), ("speakers", "host")]),
+    row("audio_voice_apps", "PUNKTFUNK_AUDIO_VOICE_APPS", Kind::List, D::List(crate::DEFAULT_VOICE_APPS), Audio, NextSession, "Voice chat apps", "configuration").only(LINUX),
+    row("pad_audio", "PUNKTFUNK_PAD_AUDIO", Kind::Bool, D::Bool(true), Audio, NextSession, "Controller speaker", "controller-audio").only(LINUX_WINDOWS),
+    row("audio_redundancy", "PUNKTFUNK_AUDIO_REDUNDANCY", TRI, D::Str("auto"), Audio, NextSession, "Audio redundancy", "configuration")
+        .advanced()
+        .spellings(TRI_SPELLINGS),
+    // --- Input
+    row("gamepad", "PUNKTFUNK_GAMEPAD", Kind::Enum(GAMEPADS), D::Str("auto"), Input, NextSession, "Default gamepad", "input")
+        .only(LINUX_WINDOWS)
+        .spellings(GAMEPAD_SPELLINGS),
+    row("pen", "PUNKTFUNK_PEN", Kind::Bool, D::Bool(true), Input, NextSession, "Pen input", "input").only(LINUX_WINDOWS),
+    row("steam_gadget", "PUNKTFUNK_STEAM_GADGET", TRI, D::Str("auto"), Input, NextSession, "Steam USB gadget", "input")
+        .advanced()
+        .only(LINUX)
+        .spellings(TRI_SPELLINGS),
+    row("dualsense_usbip", "PUNKTFUNK_DUALSENSE_USBIP", Kind::Bool, D::Bool(false), Input, NextSession, "DualSense over USB/IP", "controller-audio").advanced().only(LINUX),
+    // --- Game Mode
+    row("gamescope_attach", "PUNKTFUNK_GAMESCOPE_ATTACH", Kind::Bool, D::Bool(false), GameMode, NextSession, "Attach mode", "gamescope").only(LINUX),
+    row("gamescope_hdr", "PUNKTFUNK_GAMESCOPE_HDR", Kind::Bool, D::Bool(true), GameMode, NextSession, "Game Mode HDR", "gamescope").only(LINUX),
+    row("gamescope_managed", "PUNKTFUNK_GAMESCOPE_MANAGED", Kind::Bool, D::Bool(false), GameMode, NextSession, "Force managed mode", "gamescope").advanced().only(LINUX),
+    row("gamescope_vrr", "PUNKTFUNK_GAMESCOPE_VRR", Kind::Bool, D::Bool(true), GameMode, NextSession, "Adaptive sync", "gamescope").advanced().only(LINUX),
+    row("gamescope_sdr_nits", "PUNKTFUNK_GAMESCOPE_SDR_NITS", Kind::Int { min: 1, max: 10_000, unit: "nits" }, D::Int(203), GameMode, NextSession, "SDR brightness", "hdr").advanced().only(LINUX),
+    row("gamescope_refresh_rates", "PUNKTFUNK_GAMESCOPE_REFRESH_RATES", Kind::List, D::List(&[]), GameMode, NextSession, "Extra refresh rates", "gamescope").advanced().only(LINUX),
+    row("gamescope_steam", "PUNKTFUNK_GAMESCOPE_STEAM", Kind::Bool, D::Bool(false), GameMode, NextSession, "Steam integration", "gamescope").advanced().only(LINUX),
+    row("gamescope_splash", "PUNKTFUNK_GAMESCOPE_SPLASH", Kind::Bool, D::Bool(true), GameMode, NextSession, "Startup splash", "gamescope").advanced().only(LINUX),
+    row("gamescope_isolate", "PUNKTFUNK_GAMESCOPE_ISOLATE", Kind::Bool, D::Bool(true), GameMode, NextSession, "Per-session isolation", "gamescope").advanced().only(LINUX),
+    row("gamescope_grab_cursor", "PUNKTFUNK_GAMESCOPE_GRAB_CURSOR", Kind::Bool, D::Bool(false), GameMode, NextSession, "Grab the cursor", "gamescope").advanced().only(LINUX),
+    row("gamescope_bind", "PUNKTFUNK_GAMESCOPE_BIND", TRI, D::Str("auto"), GameMode, NextSession, "Bind patched gamescope", "gamescope")
+        .advanced()
+        .only(LINUX)
+        .spellings(TRI_SPELLINGS),
+    row("session_watch", "PUNKTFUNK_SESSION_WATCH", TRI, D::Str("auto"), GameMode, NextSession, "Follow mode switches", "gamescope")
+        .advanced()
+        .only(LINUX)
+        .spellings(TRI_SPELLINGS),
+    // --- Network
+    row("mdns", "PUNKTFUNK_MDNS", Kind::Bool, D::Bool(true), Network, Restart, "Local discovery", "troubleshooting-connect").advanced(),
+    row("idle_timeout_ms", "PUNKTFUNK_IDLE_TIMEOUT_MS", Kind::Int { min: 1_000, max: 120_000, unit: "ms" }, D::Int(8_000), Network, Restart, "Disconnect timeout", "configuration").advanced(),
+    // --- System
+    row("update_check", "PUNKTFUNK_UPDATE_CHECK", Kind::Bool, D::Bool(true), System, Now, "Check for updates", "updating"),
+    row("update_apply", "PUNKTFUNK_UPDATE_APPLY", Kind::Bool, D::Bool(true), System, Now, "Console updates", "updating").advanced(),
 ];
 
 #[cfg(test)]
@@ -488,7 +551,8 @@ mod tests {
     }
 
     /// `configuration.md` carries the table this registry renders. `UPDATE_SETTINGS_DOCS=1`
-    /// rewrites it in place.
+    /// rewrites it in place. Not on Windows: the encoder and gamepad options differ there.
+    #[cfg(not(target_os = "windows"))]
     #[test]
     fn docs_table_is_current() {
         let path = concat!(
