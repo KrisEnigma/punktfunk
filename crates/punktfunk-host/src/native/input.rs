@@ -790,6 +790,9 @@ pub(super) fn input_thread(
     grants: Arc<AtomicU32>,
     frame_map: FrameMap,
     stop: Arc<AtomicBool>,
+    // Session gyro totals. This thread is joined after the summary is built, so the
+    // per-pad histogram below cannot be what the summary reads.
+    counters: Arc<crate::session_status::SessionCounters>,
 ) {
     let mut pads = Pads::new(gamepad, pad_id);
     // 0xD1 streamers; `pad_audio_on` is the negotiated Welcome cap.
@@ -853,7 +856,7 @@ pub(super) fn input_thread(
                 if grants.load(Ordering::Relaxed) & punktfunk_core::quic::GRANT_GAMEPAD != 0 =>
             {
                 if let punktfunk_core::quic::RichInput::Motion { pad, .. } = rich {
-                    motion_cadence.record(pad, std::time::Instant::now());
+                    counters.note_motion(motion_cadence.record(pad, std::time::Instant::now()));
                 }
                 pads.apply_rich(rich);
             }
@@ -1337,6 +1340,7 @@ mod tests {
                         punktfunk_core::video_fit::Reframe::default(),
                     )),
                     stop,
+                    Arc::new(crate::session_status::SessionCounters::default()),
                 )
             })
         };

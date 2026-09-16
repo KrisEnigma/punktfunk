@@ -211,8 +211,9 @@ const Row: FC<{
 /** No pick: the slot is whichever comes free. Not a slot number, so it cannot collide with one. */
 const AUTO_PLAYER = "auto";
 
-/** `h:mm` past an hour, else `m:ss` — a session's age reads as a duration, not seconds. */
-function formatUptime(seconds: number): string {
+/** `h:mm` past an hour, else `m:ss` — a session's age reads as a duration, not seconds.
+ * Shared with `LastSessionCard`, so a finished session reads the same as a live one. */
+export function formatUptime(seconds: number): string {
 	const s = Math.max(0, Math.floor(seconds));
 	const mm = String(Math.floor((s % 3600) / 60)).padStart(2, "0");
 	if (s >= 3600) return `${Math.floor(s / 3600)}:${mm}`;

@@ -1055,8 +1055,8 @@ impl AudioState {
     }
 }
 
-/// [`PadSlots`]. 0x5A: next after [`MSG_AUDIO_STATE`].
-pub const MSG_PAD_SLOTS: u8 = 0x5A;
+/// [`PadSlots`]. 0x5B: 0x5A is the launch outcome.
+pub const MSG_PAD_SLOTS: u8 = 0x5B;
 
 /// `host → client` ([`MSG_PAD_SLOTS`]): the OS pad slots this session holds, one
 /// bit per slot. Slot `n` is player `n + 1` to a local co-op game, so the client
