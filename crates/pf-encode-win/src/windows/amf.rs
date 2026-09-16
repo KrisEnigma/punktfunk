@@ -817,6 +817,9 @@ pub struct AmfEncoder {
     fps: u32,
     bitrate_bps: u64,
     ten_bit: bool,
+    /// BT.2020 PQ (HDR) vs BT.709 (SDR). Independent of `ten_bit`: 10-bit SDR is Main10 under
+    /// BT.709. P010 is the ring for both, so the colour signalling follows this, not the format.
+    hdr: bool,
     /// Lazy from the first frame's device; rebuilt on capturer-device change.
     inner: Option<Inner>,
     bound_device: isize,
@@ -867,6 +870,9 @@ impl AmfEncoder {
         bitrate_bps: u64,
         bit_depth: u8,
         chroma: ChromaFormat,
+        // BT.2020 PQ vs BT.709. Independent of depth: 10-bit SDR is a P010 ring under BT.709. The
+        // caller sets it — P010 is the input for both HDR and 10-bit SDR, so `format` cannot.
+        hdr: bool,
         // Selected render adapter (`None` = OS default); the AV1 probe opens on it.
         adapter_luid: Option<LUID>,
     ) -> Result<Self> {
@@ -910,6 +916,7 @@ impl AmfEncoder {
             fps,
             bitrate_bps,
             ten_bit,
+            hdr,
             inner: None,
             bound_device: 0,
             frame_idx: 0,
@@ -1132,8 +1139,10 @@ impl AmfEncoder {
             }
             Codec::PyroWave => unreachable!("PyroWave never opens the AMF backend"),
         }
-        // BT.709 limited (SDR) or BT.2020 PQ (HDR). Required for HDR — missing PQ washes out.
-        let (profile, transfer, primaries) = if self.ten_bit {
+        // BT.709 limited (SDR, either depth) or BT.2020 PQ (HDR). Keyed on colour, not depth:
+        // 10-bit SDR is Main10 under BT.709. Required for HDR — missing PQ washes out; for SDR the
+        // set is best-effort (the 8-bit arm always was), so the fatal flag is `hdr`, not `ten_bit`.
+        let (profile, transfer, primaries) = if self.hdr {
             (COLOR_PROFILE_2020, TRANSFER_SMPTE2084, PRIMARIES_BT2020)
         } else {
             (COLOR_PROFILE_709, TRANSFER_BT709, PRIMARIES_BT709)
@@ -1142,19 +1151,19 @@ impl AmfEncoder {
             comp,
             p.out_color_profile,
             AmfVariant::from_i64(profile),
-            self.ten_bit,
+            self.hdr,
         )?;
         set_prop(
             comp,
             p.out_transfer,
             AmfVariant::from_i64(transfer),
-            self.ten_bit,
+            self.hdr,
         )?;
         set_prop(
             comp,
             p.out_primaries,
             AmfVariant::from_i64(primaries),
-            self.ten_bit,
+            self.hdr,
         )?;
         Ok((ir_active, ltr_active))
     }
@@ -1675,7 +1684,7 @@ impl AmfEncoder {
         let inner = self.inner.as_mut().expect("ensure_inner succeeded");
         // Re-push HDR metadata on change or rebuild. Best-effort: reject leaves the 0xCE datagram.
         if let Some(name) = self.props.hdr_metadata {
-            if self.ten_bit && inner.hdr_pushed != self.hdr_meta {
+            if self.hdr && inner.hdr_pushed != self.hdr_meta {
                 if let Some(m) = self.hdr_meta {
                     // SAFETY: live context/component pair, encode thread (`push_hdr_metadata`).
                     match unsafe { push_hdr_metadata(inner.ctx.0, inner.comp.0, name, &m) } {
@@ -2311,6 +2320,7 @@ mod tests {
             2_000_000,
             8,
             ChromaFormat::Yuv420,
+            false,
             None,
         ) {
             Ok(e) => e,
@@ -2372,6 +2382,7 @@ mod tests {
             2_000_000,
             8,
             ChromaFormat::Yuv420,
+            false,
             None,
         ) {
             Ok(e) => e,
@@ -2569,6 +2580,7 @@ mod tests {
             2_000_000,
             8,
             ChromaFormat::Yuv420,
+            false,
             None,
         ) {
             Ok(e) => e,
@@ -2708,6 +2720,7 @@ mod tests {
             mbps * 1_000_000,
             8,
             ChromaFormat::Yuv420,
+            false,
             None,
         )
         .expect("AMF open");
@@ -2847,6 +2860,7 @@ mod tests {
             2_000_000,
             8,
             ChromaFormat::Yuv420,
+            false,
             None,
         )
         .expect("native AMF open");
@@ -2948,6 +2962,7 @@ mod tests {
             4_000_000,
             10,
             ChromaFormat::Yuv420,
+            true,
             None,
         ) {
             Ok(e) => e,
@@ -3090,6 +3105,7 @@ mod tests {
             2_000_000,
             8,
             ChromaFormat::Yuv420,
+            false,
             None,
         ) {
             Ok(e) => e,

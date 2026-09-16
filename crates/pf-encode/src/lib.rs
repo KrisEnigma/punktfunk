@@ -1434,13 +1434,21 @@ pub fn resolved_backend_ingests_rgb_444() -> bool {
 /// Encoder half of the 10-bit SDR gate: this backend writes a 10-bit stream from the 8-bit
 /// surface an SDR desktop captures.
 ///
-/// Windows direct-NVENC ingests the IDD packed `Rgb10a2Sdr`; Linux direct-NVENC takes the
-/// plain 8-bit surface and asks NVENC for 10-bit output. Linux VAAPI carries it for HEVC (the
-/// VPP RGB→YUV matrix follows the BT.709 colour, not depth). Vulkan Video stays out: its
-/// 10-bit path is still BT.2020-welded. The GPU still has to pass `can_encode_10bit`.
+/// Windows direct-NVENC ingests the IDD packed `Rgb10a2Sdr`; Windows AMF takes a BT.709 P010 the
+/// driver's video processor produces (HEVC only). Linux direct-NVENC takes the plain 8-bit surface
+/// and asks NVENC for 10-bit output. Linux VAAPI carries HEVC and Vulkan Video carries AV1, both
+/// with the RGB→YUV matrix following the BT.709 colour, not depth. The GPU still has to pass
+/// `can_encode_10bit`.
 #[cfg(target_os = "windows")]
-pub fn backend_carries_sdr10(_codec: Codec) -> bool {
-    windows_resolved_backend() == WindowsBackend::Nvenc
+pub fn backend_carries_sdr10(codec: Codec) -> bool {
+    // NVENC widens 8→10 from packed RGB for HEVC + AV1. AMF takes a BT.709 P010 the driver's video
+    // processor produces (`EncodeInput::P010Sdr`) for HEVC Main10 only — AV1 10-bit SDR on AMF is
+    // unbuilt. `can_encode_10bit` still gates on the real probe.
+    match windows_resolved_backend() {
+        WindowsBackend::Nvenc => true,
+        WindowsBackend::Amf => codec == Codec::H265,
+        _ => false,
+    }
 }
 /// Can Vulkan Video encode `codec` at 10-bit on the selected GPU, and is it enabled? The AV1
 /// 10-bit SDR path on AMD/Intel routes here; the probe is cached per (GPU, codec).
