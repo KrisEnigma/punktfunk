@@ -200,20 +200,20 @@ The service reads `%ProgramData%\punktfunk\host.env`. The defaults work out of t
   On a multi-GPU box the [web console's GPU preference](/docs/web-console)
   wins: a forced backend whose vendor doesn't match the selected GPU is ignored (the host logs a
   warning) — remove the stale line rather than fighting it.
-- `PUNKTFUNK_HOST_CMD` — what the service runs. A fresh install from the setup `.exe` writes `serve`:
-  the **secure native-only** host, Punktfunk clients only. **Moonlight/GameStream compatibility is
-  opt-in** — tick *Enable GameStream (Moonlight) compatibility* in the installer (unattended:
-  `/MERGETASKS=gamestream`), or turn it on afterwards from an elevated prompt:
+- `PUNKTFUNK_HOST_CMD` — what the service runs, `serve`. **Moonlight/GameStream compatibility is
+  opt-in** and not part of this line: tick *Enable GameStream (Moonlight) compatibility* in the
+  installer (unattended: `/MERGETASKS=gamestream`), switch **GameStream** on under **Host → Settings**
+  in the web console, or from an elevated prompt:
 
   ```powershell
   punktfunk-host service install --gamestream=on
   punktfunk-host service restart
   ```
 
-  That writes `PUNKTFUNK_HOST_CMD=serve --gamestream` (native punktfunk/1 **plus** the
-  GameStream/Moonlight-compat planes); `--gamestream=off` puts it back to `serve`. GameStream pairs
-  over plain HTTP and uses weaker legacy encryption — trusted LAN only. An upgrade never changes your
-  choice, and a hand-edited `PUNKTFUNK_HOST_CMD` is left alone.
+  `--gamestream=off` turns it off again. GameStream pairs over plain HTTP and uses weaker legacy
+  encryption — trusted LAN only. An upgrade never changes your choice. A `serve --gamestream` line
+  from an older install becomes `serve` with GameStream kept on; any other hand-edited command is
+  left alone.
 
 Edit the file, then `punktfunk-host service restart` (it stops, waits for the service to actually
 reach *Stopped*, and starts again); `punktfunk-host service status` shows the current state. See the
