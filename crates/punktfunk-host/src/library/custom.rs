@@ -216,13 +216,12 @@ pub fn entry_for_library_id(library_id: &str) -> Option<CustomEntry> {
         .then_some(entry)
 }
 
-/// Local art bytes for one [`ArtKind`], or `None` (no row, no field, or an `http` URL the client
-/// fetches itself). Blocking IO — call off the async runtime.
-pub fn library_local_art_bytes(library_id: &str, kind: ArtKind) -> Option<(Vec<u8>, String)> {
+/// Art bytes for one [`ArtKind`], or `None` — no row, no such field, or art the proxy may not
+/// serve. A remote URL comes from the host's store, which fetches it on the first miss.
+/// Blocking IO — call off the async runtime.
+pub fn library_art_bytes(library_id: &str, kind: ArtKind) -> Option<(Vec<u8>, String)> {
     let field = art_field(&entry_for_library_id(library_id)?.art, kind)?;
-    is_local_art_path(&field)
-        .then(|| local_art_bytes(&field))
-        .flatten()
+    resolve_art_bytes(&field)
 }
 
 pub(crate) fn art_field(art: &Artwork, kind: ArtKind) -> Option<String> {

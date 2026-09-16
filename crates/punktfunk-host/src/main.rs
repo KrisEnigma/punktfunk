@@ -418,6 +418,15 @@ fn real_main() -> Result<()> {
             print!("{}", mgmt::openapi_json());
             Ok(())
         }
+        // Covers the host fetched for a client. Dropping them costs one refetch each.
+        Some("library") if args.get(1).is_some_and(|a| a == "art") => {
+            if args.get(2).map(String::as_str) != Some("--clear") {
+                anyhow::bail!("usage: punktfunk-host library art --clear");
+            }
+            let (files, bytes) = library::clear_art_store()?;
+            println!("cleared {files} covers, {} MiB", bytes / 1024 / 1024);
+            Ok(())
+        }
         // Same JSON as `GET /api/v1/library`.
         Some("library") => {
             println!("{}", serde_json::to_string_pretty(&library::all_games())?);
@@ -899,6 +908,8 @@ USAGE:
     punktfunk-host tray <CMD>                 status-tray lifecycle (start, stop, status) — Windows;
                                               `start` is how you get the icon back without a re-logon
     punktfunk-host openapi                    print the management API's OpenAPI document (codegen)
+    punktfunk-host library [art --clear]      print the game catalog as JSON; `art --clear` drops
+                                              every cover the host fetched and cached on disk
     punktfunk-host punktfunk1-host [OPTIONS]  native punktfunk/1 host (QUIC control + UDP data plane)
     punktfunk-host probe-compositor           exit 0 iff the compositor is up + ready (bringup gate)
     punktfunk-host list-monitors              list the host's physical monitors (Linux) — the

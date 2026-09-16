@@ -1765,7 +1765,7 @@
           "library"
         ],
         "summary": "List every title this host knows, sorted by title.",
-        "description": "Plugin-synced entries plus custom ones. Local-file art is rewritten to this API's art\nproxy; remote URLs pass through. `?provider=` / `?platform=` (case-insensitive) narrow.\n\nThe operator lane sees hidden titles (`hidden: true`) so the console can un-hide them.\nEvery other lane is filtered upstream and cannot tell they exist.",
+        "description": "Plugin-synced entries plus custom ones. Art the host can serve is rewritten to this API's\nart proxy, local paths and remote URLs alike; a URL the proxy already refused passes\nthrough. `?provider=` / `?platform=` (case-insensitive) narrow.\n\nThe operator lane sees hidden titles (`hidden: true`) so the console can un-hide them.\nEvery other lane is filtered upstream and cannot tell they exist.",
         "operationId": "getLibrary",
         "parameters": [
           {
@@ -1820,7 +1820,7 @@
           "library"
         ],
         "summary": "Stream one cover-art image for a library entry.",
-        "description": "Resolves `kind` (`portrait` | `hero` | `logo` | `header`) for a catalog id and returns\nthe local file bytes. Unknown id or kind is 404 so the client can try the next candidate.\nRemote `http(s)` art is fetched by the client; this proxy exists for launcher cover\ncaches on the host disk. The response carries `Cache-Control` and an `ETag` of the\nbytes; a request whose `If-None-Match` names that tag gets 304 with no body.",
+        "description": "Resolves `kind` (`portrait` | `hero` | `logo` | `header`) for a catalog id and returns the\nbytes: a launcher's cover cache on the host disk, or a remote URL the host fetches once on\nthe first miss and then serves from its own store. Unknown id or kind is 404 so the client\ncan try the next candidate, and so is a URL the fetch refused — `GET /library` advertises\nthat one verbatim again. The response carries `Cache-Control` and an `ETag` of the bytes; a\nrequest whose `If-None-Match` names that tag gets 304 with no body.",
         "operationId": "getLibraryArt",
         "parameters": [
           {

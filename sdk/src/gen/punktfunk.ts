@@ -2002,19 +2002,21 @@ readonly "getHostInfo": <Config extends OperationConfig>(options: { readonly con
 */
 readonly "getHostTheme": <Config extends OperationConfig>(options: { readonly config?: Config | undefined } | undefined) => Effect.Effect<WithOptionalResponse<typeof GetHostTheme200.Type, Config>, HttpClientError.HttpClientError | SchemaError | PunktfunkError<"GetHostTheme401", typeof GetHostTheme401.Type>>
   /**
-* Plugin-synced entries plus custom ones. Local-file art is rewritten to this API's art
-* proxy; remote URLs pass through. `?provider=` / `?platform=` (case-insensitive) narrow.
+* Plugin-synced entries plus custom ones. Art the host can serve is rewritten to this API's
+* art proxy, local paths and remote URLs alike; a URL the proxy already refused passes
+* through. `?provider=` / `?platform=` (case-insensitive) narrow.
 * 
 * The operator lane sees hidden titles (`hidden: true`) so the console can un-hide them.
 * Every other lane is filtered upstream and cannot tell they exist.
 */
 readonly "getLibrary": <Config extends OperationConfig>(options: { readonly params?: typeof GetLibraryParams.Encoded | undefined; readonly config?: Config | undefined } | undefined) => Effect.Effect<WithOptionalResponse<typeof GetLibrary200.Type, Config>, HttpClientError.HttpClientError | SchemaError | PunktfunkError<"GetLibrary401", typeof GetLibrary401.Type>>
   /**
-* Resolves `kind` (`portrait` | `hero` | `logo` | `header`) for a catalog id and returns
-* the local file bytes. Unknown id or kind is 404 so the client can try the next candidate.
-* Remote `http(s)` art is fetched by the client; this proxy exists for launcher cover
-* caches on the host disk. The response carries `Cache-Control` and an `ETag` of the
-* bytes; a request whose `If-None-Match` names that tag gets 304 with no body.
+* Resolves `kind` (`portrait` | `hero` | `logo` | `header`) for a catalog id and returns the
+* bytes: a launcher's cover cache on the host disk, or a remote URL the host fetches once on
+* the first miss and then serves from its own store. Unknown id or kind is 404 so the client
+* can try the next candidate, and so is a URL the fetch refused — `GET /library` advertises
+* that one verbatim again. The response carries `Cache-Control` and an `ETag` of the bytes; a
+* request whose `If-None-Match` names that tag gets 304 with no body.
 */
 readonly "getLibraryArt": <Config extends OperationConfig>(id: string, kind: string, options: { readonly params?: typeof GetLibraryArtParams.Encoded | undefined; readonly config?: Config | undefined } | undefined) => Effect.Effect<WithOptionalResponse<void, Config>, HttpClientError.HttpClientError | SchemaError | PunktfunkError<"GetLibraryArt401", typeof GetLibraryArt401.Type> | PunktfunkError<"GetLibraryArt404", typeof GetLibraryArt404.Type>>
   /**
