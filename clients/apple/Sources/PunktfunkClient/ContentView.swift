@@ -119,6 +119,8 @@ struct ContentView: View {
     /// edge-to-edge (behind the notch); windowed respects the top inset so the title bar
     /// never covers the video.
     @State private var isFullscreen = false
+    /// The fullscreen edge and ownership, outliving the controller views SwiftUI rebuilds.
+    @State private var fullscreenEdge = FullscreenController.Edge()
     #endif
     #if os(iOS)
     /// The stats-OFF tier's touch-exit disc window (see the overlay in `stream(captureEnabled:)`
@@ -530,7 +532,7 @@ struct ContentView: View {
         // safe-area handling below.
         .background(FullscreenController(
             active: fullscreenForSession && model.connection != nil,
-            isFullscreen: $isFullscreen, appDriven: $appDrivenFullscreen))
+            isFullscreen: $isFullscreen, appDriven: $appDrivenFullscreen, edge: fullscreenEdge))
         #endif
         // A game launched from the library just exited, so the session ended on purpose: put the
         // player back in that host's library rather than on host selection. Set on the outer Group
