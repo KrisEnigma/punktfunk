@@ -355,6 +355,8 @@ fn is_management_cli(args: &[String]) -> bool {
         | Some("openapi")
         | Some("library")
         | Some("detect-conflicts")
+        // The per-app audio pin, run as the console user by the capture thread.
+        | Some("voice-route")
         // Prints the same list `refresh_capture_monitor_anchor` would log; skip host startup.
         | Some("list-monitors")
         | Some("-h")
@@ -513,6 +515,10 @@ fn real_main() -> Result<()> {
             println!("{compositor:?} ready");
             Ok(())
         }
+        // `voice-route set|clear …`: the per-app output pin. The capture thread spawns it as the
+        // console user, because a SYSTEM caller writes SYSTEM's app preferences, not the user's.
+        #[cfg(target_os = "windows")]
+        Some("voice-route") => audio::voice_route_cli(&args[1..]),
         // Connector names `PUNKTFUNK_CAPTURE_MONITOR` takes — available before the mgmt API is up.
         #[cfg(target_os = "linux")]
         Some("list-monitors") => {
