@@ -1671,6 +1671,8 @@ pub(crate) async fn run_admitted(
         preferred_pad_slot: Arc::new(std::sync::atomic::AtomicU8::new(
             preferred_pad_slot.unwrap_or(crate::session_status::NO_PAD_SLOT),
         )),
+        // Written by the input thread below, read by `GET /session/{id}/pads`.
+        pads: Arc::new(crate::pad_feed::PadFeed::new()),
     };
     tokio::spawn(control::run(control::Task {
         ctrl_send,
@@ -1818,6 +1820,7 @@ pub(crate) async fn run_admitted(
         let pad_audio_on = welcome.host_caps & punktfunk_core::quic::HOST_CAP_PAD_AUDIO != 0;
         let grants = session_grants.clone();
         let frame_map = frame_map.clone();
+        let pad_feed = controls.pads.clone();
         let counters = counters.clone();
         std::thread::Builder::new()
             .name("punktfunk1-input".into())
@@ -1835,6 +1838,7 @@ pub(crate) async fn run_admitted(
                         Some(pad_slots_tx),
                         grants,
                         frame_map,
+                        pad_feed,
                         stop,
                         counters,
                     )

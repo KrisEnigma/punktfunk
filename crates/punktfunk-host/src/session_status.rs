@@ -127,6 +127,9 @@ pub struct SessionControls {
     pub pad_owner: u64,
     /// Player slot the operator picked, 0-based; [`NO_PAD_SLOT`] = lazy claim.
     pub preferred_pad_slot: Arc<AtomicU8>,
+    /// Live pad tap this session's input thread publishes to. Idle until a console
+    /// opens `GET /session/{id}/pads` ([`crate::pad_feed`]).
+    pub pads: Arc<crate::pad_feed::PadFeed>,
 }
 
 /// `preferred_pad_slot` for a session the operator has not placed. Not a valid
@@ -157,6 +160,7 @@ impl SessionControls {
             fingerprint: None,
             pad_owner: crate::inject::pad_pool::owner_key(None),
             preferred_pad_slot: Arc::new(AtomicU8::new(NO_PAD_SLOT)),
+            pads: Arc::new(crate::pad_feed::PadFeed::new()),
         }
     }
 
@@ -932,6 +936,22 @@ mod tests {
         assert!(stop1.load(Ordering::SeqCst) && quit1.load(Ordering::SeqCst));
         assert!(!stop2.load(Ordering::SeqCst));
         assert!(!stop3.load(Ordering::SeqCst));
+    }
+
+    /// Each registered session carries its own pad feed, so a Controllers stream
+    /// opened on one id can never draw another session's input.
+    #[tokio::test]
+    async fn each_session_holds_its_own_pad_feed() {
+        let (a, _s, _q) = fake_session("aaaaaaaaaaaa");
+        let (b, _s2, _q2) = fake_session("bbbbbbbbbbbb");
+        let feed_a = controls(a.id).expect("A is live").pads;
+        let feed_b = controls(b.id).expect("B is live").pads;
+        assert!(!Arc::ptr_eq(&feed_a, &feed_b));
+
+        let mut rx = feed_a.subscribe();
+        // B has no subscriber, so its publish is a no-op; A's must not receive it either way.
+        feed_b.publish(|| unreachable!("an unwatched feed must not build a frame"));
+        assert!(rx.try_recv().is_err(), "A's stream holds only A's pads");
     }
 
     /// A Moonlight game has no live-session entry, so it is only on `/status`

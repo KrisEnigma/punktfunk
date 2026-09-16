@@ -3922,6 +3922,71 @@
         }
       }
     },
+    "/api/v1/session/{id}/pads": {
+      "get": {
+        "tags": [
+          "session"
+        ],
+        "summary": "Watch this session's pads (SSE)",
+        "description": "One frame per pad state the host applies — what it injects, not what the client\nsays it sent — so a controller question is answered from the host's own hand\ninstead of an evdev dump. `data:` is a [`PadFrame`]; `event:` is `pad.state`.\nAttaching replays every live pad, so a button already held draws at once.\n\nConsole lane only, like the window routes: a paired certificate is not bound to\na session id, and this is the operator's own machine watching its own input.\n\nNothing is published while nobody is attached, so a console on another page —\nor none at all — costs the input thread one atomic load per pad event.",
+        "operationId": "streamSessionPads",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Session id from `GET /status`",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "SSE stream; each frame's `data:` is one PadFrame",
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "$ref": "#/components/schemas/PadFrame"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No live session with that id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Concurrent event-stream cap reached — retry shortly",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/session/{id}/player": {
       "put": {
         "tags": [
@@ -9092,6 +9157,90 @@
           }
         ],
         "description": "A library entry plus the operator's view of it — whether they hid it.\n\nA field on [`GameEntry`] would leak onto every lane: `GET /library` returns\n`Vec<GameEntry>` except on the operator's lane, so a hidden flag cannot\nreach a paired client. `flatten` keeps the wire a plain entry plus one key."
+      },
+      "PadFrame": {
+        "type": "object",
+        "description": "One pad's whole state as the host holds it — the `data:` of one SSE frame.\n\nWhole state, not a delta: a page that attaches mid-press draws what is held without\nreplaying history, and the console derives its event log by diffing consecutive frames.",
+        "required": [
+          "pad",
+          "ts_ms",
+          "device",
+          "present",
+          "buttons",
+          "left_trigger",
+          "right_trigger",
+          "ls_x",
+          "ls_y",
+          "rs_x",
+          "rs_y"
+        ],
+        "properties": {
+          "buttons": {
+            "type": "integer",
+            "format": "int32",
+            "description": "`punktfunk_core::input::gamepad::BTN_*` mask, as applied.",
+            "minimum": 0
+          },
+          "declared": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "What the client declared at arrival, when it declared one. Differs from `device`\nwhere the build cannot construct that kind and folded it into one it can."
+          },
+          "device": {
+            "type": "string",
+            "description": "The virtual controller the host built: `xbox360`, `dualsense`, `steamdeck`, …"
+          },
+          "left_trigger": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "ls_x": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "ls_y": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "pad": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Wire index — the number this client gave the pad.",
+            "minimum": 0
+          },
+          "present": {
+            "type": "boolean",
+            "description": "`false` is the unplug frame: the host holds no device at this index any more."
+          },
+          "right_trigger": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "rs_x": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "rs_y": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "slot": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Host-wide OS slot — the identity every per-pad host resource is named by\n(mailbox, `SwDeviceCreate` instance, pairing MAC). Absent before the first\nframe builds the device.",
+            "minimum": 0
+          },
+          "ts_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Unix milliseconds ([`crate::events::HostEvent`] convention).",
+            "minimum": 0
+          }
+        }
       },
       "PairedClient": {
         "type": "object",

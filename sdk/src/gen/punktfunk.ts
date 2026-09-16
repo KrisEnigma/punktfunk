@@ -105,6 +105,8 @@ export type NativeClient = { readonly "access_level"?: string | null, readonly "
 export const NativeClient = Schema.Struct({ "access_level": Schema.optionalKey(Schema.Union([Schema.String, Schema.Null]).annotate({ "description": "`full` | `controller` | `view` | `custom`. Derived from `grants`;\nabsent only on hosts older than this field." })), "expires_unix": Schema.optionalKey(Schema.Never), "fingerprint": Schema.String.annotate({ "description": "Hex SHA-256 of the client certificate — the stable id." }), "granted_unix": Schema.optionalKey(Schema.Never), "grants": Schema.optionalKey(Schema.Never), "name": Schema.String, "preferred_pad_slot": Schema.optionalKey(Schema.Number.annotate({ "description": "Player slot this device's pads take, 0-based; `null` = whichever comes free.\nSet through `PUT /session/{id}/player` while the device streams.", "format": "int32" }).check(Schema.isInt()).check(Schema.isGreaterThanOrEqualTo(0))), "until_disconnect": Schema.Boolean.annotate({ "description": "The record is dropped when the device's last session ends, rather than at a clock\ntime. `expires_unix` may also be set; whichever comes first ends the grant." }) })
 export type NativePairStatus = { readonly "armed": boolean, readonly "enabled": boolean, readonly "expires_in_secs"?: never, readonly "paired_clients": number, readonly "pin"?: string | null }
 export const NativePairStatus = Schema.Struct({ "armed": Schema.Boolean, "enabled": Schema.Boolean.annotate({ "description": "True when this process started with `--native`." }), "expires_in_secs": Schema.optionalKey(Schema.Never), "paired_clients": Schema.Number.annotate({ "format": "int32" }).check(Schema.isInt()).check(Schema.isGreaterThanOrEqualTo(0)), "pin": Schema.optionalKey(Schema.Union([Schema.String, Schema.Null])) }).annotate({ "description": "Native pairing window. Unlike GameStream, the host mints the PIN (SPAKE2\nneeds it client-side first); the console displays it." })
+export type PadFrame = { readonly "buttons": number, readonly "declared"?: string | null, readonly "device": string, readonly "left_trigger": number, readonly "ls_x": number, readonly "ls_y": number, readonly "pad": number, readonly "present": boolean, readonly "right_trigger": number, readonly "rs_x": number, readonly "rs_y": number, readonly "slot"?: number, readonly "ts_ms": number }
+export const PadFrame = Schema.Struct({ "buttons": Schema.Number.annotate({ "description": "`punktfunk_core::input::gamepad::BTN_*` mask, as applied.", "format": "int32" }).check(Schema.isInt()).check(Schema.isGreaterThanOrEqualTo(0)), "declared": Schema.optionalKey(Schema.Union([Schema.String, Schema.Null]).annotate({ "description": "What the client declared at arrival, when it declared one. Differs from `device`\nwhere the build cannot construct that kind and folded it into one it can." })), "device": Schema.String.annotate({ "description": "The virtual controller the host built: `xbox360`, `dualsense`, `steamdeck`, …" }), "left_trigger": Schema.Number.annotate({ "format": "int32" }).check(Schema.isInt()).check(Schema.isGreaterThanOrEqualTo(0)), "ls_x": Schema.Number.annotate({ "format": "int32" }).check(Schema.isInt()), "ls_y": Schema.Number.annotate({ "format": "int32" }).check(Schema.isInt()), "pad": Schema.Number.annotate({ "description": "Wire index — the number this client gave the pad.", "format": "int32" }).check(Schema.isInt()).check(Schema.isGreaterThanOrEqualTo(0)), "present": Schema.Boolean.annotate({ "description": "`false` is the unplug frame: the host holds no device at this index any more." }), "right_trigger": Schema.Number.annotate({ "format": "int32" }).check(Schema.isInt()).check(Schema.isGreaterThanOrEqualTo(0)), "rs_x": Schema.Number.annotate({ "format": "int32" }).check(Schema.isInt()), "rs_y": Schema.Number.annotate({ "format": "int32" }).check(Schema.isInt()), "slot": Schema.optionalKey(Schema.Number.annotate({ "description": "Host-wide OS slot — the identity every per-pad host resource is named by\n(mailbox, `SwDeviceCreate` instance, pairing MAC). Absent before the first\nframe builds the device.", "format": "int32" }).check(Schema.isInt()).check(Schema.isGreaterThanOrEqualTo(0))), "ts_ms": Schema.Number.annotate({ "description": "Unix milliseconds ([`crate::events::HostEvent`] convention).", "format": "int64" }).check(Schema.isInt()).check(Schema.isGreaterThanOrEqualTo(0)) }).annotate({ "description": "One pad's whole state as the host holds it — the `data:` of one SSE frame.\n\nWhole state, not a delta: a page that attaches mid-press draws what is held without\nreplaying history, and the console derives its event log by diffing consecutive frames." })
 export type PairedClient = { readonly "fingerprint": string, readonly "label"?: string | null, readonly "not_after_unix"?: never, readonly "not_before_unix"?: never, readonly "subject"?: string | null }
 export const PairedClient = Schema.Struct({ "fingerprint": Schema.String.annotate({ "description": "Lowercase hex SHA-256 of the client certificate DER — the client's stable id here." }), "label": Schema.optionalKey(Schema.Union([Schema.String, Schema.Null]).annotate({ "description": "Operator-assigned display name (`PATCH /clients/{fp}`). The only way to tell two\npaired Moonlight devices apart; absent until somebody names the device." })), "not_after_unix": Schema.optionalKey(Schema.Never), "not_before_unix": Schema.optionalKey(Schema.Never), "subject": Schema.optionalKey(Schema.Union([Schema.String, Schema.Null]).annotate({ "description": "Certificate subject if the DER parses. Do not display as a device name: every\nmoonlight-common-c client self-signs `CN=NVIDIA GameStream Client`, so this names\nthe protocol. [`Self::label`] is the field to show." })) }).annotate({ "description": "A paired (certificate-pinned) Moonlight client." })
 export type PendingCeremony = { readonly "fingerprint": string, readonly "peer_ip": string, readonly "uniqueid": string }
@@ -796,6 +798,14 @@ export type RequestSessionIdr401 = ApiError
 export const RequestSessionIdr401 = ApiError
 export type RequestSessionIdr404 = ApiError
 export const RequestSessionIdr404 = ApiError
+export type StreamSessionPads200Sse = PadFrame
+export const StreamSessionPads200Sse = PadFrame
+export type StreamSessionPads401 = ApiError
+export const StreamSessionPads401 = ApiError
+export type StreamSessionPads404 = ApiError
+export const StreamSessionPads404 = ApiError
+export type StreamSessionPads503 = ApiError
+export const StreamSessionPads503 = ApiError
 export type SetSessionPlayerRequestJson = SessionPlayerRequest
 export const SetSessionPlayerRequestJson = SessionPlayerRequest
 export type SetSessionPlayer200 = SessionPlayer
@@ -1728,6 +1738,17 @@ export const make = (
       orElse: unexpectedStatus
     }))
   ),
+    "streamSessionPads": (id, options) => HttpClientRequest.get(`/api/v1/session/${id}/pads`).pipe(
+    withResponse(options?.config)(HttpClientResponse.matchStatus({
+      "401": decodeError("StreamSessionPads401", StreamSessionPads401),
+      "404": decodeError("StreamSessionPads404", StreamSessionPads404),
+      "503": decodeError("StreamSessionPads503", StreamSessionPads503),
+      orElse: unexpectedStatus
+    }))
+  ),
+    "streamSessionPadsSse": (id) => HttpClientRequest.get(`/api/v1/session/${id}/pads`).pipe(
+      sseRequest(StreamSessionPads200Sse)
+    ),
     "setSessionPlayer": (id, options) => HttpClientRequest.put(`/api/v1/session/${id}/player`).pipe(
     HttpClientRequest.bodyJsonUnsafe(options.payload),
     withResponse(options.config)(HttpClientResponse.matchStatus({
@@ -2361,6 +2382,32 @@ readonly "setSessionAudio": <Config extends OperationConfig>(id: string, options
 * Request a keyframe on one session
 */
 readonly "requestSessionIdr": <Config extends OperationConfig>(id: string, options: { readonly config?: Config | undefined } | undefined) => Effect.Effect<WithOptionalResponse<void, Config>, HttpClientError.HttpClientError | SchemaError | PunktfunkError<"RequestSessionIdr401", typeof RequestSessionIdr401.Type> | PunktfunkError<"RequestSessionIdr404", typeof RequestSessionIdr404.Type>>
+  /**
+* One frame per pad state the host applies — what it injects, not what the client
+* says it sent — so a controller question is answered from the host's own hand
+* instead of an evdev dump. `data:` is a [`PadFrame`]; `event:` is `pad.state`.
+* Attaching replays every live pad, so a button already held draws at once.
+* 
+* Console lane only, like the window routes: a paired certificate is not bound to
+* a session id, and this is the operator's own machine watching its own input.
+* 
+* Nothing is published while nobody is attached, so a console on another page —
+* or none at all — costs the input thread one atomic load per pad event.
+*/
+readonly "streamSessionPads": <Config extends OperationConfig>(id: string, options: { readonly config?: Config | undefined } | undefined) => Effect.Effect<WithOptionalResponse<void, Config>, HttpClientError.HttpClientError | SchemaError | PunktfunkError<"StreamSessionPads401", typeof StreamSessionPads401.Type> | PunktfunkError<"StreamSessionPads404", typeof StreamSessionPads404.Type> | PunktfunkError<"StreamSessionPads503", typeof StreamSessionPads503.Type>>
+  /**
+* One frame per pad state the host applies — what it injects, not what the client
+* says it sent — so a controller question is answered from the host's own hand
+* instead of an evdev dump. `data:` is a [`PadFrame`]; `event:` is `pad.state`.
+* Attaching replays every live pad, so a button already held draws at once.
+* 
+* Console lane only, like the window routes: a paired certificate is not bound to
+* a session id, and this is the operator's own machine watching its own input.
+* 
+* Nothing is published while nobody is attached, so a console on another page —
+* or none at all — costs the input thread one atomic load per pad event.
+*/
+readonly "streamSessionPadsSse": (id: string) => Stream.Stream<{ readonly event: string; readonly id: string | undefined; readonly data: typeof StreamSessionPads200Sse.Type }, HttpClientError.HttpClientError | SchemaError | Sse.Retry, typeof StreamSessionPads200Sse.DecodingServices>
   /**
 * Which controller this session is: slot 0 is Player 1, and a local co-op game
 * reads that order. Without a pick the slot is whichever comes free, so the pad

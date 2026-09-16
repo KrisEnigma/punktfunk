@@ -8,11 +8,15 @@
 //! `/{id}` one takes an id from `GET /status` and touches that session only. An id
 //! nothing is streaming is a 404, never another session's teardown.
 //!
+//! `GET /{id}/pads` is the read-only live view of what the host injects
+//! ([`crate::pad_feed`]).
 //! `GET /session/last` is the other side of the same registry: what a session came
 //! to, once nothing is streaming any more.
 
 use super::shared::*;
+use crate::pad_feed::PadFrame;
 use crate::vdisplay::Toplevel;
+use axum::response::sse::{Event, KeepAlive, Sse};
 use std::sync::atomic::Ordering;
 
 /// Stop the session
@@ -462,6 +466,54 @@ fn session_windows(
     _controls: &crate::session_status::SessionControls,
 ) -> Vec<crate::vdisplay::Toplevel> {
     Vec::new()
+}
+
+/// Watch this session's pads (SSE)
+///
+/// One frame per pad state the host applies — what it injects, not what the client
+/// says it sent — so a controller question is answered from the host's own hand
+/// instead of an evdev dump. `data:` is a [`PadFrame`]; `event:` is `pad.state`.
+/// Attaching replays every live pad, so a button already held draws at once.
+///
+/// Console lane only, like the window routes: a paired certificate is not bound to
+/// a session id, and this is the operator's own machine watching its own input.
+///
+/// Nothing is published while nobody is attached, so a console on another page —
+/// or none at all — costs the input thread one atomic load per pad event.
+#[utoipa::path(
+    get,
+    path = "/session/{id}/pads",
+    tag = "session",
+    operation_id = "streamSessionPads",
+    params(("id" = u64, Path, description = "Session id from `GET /status`")),
+    responses(
+        (status = OK, description = "SSE stream; each frame's `data:` is one PadFrame", body = PadFrame, content_type = "text/event-stream"),
+        (status = NOT_FOUND, description = "No live session with that id", body = ApiError),
+        (status = SERVICE_UNAVAILABLE, description = "Concurrent event-stream cap reached — retry shortly", body = ApiError),
+        (status = UNAUTHORIZED, description = "Missing or invalid bearer token", body = ApiError),
+    )
+)]
+pub(crate) async fn stream_session_pads(Path(id): Path<u64>) -> Response {
+    let Some(controls) = crate::session_status::controls(id) else {
+        return no_such_session();
+    };
+    let Some(slot) = super::events::try_acquire_slot() else {
+        return super::events::stream_cap_reached();
+    };
+    // Subscribing arms the resync; the input thread answers on its next wake (≤ 4 ms).
+    let rx = controls.pads.subscribe();
+    let stream = futures_util::stream::unfold((rx, slot), |(mut rx, slot)| async move {
+        // Lagged: drop a consumer too slow for a stick sweep rather than buffer it.
+        // Closed: the session ended, and its pads went with it.
+        let frame = rx.recv().await.ok()?;
+        let ev = Event::default()
+            .event("pad.state")
+            .data(serde_json::to_string(&frame).unwrap_or_else(|_| "{}".to_string()));
+        Some((Ok::<_, std::convert::Infallible>(ev), (rx, slot)))
+    });
+    Sse::new(stream)
+        .keep_alive(KeepAlive::new().interval(super::events::KEEP_ALIVE))
+        .into_response()
 }
 
 /// One refusal for "gone" and "not yours": telling them apart would confirm a
