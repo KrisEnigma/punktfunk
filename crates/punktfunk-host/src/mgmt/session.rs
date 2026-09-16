@@ -10,6 +10,8 @@
 //!
 //! `GET /{id}/pads` is the read-only live view of what the host injects
 //! ([`crate::pad_feed`]).
+//! `GET /session/last` is the other side of the same registry: what a session came
+//! to, once nothing is streaming any more.
 
 use super::shared::*;
 use crate::pad_feed::PadFrame;
@@ -210,6 +212,36 @@ pub(crate) struct SessionAccess {
     grants: u32,
     /// `full` | `controller` | `view` | `custom`, derived from `grants`.
     level: String,
+}
+
+/// Recently finished sessions
+///
+/// What each session came to — mode, codec, bitrate, frames, bring-up, and why it ended
+/// — newest first, at most the last eight. This is the whole of what the host knows, so
+/// the answer is what a bug report should carry.
+///
+/// A host that has not streamed since it started answers with an empty list.
+#[utoipa::path(
+    get,
+    path = "/session/last",
+    tag = "session",
+    operation_id = "getRecentSessions",
+    responses(
+        (status = OK, description = "Finished sessions, newest first; empty if none", body = RecentSessions),
+        (status = UNAUTHORIZED, description = "Missing or invalid bearer token", body = ApiError),
+    )
+)]
+pub(crate) async fn get_recent_sessions() -> Json<RecentSessions> {
+    Json(RecentSessions {
+        sessions: crate::session_status::recent(),
+    })
+}
+
+#[derive(Serialize, ToSchema)]
+pub(crate) struct RecentSessions {
+    /// Newest first. Bounded in memory and lost on a host restart — this is the last
+    /// few sessions, not a history.
+    sessions: Vec<crate::events::SessionSummary>,
 }
 
 /// List this session's windows
