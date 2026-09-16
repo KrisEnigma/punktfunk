@@ -398,6 +398,10 @@ pub(crate) struct SessionRow {
     preferred_pad_slot: Option<u8>,
     /// Seconds since the stream started.
     uptime_s: u64,
+    /// The last closed minute of link health: loss, the recovery frames it cost, and the FEC
+    /// and bitrate bands. `null` in a session's first minute, and on the compat plane.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    link: Option<crate::link_health::LinkMinute>,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -622,6 +626,7 @@ pub(crate) async fn get_status(State(st): State<Arc<MgmtState>>) -> Json<Runtime
             pads: s.pads.clone(),
             preferred_pad_slot: s.preferred_pad_slot,
             uptime_s: s.uptime_s,
+            link: s.link.clone(),
         })
         .collect();
     if gs_video {
@@ -643,6 +648,7 @@ pub(crate) async fn get_status(State(st): State<Arc<MgmtState>>) -> Json<Runtime
             pads: Vec::new(),
             preferred_pad_slot: None,
             uptime_s: 0,
+            link: None,
         });
     }
     // Detail card is singular: GameStream if live, else the first native session. `active_sessions` is the true count.
