@@ -259,6 +259,13 @@ unsafe fn sync_copy_stream() -> Result<()> {
     unsafe { ck(cuStreamSynchronize(copy_stream()), "cuStreamSynchronize") }
 }
 
+/// CPU wait for this thread's copy stream, a semaphore wait enqueued ahead included. Context
+/// must be current.
+pub fn copy_stream_sync() -> Result<()> {
+    // SAFETY: context current (doc contract); a stream sync touches no Rust memory.
+    unsafe { sync_copy_stream() }
+}
+
 /// `sync: false` carries `copy_async`'s source-lifetime contract.
 unsafe fn copy_issue(copy: &CUDA_MEMCPY2D, what: &str, sync: bool) -> Result<()> {
     // SAFETY: caller: context current and `copy` describes live in-bounds memory.

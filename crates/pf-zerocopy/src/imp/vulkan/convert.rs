@@ -9,8 +9,10 @@
 //!   host slot OPAQUE_FD ──imported VkBuffer ──────┘
 //! ```
 //!
-//! Per frame: an acquire barrier from the external producer, one dispatch, fence wait. The
-//! completed fence is what orders the writes before the host's NVENC read.
+//! Per frame: an acquire barrier from the external producer, one dispatch, a signal on the
+//! exported timeline. The host waits that value on its CUDA stream before NVENC reads the
+//! slot, so no CPU sits between the pass and the encode. `FRAMES` command buffers rotate;
+//! reusing one waits its own value first.
 
 use super::VkBridge;
 use crate::imp::proto::{ConvertOut, ConvertSrc, CursorRect};
@@ -24,6 +26,9 @@ const CONVERT_SPV: &[u8] = include_bytes!("../convert_img.spv");
 const PUSH_BYTES: u32 = 36;
 /// Cursor bitmaps larger than this (in bytes) are refused; 256² RGBA8 is the capture cap.
 const CURSOR_MAX_BYTES: u64 = 256 * 256 * 4;
+/// Passes in flight before a command buffer's reuse waits. The host holds at most two
+/// frames ahead of the encoder.
+const FRAMES: usize = 4;
 
 const fn fourcc(a: u8, b: u8, c: u8, d: u8) -> u32 {
     (a as u32) | ((b as u32) << 8) | ((c as u32) << 16) | ((d as u32) << 24)
@@ -73,13 +78,27 @@ struct CursorBuf {
     map: *mut u8,
 }
 
+/// One rotating pass: its command buffer, descriptor set, and the timeline value its last
+/// submit signals (0: never used).
+struct Frame {
+    cmd: vk::CommandBuffer,
+    dset: vk::DescriptorSet,
+    ticket: u64,
+}
+
 pub(super) struct ConvertState {
     module: vk::ShaderModule,
     dset_layout: vk::DescriptorSetLayout,
     playout: vk::PipelineLayout,
     pipeline: vk::Pipeline,
     dpool: vk::DescriptorPool,
-    dset: vk::DescriptorSet,
+    frames: Vec<Frame>,
+    next: usize,
+    /// Exportable timeline every pass signals; `ticket` is the last value handed out.
+    timeline: vk::Semaphore,
+    ts: ash::khr::timeline_semaphore::Device,
+    sem_fd: ash::khr::external_semaphore_fd::Device,
+    ticket: u64,
     sampler: vk::Sampler,
     srcs: HashMap<i32, SrcImage>,
     slots: HashMap<u32, SlotBuf>,
@@ -89,7 +108,7 @@ pub(super) struct ConvertState {
 
 impl ConvertState {
     /// Every handle, CUDA-free; the caller has idled the device.
-    pub(super) unsafe fn destroy(&mut self, d: &ash::Device) {
+    pub(super) unsafe fn destroy(&mut self, d: &ash::Device, pool: vk::CommandPool) {
         // SAFETY: raw Vulkan on this bridge's own device: every info struct is a local that
         // outlives the call, each fallible step destroys what it created, and the fence wait
         // retires the work before any handle it used is freed.
@@ -108,6 +127,11 @@ impl ConvertState {
                 d.destroy_buffer(c.buffer, None);
                 d.free_memory(c.memory, None);
             }
+            let cmds: Vec<vk::CommandBuffer> = self.frames.drain(..).map(|f| f.cmd).collect();
+            if !cmds.is_empty() {
+                d.free_command_buffers(pool, &cmds);
+            }
+            d.destroy_semaphore(self.timeline, None);
             d.destroy_sampler(self.sampler, None);
             d.destroy_pipeline(self.pipeline, None);
             d.destroy_pipeline_layout(self.playout, None);
@@ -133,6 +157,9 @@ impl VkBridge {
             if !self.modifier_import {
                 bail!("VK_EXT_image_drm_format_modifier unavailable — no fused convert");
             }
+            if !self.timeline_export {
+                bail!("timeline semaphore export unavailable — no fused convert");
+            }
             let d = &self.device;
             let words: Vec<u32> = CONVERT_SPV
                 .chunks_exact(4)
@@ -147,7 +174,12 @@ impl VkBridge {
                 playout: vk::PipelineLayout::null(),
                 pipeline: vk::Pipeline::null(),
                 dpool: vk::DescriptorPool::null(),
-                dset: vk::DescriptorSet::null(),
+                frames: Vec::new(),
+                next: 0,
+                timeline: vk::Semaphore::null(),
+                ts: ash::khr::timeline_semaphore::Device::new(&self.instance, &self.device),
+                sem_fd: ash::khr::external_semaphore_fd::Device::new(&self.instance, &self.device),
+                ticket: 0,
                 sampler: vk::Sampler::null(),
                 srcs: HashMap::new(),
                 slots: HashMap::new(),
@@ -155,7 +187,7 @@ impl VkBridge {
                 cursor_serial: u64::MAX,
             };
             if let Err(e) = self.build_convert(&mut st) {
-                st.destroy(&self.device);
+                st.destroy(&self.device, self.cmd_pool);
                 return Err(e);
             }
             self.conv = Some(st);
@@ -220,29 +252,61 @@ impl VkBridge {
                 )
                 .map_err(|(_, e)| e)
                 .context("create convert pipeline")?[0];
+            let n = FRAMES as u32;
             let sizes = [
                 vk::DescriptorPoolSize::default()
                     .ty(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-                    .descriptor_count(1),
+                    .descriptor_count(n),
                 vk::DescriptorPoolSize::default()
                     .ty(vk::DescriptorType::STORAGE_BUFFER)
-                    .descriptor_count(2),
+                    .descriptor_count(2 * n),
             ];
             st.dpool = d
                 .create_descriptor_pool(
                     &vk::DescriptorPoolCreateInfo::default()
-                        .max_sets(1)
+                        .max_sets(n)
                         .pool_sizes(&sizes),
                     None,
                 )
                 .context("create convert descriptor pool")?;
-            st.dset = d
+            let per_frame = [st.dset_layout; FRAMES];
+            let dsets = d
                 .allocate_descriptor_sets(
                     &vk::DescriptorSetAllocateInfo::default()
                         .descriptor_pool(st.dpool)
-                        .set_layouts(&layouts),
+                        .set_layouts(&per_frame),
                 )
-                .context("allocate convert descriptor set")?[0];
+                .context("allocate convert descriptor sets")?;
+            let cmds = d
+                .allocate_command_buffers(
+                    &vk::CommandBufferAllocateInfo::default()
+                        .command_pool(self.cmd_pool)
+                        .level(vk::CommandBufferLevel::PRIMARY)
+                        .command_buffer_count(n),
+                )
+                .context("allocate convert command buffers")?;
+            st.frames = cmds
+                .into_iter()
+                .zip(dsets)
+                .map(|(cmd, dset)| Frame {
+                    cmd,
+                    dset,
+                    ticket: 0,
+                })
+                .collect();
+            let mut type_ci = vk::SemaphoreTypeCreateInfo::default()
+                .semaphore_type(vk::SemaphoreType::TIMELINE)
+                .initial_value(0);
+            let mut export = vk::ExportSemaphoreCreateInfo::default()
+                .handle_types(vk::ExternalSemaphoreHandleTypeFlags::OPAQUE_FD);
+            st.timeline = d
+                .create_semaphore(
+                    &vk::SemaphoreCreateInfo::default()
+                        .push_next(&mut type_ci)
+                        .push_next(&mut export),
+                    None,
+                )
+                .context("create convert timeline")?;
             st.sampler = d
                 .create_sampler(
                     &vk::SamplerCreateInfo::default()
@@ -363,11 +427,54 @@ impl VkBridge {
                 );
             }
             self.ensure_cursor_capacity(need)?;
+            self.quiesce_convert()?;
             let st = self.conv.as_mut().expect("ensured above");
             let c = st.cursor.as_ref().expect("capacity ensured");
             std::ptr::copy_nonoverlapping(rgba.as_ptr(), c.map, need as usize);
             st.cursor_serial = serial;
             Ok(())
+        }
+    }
+
+    /// Wait until every pass submitted so far retired: the cursor buffer is about to change
+    /// under them.
+    unsafe fn quiesce_convert(&self) -> Result<()> {
+        // SAFETY: raw Vulkan on this bridge's own device; the wait-info locals outlive the
+        // synchronous call and the timeline is live while `conv` is.
+        unsafe {
+            let st = self.conv.as_ref().expect("convert state");
+            if st.ticket == 0 {
+                return Ok(());
+            }
+            let sems = [st.timeline];
+            let values = [st.ticket];
+            st.ts
+                .wait_semaphores(
+                    &vk::SemaphoreWaitInfo::default()
+                        .semaphores(&sems)
+                        .values(&values),
+                    1_000_000_000,
+                )
+                .context("wait convert timeline")
+        }
+    }
+
+    /// A fresh OPAQUE_FD of the convert timeline, for the host's CUDA import.
+    pub fn convert_timeline_fd(&mut self) -> Result<OwnedFd> {
+        // SAFETY: raw Vulkan on this bridge's own device; the info local outlives the call
+        // and the descriptor it returns is fresh, so `OwnedFd` is its only owner.
+        unsafe {
+            self.ensure_convert()?;
+            let st = self.conv.as_ref().expect("ensured above");
+            let fd = st
+                .sem_fd
+                .get_semaphore_fd(
+                    &vk::SemaphoreGetFdInfoKHR::default()
+                        .semaphore(st.timeline)
+                        .handle_type(vk::ExternalSemaphoreHandleTypeFlags::OPAQUE_FD),
+                )
+                .context("vkGetSemaphoreFdKHR(convert timeline)")?;
+            Ok(<OwnedFd as std::os::fd::FromRawFd>::from_raw_fd(fd))
         }
     }
 
@@ -599,14 +706,15 @@ impl VkBridge {
     }
 
     /// One fused pass: `src` (with the cursor at `cursor`, when given) into slot `slot` laid
-    /// out as `out`. Returns once the GPU is done.
+    /// out as `out`. Returns the timeline value the pass signals; the host waits it on its
+    /// CUDA stream ([`convert_timeline_fd`](Self::convert_timeline_fd)).
     pub fn convert(
         &mut self,
         src: &ConvertSrc,
         slot: u32,
         out: &ConvertOut,
         cursor: Option<CursorRect>,
-    ) -> Result<()> {
+    ) -> Result<u64> {
         // SAFETY: raw Vulkan on this bridge's own device: every info struct is a local that
         // outlives the call, each fallible step destroys what it created, and the fence wait
         // retires the work before any handle it used is freed.
@@ -633,6 +741,24 @@ impl VkBridge {
             let qf = self.qf;
             let d = &self.device;
             let st = self.conv.as_ref().expect("state");
+            let idx = st.next;
+            let frame = &st.frames[idx];
+            // Reusing this command buffer waits its own last pass; with `FRAMES` rotating
+            // the host consumed that slot long ago.
+            if frame.ticket > 0 {
+                let sems = [st.timeline];
+                let values = [frame.ticket];
+                st.ts
+                    .wait_semaphores(
+                        &vk::SemaphoreWaitInfo::default()
+                            .semaphores(&sems)
+                            .values(&values),
+                        1_000_000_000,
+                    )
+                    .context("wait convert timeline (reuse)")?;
+            }
+            let (cmd, dset) = (frame.cmd, frame.dset);
+            let value = st.ticket + 1;
             let slot_buf = st
                 .slots
                 .get(&slot)
@@ -657,17 +783,17 @@ impl VkBridge {
             d.update_descriptor_sets(
                 &[
                     vk::WriteDescriptorSet::default()
-                        .dst_set(st.dset)
+                        .dst_set(dset)
                         .dst_binding(0)
                         .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
                         .image_info(&img_info),
                     vk::WriteDescriptorSet::default()
-                        .dst_set(st.dset)
+                        .dst_set(dset)
                         .dst_binding(1)
                         .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
                         .buffer_info(&dst_info),
                     vk::WriteDescriptorSet::default()
-                        .dst_set(st.dset)
+                        .dst_set(dset)
                         .dst_binding(2)
                         .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
                         .buffer_info(&cur_info),
@@ -675,7 +801,7 @@ impl VkBridge {
                 &[],
             );
             d.begin_command_buffer(
-                self.cmd,
+                cmd,
                 &vk::CommandBufferBeginInfo::default()
                     .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
             )
@@ -701,7 +827,7 @@ impl VkBridge {
                         .layer_count(1),
                 );
             d.cmd_pipeline_barrier(
-                self.cmd,
+                cmd,
                 vk::PipelineStageFlags::TOP_OF_PIPE,
                 vk::PipelineStageFlags::COMPUTE_SHADER,
                 vk::DependencyFlags::empty(),
@@ -709,13 +835,13 @@ impl VkBridge {
                 &[],
                 &[acquire],
             );
-            d.cmd_bind_pipeline(self.cmd, vk::PipelineBindPoint::COMPUTE, st.pipeline);
+            d.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, st.pipeline);
             d.cmd_bind_descriptor_sets(
-                self.cmd,
+                cmd,
                 vk::PipelineBindPoint::COMPUTE,
                 st.playout,
                 0,
-                &[st.dset],
+                &[dset],
                 &[],
             );
             let (cw, ch, cx, cy) = match cursor {
@@ -734,35 +860,35 @@ impl VkBridge {
                 cy as u32,
             ];
             let bytes: Vec<u8> = push.iter().flat_map(|w| w.to_ne_bytes()).collect();
-            d.cmd_push_constants(
-                self.cmd,
-                st.playout,
-                vk::ShaderStageFlags::COMPUTE,
-                0,
-                &bytes,
-            );
+            d.cmd_push_constants(cmd, st.playout, vk::ShaderStageFlags::COMPUTE, 0, &bytes);
             d.cmd_dispatch(
-                self.cmd,
+                cmd,
                 out.width.div_ceil(4).div_ceil(8),
                 out.height.div_ceil(2).div_ceil(8),
                 1,
             );
-            d.end_command_buffer(self.cmd).context("end convert cmd")?;
-            let cmds = [self.cmd];
-            d.queue_submit(
+            d.end_command_buffer(cmd).context("end convert cmd")?;
+            let cmds = [cmd];
+            let sems = [st.timeline];
+            let values = [value];
+            let mut tsi =
+                vk::TimelineSemaphoreSubmitInfo::default().signal_semaphore_values(&values);
+            if let Err(e) = d.queue_submit(
                 self.queue,
-                &[vk::SubmitInfo::default().command_buffers(&cmds)],
-                self.fence,
-            )
-            .context("submit convert")?;
-            if let Err(e) = d.wait_for_fences(&[self.fence], true, 1_000_000_000) {
+                &[vk::SubmitInfo::default()
+                    .command_buffers(&cmds)
+                    .signal_semaphores(&sems)
+                    .push_next(&mut tsi)],
+                vk::Fence::null(),
+            ) {
                 let _ = d.device_wait_idle();
-                let _ = d.reset_fences(&[self.fence]);
-                return Err(e).context("convert fence wait");
+                return Err(e).context("submit convert");
             }
-            d.reset_fences(&[self.fence])
-                .context("reset convert fence")?;
-            Ok(())
+            let st = self.conv.as_mut().expect("state");
+            st.frames[idx].ticket = value;
+            st.ticket = value;
+            st.next = (idx + 1) % FRAMES;
+            Ok(value)
         }
     }
 }
@@ -840,6 +966,13 @@ mod tests {
         bridge
             .set_cursor(7, cw, ch, &cursor)
             .expect("cursor upload");
+        let sem = cuda::ExternalSemaphore::import_owned_timeline_fd(
+            bridge
+                .convert_timeline_fd()
+                .expect("timeline fd")
+                .into_raw_fd(),
+        )
+        .expect("convert timeline into CUDA");
         let reference = |x: u32, y: u32| -> [u8; 3] {
             let inside = (x as i32) >= cx
                 && (y as i32) >= cy
@@ -881,9 +1014,10 @@ mod tests {
             };
             // Twice: the second pass exercises the cached image's re-acquire.
             for _ in 0..2 {
-                bridge
+                let value = bridge
                     .convert(&src, slot.id as u32, &out, rect)
                     .expect("fused convert");
+                sem.wait(value).expect("wait the pass on the copy stream");
             }
             let mut worst = 0u8;
             if mode == 1 {

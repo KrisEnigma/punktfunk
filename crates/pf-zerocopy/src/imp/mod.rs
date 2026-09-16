@@ -221,16 +221,25 @@ impl Importer {
         }
     }
     /// One fused pass: the dmabuf (any modifier) plus the cursor into the registered slot.
+    /// Returns the timeline value the pass signals; wait it through
+    /// [`convert_timeline`](Self::convert_timeline) before the slot is read.
     pub fn convert(
         &mut self,
         src: &ConvertSrc,
         slot: u32,
         out: &ConvertOut,
         cursor: Option<CursorRect>,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<u64> {
         match self {
             Importer::Remote(r) => r.convert(src, slot, out, cursor),
             Importer::InProc(i) => i.convert(src, slot, out, cursor),
+        }
+    }
+    /// The convert timeline as an OPAQUE_FD, imported into CUDA once per encoder session.
+    pub fn convert_timeline(&mut self) -> anyhow::Result<std::os::fd::OwnedFd> {
+        match self {
+            Importer::Remote(r) => r.convert_timeline(),
+            Importer::InProc(i) => i.convert_timeline_fd(),
         }
     }
 

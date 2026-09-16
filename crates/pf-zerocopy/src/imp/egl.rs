@@ -794,15 +794,21 @@ impl EglImporter {
         self.vk_bridge()?.set_cursor(serial, width, height, rgba)
     }
 
-    /// One fused pass: dmabuf (any modifier) + cursor → the registered slot.
+    /// One fused pass: dmabuf (any modifier) + cursor → the registered slot. Returns the
+    /// timeline value the pass signals.
     pub fn convert(
         &mut self,
         src: &super::proto::ConvertSrc,
         slot: u32,
         out: &super::proto::ConvertOut,
         cursor: Option<super::proto::CursorRect>,
-    ) -> Result<()> {
+    ) -> Result<u64> {
         self.vk_bridge()?.convert(src, slot, out, cursor)
+    }
+
+    /// The convert timeline as an OPAQUE_FD for the host's CUDA import.
+    pub fn convert_timeline_fd(&mut self) -> Result<std::os::fd::OwnedFd> {
+        self.vk_bridge()?.convert_timeline_fd()
     }
 
     /// Import a LINEAR dmabuf via the Vulkan bridge. NVIDIA EGL cannot sample LINEAR; CUDA

@@ -365,6 +365,15 @@ impl RemoteImporter {
     /// for release.
     /// Send one request and wait for its reply; a transport failure marks the worker dead.
     fn call(&mut self, req: &Request, fd: Option<BorrowedFd>) -> Result<Reply> {
+        self.call_fd(req, fd).map(|(reply, _)| reply)
+    }
+
+    /// [`call`](Self::call), keeping the descriptor the reply carries.
+    fn call_fd(
+        &mut self,
+        req: &Request,
+        fd: Option<BorrowedFd>,
+    ) -> Result<(Reply, Option<OwnedFd>)> {
         if self.dead() {
             bail!("zerocopy worker is dead");
         }
@@ -373,7 +382,7 @@ impl RemoteImporter {
             return Err(e).context("zerocopy worker died (send)");
         }
         match ipc::recv::<Reply>(self.shared.sock.as_fd(), &mut self.rbuf) {
-            Ok((reply, _)) => Ok(reply),
+            Ok(reply) => Ok(reply),
             Err(e) => {
                 self.mark_dead();
                 Err(e).context("zerocopy worker died (no reply)")
@@ -425,15 +434,15 @@ impl RemoteImporter {
         }
     }
 
-    /// One fused pass of `src` into slot `slot`. The dmabuf fd crosses once per key, like an
-    /// import; a worker that lost it asks again.
+    /// One fused pass of `src` into slot `slot`; returns the timeline value it signals. The
+    /// dmabuf fd crosses once per key, like an import; a worker that lost it asks again.
     pub fn convert(
         &mut self,
         src: &ConvertSrc,
         slot: u32,
         out: &ConvertOut,
         cursor: Option<CursorRect>,
-    ) -> Result<()> {
+    ) -> Result<u64> {
         let key = dmabuf_key(src.fd)?;
         let mut attempts = 0;
         loop {
@@ -450,7 +459,7 @@ impl RemoteImporter {
                 cursor,
             };
             match self.call(&req, pass)? {
-                Reply::Done => return Ok(()),
+                Reply::Converted { value } => return Ok(value),
                 Reply::NeedFd if attempts == 1 => {
                     self.sent_keys.remove(&key);
                     continue;
@@ -464,6 +473,18 @@ impl RemoteImporter {
                     self.mark_dead();
                     bail!("unexpected reply to Convert: {other:?}")
                 }
+            }
+        }
+    }
+
+    /// The worker's convert timeline as an OPAQUE_FD, for the host's CUDA import.
+    pub fn convert_timeline(&mut self) -> Result<OwnedFd> {
+        match self.call_fd(&Request::ConvertTimeline, None)? {
+            (Reply::Timeline, Some(fd)) => Ok(fd),
+            (Reply::Err { message }, _) => bail!("convert timeline: {message}"),
+            (other, _) => {
+                self.mark_dead();
+                bail!("unexpected reply to ConvertTimeline: {other:?}")
             }
         }
     }

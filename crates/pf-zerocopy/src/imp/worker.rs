@@ -19,7 +19,7 @@ use super::proto::{
 use anyhow::{bail, Context, Result};
 use std::collections::{HashMap, VecDeque};
 use std::io;
-use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
 
 /// PipeWire pools are ≤ ~16; 64 only applies if a producer churns fds without renegotiating.
 const FD_CACHE_CAP: usize = 64;
@@ -126,6 +126,14 @@ pub(crate) trait ImportBackend {
             message: "no convert lane".into(),
         }
     }
+    fn convert_timeline(&mut self) -> (Reply, Option<OwnedFd>) {
+        (
+            Reply::Err {
+                message: "no convert lane".into(),
+            },
+            None,
+        )
+    }
     /// Desc only on first delivery of that id. [`Reply::NeedFd`]: host resends the fd once.
     fn import(&mut self, req: &ImportReq, fd: Option<OwnedFd>) -> Reply;
     fn release(&mut self, id: u32);
@@ -158,7 +166,7 @@ pub(crate) fn serve(sock: &OwnedFd, backend: &mut dyn ImportBackend) -> Result<(
                 let reply = Reply::Modifiers {
                     modifiers: backend.modifiers(fourcc),
                 };
-                if send_or_eof(sock, &reply)? {
+                if send_or_eof(sock, &reply, None)? {
                     return Ok(());
                 }
             }
@@ -185,7 +193,7 @@ pub(crate) fn serve(sock: &OwnedFd, backend: &mut dyn ImportBackend) -> Result<(
                     has_fd,
                 };
                 let reply = backend.import(&req, fd);
-                if send_or_eof(sock, &reply)? {
+                if send_or_eof(sock, &reply, None)? {
                     return Ok(());
                 }
             }
@@ -193,7 +201,7 @@ pub(crate) fn serve(sock: &OwnedFd, backend: &mut dyn ImportBackend) -> Result<(
             Request::ClearCache => backend.clear_cache(),
             Request::RegisterSlot { id, size } => {
                 let reply = backend.register_slot(id, size, fd);
-                if send_or_eof(sock, &reply)? {
+                if send_or_eof(sock, &reply, None)? {
                     return Ok(());
                 }
             }
@@ -205,7 +213,7 @@ pub(crate) fn serve(sock: &OwnedFd, backend: &mut dyn ImportBackend) -> Result<(
                 len,
             } => {
                 let reply = backend.set_cursor(serial, width, height, len, fd);
-                if send_or_eof(sock, &reply)? {
+                if send_or_eof(sock, &reply, None)? {
                     return Ok(());
                 }
             }
@@ -218,7 +226,13 @@ pub(crate) fn serve(sock: &OwnedFd, backend: &mut dyn ImportBackend) -> Result<(
                 cursor,
             } => {
                 let reply = backend.convert(key, has_fd, src, slot, out, cursor, fd);
-                if send_or_eof(sock, &reply)? {
+                if send_or_eof(sock, &reply, None)? {
+                    return Ok(());
+                }
+            }
+            Request::ConvertTimeline => {
+                let (reply, fd) = backend.convert_timeline();
+                if send_or_eof(sock, &reply, fd.as_ref().map(|f| f.as_fd()))? {
                     return Ok(());
                 }
             }
@@ -227,8 +241,8 @@ pub(crate) fn serve(sock: &OwnedFd, backend: &mut dyn ImportBackend) -> Result<(
 }
 
 /// `Ok(true)`: host is gone (EPIPE); the loop should end quietly.
-fn send_or_eof(sock: &OwnedFd, reply: &Reply) -> Result<bool> {
-    match ipc::send(sock.as_fd(), reply, None) {
+fn send_or_eof(sock: &OwnedFd, reply: &Reply, fd: Option<BorrowedFd>) -> Result<bool> {
+    match ipc::send(sock.as_fd(), reply, fd) {
         Ok(()) => Ok(false),
         Err(e) if e.kind() == io::ErrorKind::BrokenPipe => Ok(true),
         Err(e) => Err(e).context("worker send"),
@@ -385,10 +399,21 @@ impl ImportBackend for EglBackend {
         };
         src.fd = raw;
         match self.importer.convert(&src, slot, &out, cursor) {
-            Ok(()) => Reply::Done,
+            Ok(value) => Reply::Converted { value },
             Err(e) => Reply::Err {
                 message: format!("{e:#}"),
             },
+        }
+    }
+    fn convert_timeline(&mut self) -> (Reply, Option<OwnedFd>) {
+        match self.importer.convert_timeline_fd() {
+            Ok(fd) => (Reply::Timeline, Some(fd)),
+            Err(e) => (
+                Reply::Err {
+                    message: format!("{e:#}"),
+                },
+                None,
+            ),
         }
     }
 }

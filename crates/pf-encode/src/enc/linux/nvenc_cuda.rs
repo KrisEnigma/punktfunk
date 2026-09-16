@@ -39,7 +39,7 @@ use pf_zerocopy::cuda::{self, InputSurface};
 use pf_zerocopy::vkslot::{SlotFormat, VkSlotBlend, VkSlotRef};
 use std::collections::{HashSet, VecDeque};
 use std::ffi::c_void;
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsRawFd, IntoRawFd};
 use std::ptr;
 use std::sync::mpsc;
 
@@ -748,6 +748,9 @@ pub struct NvencCudaEncoder {
     /// The last raw frame converted (`pts_ns`, fd) and the ring slot holding it: a repeat is
     /// cloned from there instead of converted again.
     last_raw: Option<(u64, i32, usize)>,
+    /// The worker's convert timeline in CUDA: each pass's value is waited on the copy stream
+    /// before NVENC maps the slot.
+    convert_sem: Option<cuda::ExternalSemaphore>,
     /// One-shot [`diagnose_failed_open`](Self::diagnose_failed_open) — a reset burst logs once.
     diagnosed: bool,
     /// Two-thread retrieve. `None` in sync mode. Lives `init_session`→`teardown`.
@@ -872,6 +875,7 @@ impl NvencCudaEncoder {
             worker_slots: HashSet::new(),
             worker_cursor_serial: u64::MAX,
             last_raw: None,
+            convert_sem: None,
             diagnosed: false,
             inited: false,
             rfi_supported: false,
@@ -966,6 +970,7 @@ impl NvencCudaEncoder {
         }
         self.worker_slots.clear();
         self.last_raw = None;
+        self.convert_sem = None;
         for &bs in &self.bitstreams {
             let _ = (api().destroy_bitstream_buffer)(self.encoder, bs);
         }
@@ -1813,11 +1818,15 @@ impl NvencCudaEncoder {
     /// into the reframe staging slot, which the Lanczos pass then scales into the ring. One
     /// GPU pass, no copy. A failure feeds the raw-dmabuf latch, so the next capture falls back
     /// to the import path instead of looping here.
+    /// The raw lane: the held dmabuf goes through the worker's fused pass into the slot (or
+    /// the staging slot of a reframing session). `ordered`: the copy stream carries the
+    /// hand-off to NVENC; otherwise the CPU waits it here.
     fn convert_raw(
         &mut self,
         captured: &CapturedFrame,
         d: &DmabufFrame,
         slot: usize,
+        ordered: bool,
     ) -> Result<()> {
         let fmt = slot_fmt_of(self.buffer_fmt);
         let SlotSurface::Vk(dst) = &self.ring[slot].surface else {
@@ -1835,18 +1844,38 @@ impl NvencCudaEncoder {
             if (pts, fd) == key && prev != slot && prev < self.ring.len() {
                 let rows = fmt.rows(self.height) as usize;
                 let (src, dst_s) = (&self.ring[prev].surface, &self.ring[slot].surface);
-                cuda::copy_surface_to_surface(src.ptr(), dst_s.ptr(), dst_s.pitch(), rows, true)
-                    .context("NVENC (Linux): clone the repeat slot")?;
+                cuda::copy_surface_to_surface(
+                    src.ptr(),
+                    dst_s.ptr(),
+                    dst_s.pitch(),
+                    rows,
+                    !ordered,
+                )
+                .context("NVENC (Linux): clone the repeat slot")?;
                 self.last_raw = Some((pts, fd, slot));
                 return Ok(());
             }
         }
-        match self.convert_raw_inner(captured, d, fmt, target, src_size) {
-            Ok(()) => pf_zerocopy::note_raw_dmabuf_import_ok(),
+        let value = match self.convert_raw_inner(captured, d, fmt, target, src_size) {
+            Ok(v) => {
+                pf_zerocopy::note_raw_dmabuf_import_ok();
+                v
+            }
             Err(e) => {
                 pf_zerocopy::note_raw_dmabuf_import_failure("nvenc convert");
                 return Err(e).context("NVENC (Linux): fused convert");
             }
+        };
+        // The pass lands on the GPU; its value gates the copy stream, which is NVENC's input
+        // stream. An unordered submit, or a reframe reading the staging slot on another queue,
+        // waits here instead.
+        self.convert_sem
+            .as_ref()
+            .ok_or_else(|| anyhow!("convert timeline not imported"))?
+            .wait(value)
+            .context("NVENC (Linux): wait the fused pass")?;
+        if !ordered || self.reframe.is_some() {
+            cuda::copy_stream_sync().context("NVENC (Linux): sync the fused pass")?;
         }
         if let Some(r) = &self.reframe {
             let (crop, out) = (r.crop, r.out);
@@ -1867,18 +1896,28 @@ impl NvencCudaEncoder {
         fmt: SlotFormat,
         target: VkSlotRef,
         src_size: (u32, u32),
-    ) -> Result<()> {
+    ) -> Result<u64> {
         if self.worker.as_ref().is_none_or(|w| w.dead()) {
             self.worker =
                 Some(pf_zerocopy::Importer::new_for_capture().context("spawn the convert worker")?);
             self.worker_slots.clear();
             self.worker_cursor_serial = u64::MAX;
+            self.convert_sem = None;
         }
         let vk = self
             .vk_blend
             .as_mut()
             .ok_or_else(|| anyhow!("no Vulkan slot device"))?;
         let worker = self.worker.as_mut().expect("ensured above");
+        if self.convert_sem.is_none() {
+            let fd = worker
+                .convert_timeline()
+                .context("export the convert timeline")?;
+            self.convert_sem = Some(
+                cuda::ExternalSemaphore::import_owned_timeline_fd(fd.into_raw_fd())
+                    .context("import the convert timeline")?,
+            );
+        }
         if !self.worker_slots.contains(&target.id) {
             let (fd, size) = vk.slot_fd(target.id)?;
             worker.register_slot(target.id as u32, fd, size)?;
@@ -2157,7 +2196,7 @@ impl NvencCudaEncoder {
         // A held dmabuf goes through the worker's fused pass (cursor included); a CUDA buffer
         // is copied in, reframed when the session scales, and the cursor blended after.
         let fused_cursor = if let Source::Dmabuf(d) = src {
-            self.convert_raw(captured, d, slot)?;
+            self.convert_raw(captured, d, slot, ordered)?;
             true
         } else {
             let Source::Cuda(buf) = src else {

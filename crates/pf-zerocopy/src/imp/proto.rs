@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 /// Bumped on any wire change. Echoed in [`Reply::Ready`]; the host refuses a mismatch.
 /// Same binary (`/proc/self/exe`) — trips only a stale re-exec.
-pub const PROTO_VERSION: u32 = 2;
+pub const PROTO_VERSION: u32 = 3;
 
 /// Mirrors the `EglImporter` entry points. Append-only: a worker can outlive a replaced host,
 /// so an unknown variant must fail decode, not remap.
@@ -72,6 +72,8 @@ pub enum Request {
         out: ConvertOut,
         cursor: Option<CursorRect>,
     },
+    /// The convert timeline as OPAQUE_FD; it rides back on [`Reply::Timeline`].
+    ConvertTimeline,
 }
 
 /// A dmabuf as the fused convert reads it. `fd` is process-local and never on the wire: the
@@ -135,8 +137,14 @@ pub enum Reply {
     Err {
         message: String,
     },
-    /// The request completed (slot registered, cursor stored, convert fenced).
+    /// The request completed (slot registered, cursor stored).
     Done,
+    /// The pass is submitted; it signals `value` on the convert timeline.
+    Converted {
+        value: u64,
+    },
+    /// The convert timeline's fd rides along.
+    Timeline,
 }
 
 /// Sent once per pooled buffer; later frames cite it by `Frame.id`.
