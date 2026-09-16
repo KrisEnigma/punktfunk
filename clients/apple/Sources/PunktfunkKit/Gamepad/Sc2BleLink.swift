@@ -129,8 +129,10 @@ final class Sc2BleLink: NSObject {
             // 150 ms ≈ several BLE connection intervals. A pad that went out of range mid-write
             // never acks, so the wait has to end on its own. `pendingStop` is what a `start()`
             // in the meantime clears — this must not tear down the central it built.
-            queue.asyncAfter(deadline: .now() + Self.restoreWait) { [weak self] in
-                guard let self, pendingStop else { return }
+            // Strong: the owner drops its reference right after stop(), and a freed central
+            // cancels the connection before the restore lands.
+            queue.asyncAfter(deadline: .now() + Self.restoreWait) { [self] in
+                guard pendingStop else { return }
                 finishStop()
             }
         }
