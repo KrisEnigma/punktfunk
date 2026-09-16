@@ -442,9 +442,9 @@ const val SAFE_AREA_MODE = -2
  *    why the fixed presets have always "just worked", at 20 % of the width.
  *  * The NATIVE mode has the panel's own aspect, so it fills every pixel, housing included.
  *
- * Asking the host for a mode narrower by the unsafe insets is the fix, and the picture then sits at
- * [offsetX] rather than centred: a hole on one side must not be paid for on both. Pointer mapping
- * follows for free — the input lanes derive the picture rect from the live placement.
+ * Asking the host for a mode narrower by the unsafe insets is the fix, and the stream screen places
+ * the picture between them rather than centred: a hole on one side must not be paid for on both.
+ * Pointer mapping follows for free — the input lanes derive the picture rect from the live placement.
  */
 object SafeArea {
     /** The host rejects odd dimensions and anything under 320 px wide (`validate_dimensions`). */
@@ -459,14 +459,6 @@ object SafeArea {
     fun insetWidth(nativeWidth: Int, left: Int, right: Int): Int =
         (nativeWidth - left.coerceAtLeast(0) - right.coerceAtLeast(0))
             .coerceAtLeast(MIN_WIDTH) / 2 * 2
-
-    /**
-     * Where that picture starts, so it sits under neither edge: the left inset, pulled back when
-     * the floor above made the picture wider than the room between the two.
-     */
-    fun offsetX(nativeWidth: Int, left: Int, right: Int): Int =
-        left.coerceAtLeast(0)
-            .coerceAtMost((nativeWidth - insetWidth(nativeWidth, left, right)).coerceAtLeast(0))
 }
 
 /** What a landscape stream must clear on this display: the cutout's two sides, in window pixels. */
