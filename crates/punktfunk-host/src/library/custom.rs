@@ -43,6 +43,10 @@ pub struct CustomEntry {
     /// host tracks only the child it spawned.
     #[serde(default, skip_serializing_if = "DetectHint::is_empty")]
     pub detect: DetectHint,
+    /// Which workspace this title opens on ([`crate::library::OnWindow`]).
+    /// Absent follows the host's display policy.
+    #[serde(default, skip_serializing_if = "OnWindow::is_empty")]
+    pub on_window: OnWindow,
     #[serde(flatten)]
     pub meta: GameMeta,
 }
@@ -68,6 +72,9 @@ pub struct CustomInput {
     /// Absent on an update keeps the stored hint, as with `prep`.
     #[serde(default)]
     pub detect: Option<DetectHint>,
+    /// Absent on an update keeps the stored placement, as with `prep`.
+    #[serde(default)]
+    pub on_window: Option<OnWindow>,
     /// Flattened [`GameMeta`]. Replaced wholesale on update — an edit must send every field it wants kept.
     #[serde(flatten)]
     pub meta: GameMeta,
@@ -94,6 +101,9 @@ pub struct ProviderEntryInput {
     /// Install-dir / process hint. Needed when launch goes through the provider's own client.
     #[serde(default)]
     pub detect: DetectHint,
+    /// Which workspace the title opens on; absent follows the host's display policy.
+    #[serde(default)]
+    pub on_window: OnWindow,
     #[serde(flatten)]
     pub meta: GameMeta,
 }
@@ -120,6 +130,7 @@ impl From<CustomEntry> for GameEntry {
             // Stays set so attribution survives the claim.
             provider: c.provider,
             detect,
+            on_window: c.on_window,
             stats: None,
             meta: c.meta,
         }
@@ -284,6 +295,7 @@ pub fn add_custom(input: CustomInput) -> Result<CustomEntry> {
         role: input.role,
         icon: input.icon,
         detect: input.detect.unwrap_or_default(),
+        on_window: input.on_window.unwrap_or_default(),
         meta: input.meta,
     };
     catalog.entries.push(entry.clone());
@@ -312,6 +324,9 @@ pub fn update_custom(id: &str, input: CustomInput) -> Result<MutateOutcome<Custo
     slot.icon = input.icon;
     if let Some(detect) = input.detect {
         slot.detect = detect;
+    }
+    if let Some(on_window) = input.on_window {
+        slot.on_window = on_window;
     }
     slot.meta = input.meta;
     let updated = slot.clone();
@@ -555,6 +570,7 @@ fn reconcile_entries(
             role: input.role,
             icon: input.icon,
             detect: input.detect,
+            on_window: input.on_window,
             meta: input.meta,
         });
     }
@@ -662,6 +678,7 @@ mod tests {
             role: GameRole::Game,
             icon: None,
             detect: DetectHint::default(),
+            on_window: OnWindow::default(),
             meta: GameMeta::default(),
         }
     }
@@ -676,6 +693,7 @@ mod tests {
             role: GameRole::Game,
             icon: None,
             detect: DetectHint::default(),
+            on_window: OnWindow::default(),
             meta: GameMeta::default(),
         }
     }

@@ -162,6 +162,30 @@ pub fn validate_icon(icon: Option<&str>) -> std::result::Result<(), String> {
     }
 }
 
+/// Per-entry window placement — one knob today: which workspace the launch
+/// opens on. Absent follows the host's `launch_workspace` display policy.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct OnWindow {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<crate::vdisplay::policy::WorkspacePlacement>,
+}
+
+impl OnWindow {
+    /// Nothing set: the key stays out of `library.json` and off the wire.
+    pub fn is_empty(&self) -> bool {
+        self.workspace.is_none()
+    }
+
+    /// Does this launch get a workspace of its own? The entry decides; absent,
+    /// the host-wide default does. Backends that cannot place ignore both.
+    pub fn own_workspace(&self) -> bool {
+        use crate::vdisplay::policy::WorkspacePlacement;
+        self.workspace
+            .unwrap_or_else(|| crate::vdisplay::policy::prefs().launch_workspace())
+            == WorkspacePlacement::Own
+    }
+}
+
 /// One title in the unified library, regardless of store.
 #[derive(Clone, Debug, Serialize, ToSchema)]
 pub struct GameEntry {
@@ -193,6 +217,10 @@ pub struct GameEntry {
     #[serde(skip)]
     #[schema(ignore)]
     pub detect: DetectSpec,
+    /// Which workspace this title's windows open on, where the compositor can
+    /// place them ([`OnWindow`]).
+    #[serde(default, skip_serializing_if = "OnWindow::is_empty")]
+    pub on_window: OnWindow,
     /// Play stats, once this host has launched the title (`stats.rs`). Joined at read
     /// time from `library-stats.json`, never stored on the entry.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -317,6 +345,7 @@ mod tests {
             launch: None,
             provider: None,
             detect: DetectSpec::default(),
+            on_window: OnWindow::default(),
             stats: None,
             meta: GameMeta::default(),
         }

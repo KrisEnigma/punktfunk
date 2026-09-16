@@ -3426,6 +3426,7 @@ async fn library_stats_ride_on_the_entry() {
         role: Default::default(),
         icon: None,
         detect: None,
+        on_window: None,
         meta: Default::default(),
     })
     .expect("seed one custom title");
@@ -3491,6 +3492,8 @@ fn a_recorded_launch_credits_its_run_to_the_library_stats() {
             launch_stamp,
             // Recorded: this is what makes the run count.
             procs: Some(std::sync::Arc::new(std::sync::Mutex::new(Vec::new()))),
+            #[cfg(target_os = "linux")]
+            workspace: None,
         },
         Box::new(|| {}),
     );
@@ -3901,6 +3904,7 @@ async fn custom_entry_hints_round_trip_and_survive_an_update() {
             exe: Some("/usr/bin/eden".into()),
             ..Default::default()
         }),
+        on_window: None,
         meta: Default::default(),
     })
     .expect("seed one custom title");

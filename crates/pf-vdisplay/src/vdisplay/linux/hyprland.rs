@@ -821,6 +821,64 @@ fn active_workspace_id(name: &str) -> Option<i64> {
         .as_i64()
 }
 
+/// Workspace this launch gets on head `name`, as `(claimed, restore)`.
+///
+/// `want` re-focuses the workspace an earlier session claimed for the same
+/// launch (keep-alive adopt); otherwise [`crate::routing::pick_workspace`]
+/// chooses. `None` when the head's workspace cannot be read or the switch is
+/// refused — the launch then opens where the head already looks.
+pub(crate) fn claim_workspace(name: &str, want: Option<i64>) -> Option<(i64, i64)> {
+    let restore = active_workspace_id(name)?;
+    let id = match want {
+        Some(id) => id,
+        None => {
+            let raw = hyprctl(&["-j", "workspaces"]).ok()?;
+            let parsed: serde_json::Value = serde_json::from_str(&raw).ok()?;
+            crate::routing::pick_workspace(&workspace_slots(&parsed, name), restore)
+        }
+    };
+    if id == restore {
+        return Some((id, restore));
+    }
+    match focus_workspace(id) {
+        Ok(()) => Some((id, restore)),
+        Err(e) => {
+            tracing::warn!(
+                workspace = id, output = %name, error = %format!("{e:#}"),
+                "hyprland: workspace switch refused — this launch opens beside whatever the \
+                 streamed head is already showing"
+            );
+            None
+        }
+    }
+}
+
+/// `hyprctl -j workspaces` reduced to the pick. A missing `windows` count
+/// reads as occupied, so a payload this host cannot parse costs a free id and
+/// never puts the game on the operator's desk.
+fn workspace_slots(parsed: &serde_json::Value, monitor: &str) -> Vec<crate::routing::WsSlot> {
+    let Some(arr) = parsed.as_array() else {
+        return Vec::new();
+    };
+    arr.iter()
+        .filter_map(|w| {
+            Some(crate::routing::WsSlot {
+                id: w.get("id")?.as_i64()?,
+                on_head: w.get("monitor").and_then(|m| m.as_str()) == Some(monitor),
+                empty: w.get("windows").and_then(|n| n.as_i64()) == Some(0),
+            })
+        })
+        .collect()
+}
+
+/// Switch the focused monitor to workspace `id`. Classic first, Lua on
+/// rejection — the same two-era probe as [`focus_output`]. An id nothing owns
+/// is minted here, empty.
+pub(crate) fn focus_workspace(id: i64) -> Result<()> {
+    let ws = id.to_string();
+    hyprctl_dispatch_both(&evacuate_focus_argv(&ws), &lua_workspace_focus_expr(&ws))
+}
+
 /// Move the superseded head's active workspace onto the new head, then switch
 /// the new head to it. Inverse of [`evacuate_workspace`].
 ///
@@ -2031,6 +2089,40 @@ mod tests {
             disable_lua_expr("DP-1"),
             r#"hl.monitor{ output = "DP-1", disabled = true }"#
         );
+    }
+
+    /// Real `hyprctl -j workspaces` shape, trimmed to the fields the pick reads.
+    const WORKSPACES: &str = r#"[
+      {"id":1,"name":"1","monitor":"DP-1","windows":3,"lastwindowtitle":"Discord"},
+      {"id":2,"name":"2","monitor":"DP-1","windows":0,"lastwindowtitle":""},
+      {"id":3,"name":"3","monitor":"PF-1234-1","windows":2,"lastwindowtitle":"kitty"},
+      {"id":-99,"name":"special:magic","monitor":"DP-1","windows":1}
+    ]"#;
+
+    /// The streamed head's own workspaces decide; DP-1's empty one is the
+    /// operator's, and an unreadable `windows` count must read as occupied.
+    #[test]
+    fn a_launch_lands_on_an_empty_workspace_of_the_streamed_head() {
+        let parsed: serde_json::Value = serde_json::from_str(WORKSPACES).unwrap();
+        let slots = workspace_slots(&parsed, "PF-1234-1");
+        // Nothing empty on our head: the next free id, minted empty on focus.
+        assert_eq!(crate::routing::pick_workspace(&slots, 3), 4);
+        // Same payload, the operator's head: its own empty 2 wins.
+        let slots = workspace_slots(&parsed, "DP-1");
+        assert_eq!(crate::routing::pick_workspace(&slots, 1), 2);
+        // A head nothing reports has no empty workspace to reuse.
+        let slots = workspace_slots(&parsed, "PF-9999-1");
+        assert_eq!(crate::routing::pick_workspace(&slots, 7), 4);
+    }
+
+    /// A payload without the count is not "every workspace is free".
+    #[test]
+    fn a_workspace_with_no_window_count_is_never_treated_as_empty() {
+        let parsed: serde_json::Value =
+            serde_json::from_str(r#"[{"id":1,"monitor":"PF-1"}]"#).unwrap();
+        let slots = workspace_slots(&parsed, "PF-1");
+        assert!(!slots[0].empty);
+        assert_eq!(crate::routing::pick_workspace(&slots, 1), 2);
     }
 
     /// Classic argv for the re-home that runs before `output remove`. Both

@@ -222,6 +222,34 @@ The same `prep` array works on a custom `library.json` entry, where the identity
 `PF_APP_ID`. The console's Library form has no input for prep steps and **clears** them on save, so
 edit that file directly.
 
+### A launch on its own workspace
+
+A launch lands on whatever the streamed head is showing — which on a shared desk is the operator's
+browser, chat and terminal. Where the compositor can place windows, the host instead puts the
+launch on an **empty workspace** on that head and switches back when the game is done. Set it per
+entry in `library.json`, beside `prep`:
+
+```json
+{ "title": "Hades", "on_window": { "workspace": "own" } }
+```
+
+`own` (the default) or `current` to keep the old behaviour. The host-wide default is
+`launch_workspace` in `display-settings.json`; the entry wins where both are set. A reconnect to a
+running game goes back to *that* game's workspace — the workspace belongs to the launch, not to the
+session.
+
+| Compositor | A launch gets its own workspace |
+| --- | --- |
+| Hyprland | yes — an empty workspace on the streamed head, or a free one |
+| sway / wlroots | yes — same, through `swaymsg` |
+| KWin | not yet |
+| GNOME / Mutter | no — no per-output workspace to aim a launch at |
+| gamescope | no — the game already has the session to itself |
+| Windows | no — no workspaces |
+
+Placement never costs you a launch: a compositor that refuses the switch, or a missing `hyprctl`,
+logs one line and the game opens where it would have before.
+
 ## Reacting to a game, not a stream
 
 `stream.stopped` tells you the *stream* ended; `game.exited` tells you the *game* did. Often the

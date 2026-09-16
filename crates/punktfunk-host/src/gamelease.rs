@@ -207,6 +207,11 @@ pub struct GameLease {
     shared: Arc<LeaseShared>,
     /// Dropped, not joined: the watcher exits on `cancel` within `POLL`.
     watcher: Option<std::thread::JoinHandle<()>>,
+    /// Workspace this launch owns on the streamed head
+    /// ([`crate::vdisplay::WorkspaceClaim`]). Released in `Drop`, so a game
+    /// that crashed leaves the operator's workspace back where it was.
+    #[cfg(target_os = "linux")]
+    workspace: Option<crate::vdisplay::WorkspaceClaim>,
 }
 
 impl GameLease {
@@ -215,11 +220,17 @@ impl GameLease {
     }
 }
 
+/// Ends the watch and gives the workspace back. Runs on every exit, panic
+/// included: the session guard owns this handle.
 impl Drop for GameLease {
     fn drop(&mut self) {
         self.shared.cancel.store(true, Ordering::SeqCst);
         // Drop the JoinHandle; do not join. The watcher exits within `POLL`.
         drop(self.watcher.take());
+        #[cfg(target_os = "linux")]
+        if let Some(ws) = self.workspace.take() {
+            ws.release();
+        }
     }
 }
 
@@ -252,6 +263,10 @@ pub struct LeaseRequest {
     /// Adopted pids, published so the launch record outlives this watcher
     /// ([`crate::launchreg::LiveProcs`]). `None` if unrecorded.
     pub procs: Option<crate::launchreg::LiveProcs>,
+    /// Workspace the streamed head gave this launch, if any
+    /// ([`crate::library::adopt_launch_workspace`]). Released with the lease.
+    #[cfg(target_os = "linux")]
+    pub workspace: Option<crate::vdisplay::WorkspaceClaim>,
 }
 
 /// Seconds since boot for adopt-against. Call **before** spawn
@@ -280,6 +295,8 @@ pub fn open(req: LeaseRequest, on_exit: OnExit) -> GameLease {
         spawned,
         launch_stamp,
         procs,
+        #[cfg(target_os = "linux")]
+        workspace,
     } = req;
 
     // Pin pid to start time before recycle. Unresolvable is dropped: a bare
@@ -362,7 +379,12 @@ pub fn open(req: LeaseRequest, on_exit: OnExit) -> GameLease {
             GameState::Untracked
         });
     }
-    GameLease { shared, watcher }
+    GameLease {
+        shared,
+        watcher,
+        #[cfg(target_os = "linux")]
+        workspace,
+    }
 }
 
 /// Watch thread. No thread for Untracked, Nested-with-empty-spec, or a
@@ -1438,6 +1460,8 @@ mod tests {
             launch_stamp: None,
             // Unrecorded; nothing here spawns.
             procs: None,
+            #[cfg(target_os = "linux")]
+            workspace: None,
         }
     }
 
@@ -1733,6 +1757,8 @@ mod tests {
                 spawned: None,
                 launch_stamp: None,
                 procs: None,
+                #[cfg(target_os = "linux")]
+                workspace: None,
             },
             Box::new(|| {
                 EXITS.fetch_add(1, Ordering::SeqCst);
@@ -1973,6 +1999,8 @@ mod tests {
                 spawned: None,
                 launch_stamp,
                 procs: None,
+                #[cfg(target_os = "linux")]
+                workspace: None,
             },
             Box::new(|| {
                 EXITS.fetch_add(1, Ordering::SeqCst);

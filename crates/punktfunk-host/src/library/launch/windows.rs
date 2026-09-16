@@ -22,6 +22,7 @@ pub(super) fn launch_target(
         launcher: entry.role == GameRole::Launcher,
         detect: entry.detect,
         command: None,
+        own_workspace: entry.on_window.own_workspace(),
     })
 }
 

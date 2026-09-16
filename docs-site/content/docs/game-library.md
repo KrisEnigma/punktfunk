@@ -228,4 +228,6 @@ session can close the game. Both switches live on the console's **Virtual displa
 
 A custom entry can carry `prep` steps that run before it launches and undo steps that run when the
 session ends — an HDR toggle, an audio-sink switch, a VRR tweak. They are documented with the rest of
-the automation surface in [Events & hooks](/docs/automation#per-app-prepundo).
+the automation surface in [Events & hooks](/docs/automation#per-app-prepundo). The same file
+carries `on_window.workspace`, which opens the title on an empty workspace of its own on Hyprland and
+sway — [A launch on its own workspace](/docs/automation#a-launch-on-its-own-workspace).
