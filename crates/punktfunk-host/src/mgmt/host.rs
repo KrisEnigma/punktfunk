@@ -402,6 +402,11 @@ pub(crate) struct SessionRow {
     /// and bitrate bands. `null` in a session's first minute, and on the compat plane.
     #[serde(skip_serializing_if = "Option::is_none")]
     link: Option<crate::link_health::LinkMinute>,
+    /// Other live sessions from this client's address — one NAT or tunnel, so most likely one
+    /// network path. Their bitrates adapt independently. Absent when there are none.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[schema(required = false)]
+    shared_path_with: Vec<u64>,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -627,6 +632,7 @@ pub(crate) async fn get_status(State(st): State<Arc<MgmtState>>) -> Json<Runtime
             preferred_pad_slot: s.preferred_pad_slot,
             uptime_s: s.uptime_s,
             link: s.link.clone(),
+            shared_path_with: s.shared_path_with.clone(),
         })
         .collect();
     if gs_video {
@@ -649,6 +655,8 @@ pub(crate) async fn get_status(State(st): State<Arc<MgmtState>>) -> Json<Runtime
             preferred_pad_slot: None,
             uptime_s: 0,
             link: None,
+            // The compat plane's peer is not in the native registry.
+            shared_path_with: Vec::new(),
         });
     }
     // Detail card is singular: GameStream if live, else the first native session. `active_sessions` is the true count.

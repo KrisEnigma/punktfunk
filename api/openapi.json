@@ -10812,6 +10812,15 @@
             "description": "Player slot the operator picked for this session, 0-based (`PUT\n/session/{id}/player`). `null` = the slot is whichever comes free.",
             "minimum": 0
           },
+          "shared_path_with": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            },
+            "description": "Other live sessions from this client's address — one NAT or tunnel, so most likely one\nnetwork path. Their bitrates adapt independently. Absent when there are none."
+          },
           "uptime_s": {
             "type": "integer",
             "format": "int64",

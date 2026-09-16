@@ -35,6 +35,9 @@ import { levelLabel } from "@/sections/Pairing/access";
  * stick first. `pads` is what it holds now; `preferred_pad_slot` is what was asked for, and the
  * two differ until a live pad re-plugs.
  *
+ * A row names the sessions arriving from its address (`shared_path_with`): one NAT or tunnel,
+ * most likely one network path, and each adapts its bitrate alone.
+ *
  * One column is still absent: who owns the audio device (#1093). It has no field on `SessionRow`.
  */
 export const SessionList: FC<{
@@ -66,6 +69,10 @@ export const SessionList: FC<{
 						onMute={() => onMute(s, !s.muted)}
 						onAccess={(level) => onAccess(s, level)}
 						onPlayer={(slot) => onPlayer(s, slot)}
+						sharedWith={(s.shared_path_with ?? []).map((id) => {
+							const other = sessions.find((o) => o.id === id);
+							return other?.client_name || other?.client || `#${id}`;
+						})}
 						busy={busy}
 					/>
 				))}
@@ -81,8 +88,10 @@ const Row: FC<{
 	onMute: () => void;
 	onAccess: (level: string) => void;
 	onPlayer: (slot: number | null) => void;
+	/** Names of the other sessions on this row's client address. */
+	sharedWith: string[];
 	busy: boolean;
-}> = ({ row, onStop, onIdr, onMute, onAccess, onPlayer, busy }) => {
+}> = ({ row, onStop, onIdr, onMute, onAccess, onPlayer, sharedWith, busy }) => {
 	// No id means the compat plane: the host holds no per-session handle for it, so every
 	// action here would silently become host-wide. Off is honest; the card below still stops it.
 	const perSession = row.id != null;
@@ -90,6 +99,9 @@ const Row: FC<{
 		row.mode,
 		row.join ? m.sessions_joined() : m.sessions_own_display(),
 		m.sessions_uptime({ time: formatUptime(row.uptime_s) }),
+		sharedWith.length > 0
+			? m.sessions_shared_path({ names: sharedWith.join(", ") })
+			: undefined,
 		row.plane === "gamestream" ? "GameStream" : undefined,
 	].filter(Boolean);
 	return (
