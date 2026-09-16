@@ -382,6 +382,7 @@ mod tests {
             settings,
             store: crate::store::file_store(),
             platform: crate::platform::Platform::Desktop,
+            screen: None,
             pads,
             deck,
             fallback_ui: false,

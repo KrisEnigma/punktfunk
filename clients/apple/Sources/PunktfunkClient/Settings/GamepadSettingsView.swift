@@ -857,10 +857,11 @@ struct GamepadSettingsView: View {
                 label: "Aspect ratio",
                 detail: "Which shapes the Resolution row offers. Picking one moves to its size "
                     + "nearest the current height.",
-                options: Resolutions.aspects.enumerated().map { (label: $0.element.label, tag: $0.offset) },
+                options: SettingsOptions.families().enumerated()
+                    .map { (label: $0.element.label, tag: $0.offset) },
                 current: family
             ) { i in
-                let mode = Resolutions.nearest(i, height: height)
+                let mode = Resolutions.nearestIn(SettingsOptions.families()[i], height: height)
                 width = mode.w
                 height = mode.h
             },

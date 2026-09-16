@@ -61,6 +61,12 @@ struct CreateOptions {
     /// Where to start: `{"home": true}` or `{"library": <HostRow>}`.
     #[serde(default)]
     entry: EntryJson,
+    /// This device's screen and its safe area as landscape `[w, h]`, for the Aspect row.
+    /// Absent on a TV and from an older caller.
+    #[serde(default)]
+    screen: Option<(u32, u32)>,
+    #[serde(default)]
+    safe_area: Option<(u32, u32)>,
 }
 
 /// `#[serde(default)]` for a bool an older caller may omit and that must read `true`.
@@ -226,6 +232,10 @@ pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativeConsoleCrea
             store: Some(store.clone()),
             platform: Platform::Android,
             gpu_cache_bytes: opts.gpu_cache_bytes.max(16 << 20),
+            screen: opts.screen.map(|full| pf_console_ui::DeviceScreen {
+                full,
+                safe: opts.safe_area.unwrap_or(full),
+            }),
         };
         let host = match ConsoleHost::start(console_opts, opts.entry.into_entry(), store) {
             Ok(host) => host,

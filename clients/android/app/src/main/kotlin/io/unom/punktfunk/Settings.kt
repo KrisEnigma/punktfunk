@@ -652,9 +652,50 @@ object Resolutions {
 
     /** The size in family [aspect] nearest in height to [h]; native (`0` or a sentinel) looks for
      * 1080. Ties go to the smaller size. */
-    fun nearest(aspect: Int, h: Int): Pair<Int, Int> {
+    fun nearest(aspect: Int, h: Int): Pair<Int, Int> = nearestIn(ASPECTS[aspect], h)
+
+    /** The size in [family] nearest in height to [h]; native looks for 1080. */
+    fun nearestIn(family: Aspect, h: Int): Pair<Int, Int> {
         val want = if (h <= 0) 1080 else h
-        return ASPECTS[aspect].sizes.minBy { kotlin.math.abs(it.second - want) }
+        return family.sizes.minBy { kotlin.math.abs(it.second - want) }
+    }
+
+    const val SCREEN = "Screen"
+    const val SAFE_AREA = "Safe area"
+
+    /** Heights a device entry offers below the screen's own. */
+    private val DEVICE_HEIGHTS = listOf(720, 1080, 1440, 2160)
+
+    /** A device entry's sizes sit within this of its shape, tight enough to part a phone's
+     * screen from its safe area. */
+    private const val DEVICE_TOLERANCE = 0.01
+
+    /**
+     * The aspect switch on this device: "Screen", then "Safe area", then [ASPECTS]. Each device
+     * entry appears only when no standard family has its shape, and the safe area only when it
+     * differs from the screen. Twin of `punktfunk_core::resolutions::families`.
+     */
+    fun families(screen: Pair<Int, Int>?, safe: Pair<Int, Int>?): List<Aspect> {
+        val own = listOf(SCREEN to screen, SAFE_AREA to safe).mapNotNull { (label, dims) ->
+            val (w, h) = dims?.takeIf { it.first > 0 && it.second > 0 } ?: return@mapNotNull null
+            if (label == SAFE_AREA && dims == screen) return@mapNotNull null
+            if (aspectOf(w, h) != null) return@mapNotNull null
+            val sizes = DEVICE_HEIGHTS.filter { it < h }.map { dh -> (w.toLong() * dh / h).toInt() / 2 * 2 to dh } +
+                (w / 2 * 2 to h / 2 * 2)
+            Aspect(label, w.toDouble() / h, sizes)
+        }
+        return own + ASPECTS
+    }
+
+    /** The entry of [families] `w`×`h` belongs to by shape: a device entry first, then a standard
+     * one. `null` for a non-positive side or a shape none has. */
+    fun familyOf(families: List<Aspect>, w: Int, h: Int): Int? {
+        if (w <= 0 || h <= 0) return null
+        val shape = w.toDouble() / h
+        fun within(a: Aspect, tol: Double) = kotlin.math.abs(shape / a.shape - 1) < tol
+        fun device(a: Aspect) = a.label == SCREEN || a.label == SAFE_AREA
+        return families.indexOfFirst { device(it) && within(it, DEVICE_TOLERANCE) }.takeIf { it >= 0 }
+            ?: families.indexOfFirst { !device(it) && within(it, TOLERANCE) }.takeIf { it >= 0 }
     }
 }
 
@@ -666,18 +707,26 @@ val NATIVE_RESOLUTION_OPTIONS = listOf(
 )
 
 /** The Resolution picker's rows for one family: the native rows, then that family's sizes. */
-fun resolutionOptions(family: Int): List<Triple<Int, Int, String>> =
-    NATIVE_RESOLUTION_OPTIONS + Resolutions.ASPECTS[family].sizes.map { (w, h) -> Triple(w, h, "$w × $h") }
+fun resolutionOptions(family: Resolutions.Aspect): List<Triple<Int, Int, String>> =
+    NATIVE_RESOLUTION_OPTIONS + family.sizes.map { (w, h) -> Triple(w, h, "$w × $h") }
 
-/** The family the Resolution picker lists for the stored size: its shape, or 16:9 while the size is
- * native or a shape no family has. */
-fun Settings.resolutionFamily(): Int = Resolutions.aspectOf(width, height) ?: 0
+/** The entry the Resolution picker lists for the stored size: its shape. Native and the safe-area
+ * mode read as this device's own entries where it has them; otherwise, and for a shape none has,
+ * the first entry. */
+fun Settings.resolutionFamily(families: List<Resolutions.Aspect>): Int {
+    fun own(label: String) = families.indexOfFirst { it.label == label }.takeIf { it >= 0 }
+    return when {
+        width == 0 -> own(Resolutions.SCREEN)
+        width == SAFE_AREA_MODE -> own(Resolutions.SAFE_AREA) ?: own(Resolutions.SCREEN)
+        else -> Resolutions.familyOf(families, width, height)
+    } ?: 0
+}
 
 /** True when the stored size is none of the presets its family lists — a custom resolution typed
  * in the touch settings. Detected from the size itself rather than a persisted flag, so it can
  * never disagree with what's actually stored (mirrors the Apple client). */
-fun Settings.isCustomResolution(): Boolean =
-    resolutionOptions(resolutionFamily()).none { (w, h, _) -> w == width && h == height }
+fun Settings.isCustomResolution(families: List<Resolutions.Aspect> = Resolutions.families(null, null)): Boolean =
+    resolutionOptions(families[resolutionFamily(families)]).none { (w, h, _) -> w == width && h == height }
 
 /** (hz, label). `0` = native refresh. */
 val REFRESH_OPTIONS = listOf(

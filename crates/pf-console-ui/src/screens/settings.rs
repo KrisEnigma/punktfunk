@@ -286,12 +286,32 @@ const PRESETS_TAB: usize = TABS.len() - 1;
 pub(crate) const TAB_COUNT: usize = TABS.len();
 
 /// Sizes by family; the Resolution row lists one family at a time.
-use punktfunk_core::resolutions::{aspect_of, nearest, ASPECTS};
+use punktfunk_core::resolutions::{family_of, nearest_in, Family, SAFE_AREA_LABEL, SCREEN_LABEL};
 
-/// The family the Resolution row lists: the stored size's shape, or 16:9 while
-/// the size is Native / Match window / a shape no family has.
-fn family(s: &pf_client_core::trust::Settings) -> usize {
-    aspect_of(s.width, s.height).unwrap_or(0)
+/// The Aspect row's entries: this device's screen and safe area first when no
+/// standard shape has them, then the standard families.
+fn families(screen: Option<crate::shell::DeviceScreen>) -> Vec<Family> {
+    punktfunk_core::resolutions::families(screen.map(|s| s.full), screen.map(|s| s.safe))
+}
+
+/// The entry the Resolution row lists: the stored size's shape. Native (safe
+/// area) and Native read as the device's own entries where it has them;
+/// otherwise, and for a shape none has, the first entry.
+fn family(
+    s: &pf_client_core::trust::Settings,
+    fams: &[Family],
+    platform: crate::platform::Platform,
+) -> usize {
+    let own = |label| fams.iter().position(|f| f.label == label);
+    if s.width == 0 && !s.match_window {
+        let native = if safe_area(s, platform) {
+            own(SAFE_AREA_LABEL).or_else(|| own(SCREEN_LABEL))
+        } else {
+            own(SCREEN_LABEL)
+        };
+        return native.unwrap_or(0);
+    }
+    family_of(fams, s.width, s.height).unwrap_or(0)
 }
 
 /// Android's Native (safe area) resolution. The flag only counts on a native size.
@@ -1081,6 +1101,7 @@ pub fn row_spec(
             settings: &mut resolved,
             store: ctx.store,
             platform: ctx.platform,
+            screen: None,
             pads: ctx.pads,
             deck: ctx.deck,
             fallback_ui: ctx.fallback_ui,
@@ -1228,7 +1249,14 @@ fn row_spec_base(id: RowId, ctx: &Ctx, presets: &[(String, String)]) -> RowSpec 
                 format!("{} × {}", s.width, s.height)
             },
         ),
-        RowId::Aspect => (None, "Aspect ratio", ASPECTS[family(s)].label.into()),
+        RowId::Aspect => {
+            let fams = families(ctx.screen);
+            (
+                None,
+                "Aspect ratio",
+                fams[family(s, &fams, ctx.platform)].label.into(),
+            )
+        }
         RowId::Refresh => (
             None,
             "Refresh rate",
@@ -1804,12 +1832,13 @@ fn audio_format_label(value: &str) -> &'static str {
 /// Toggles: left = off, right = on. A no-op is a boundary.
 pub fn adjust(id: RowId, delta: i32, wrap: bool, ctx: &mut Ctx) -> bool {
     let platform = ctx.platform;
+    let fams = families(ctx.screen);
     let s = &mut *ctx.settings;
     match id {
         RowId::Resolution => {
             // Native, Native (safe area) on Android, Match window, then the current
             // family's sizes. The policies before the sizes all clear w/h.
-            let sizes = ASPECTS[family(s)].sizes;
+            let sizes = &fams[family(s, &fams, platform)].sizes;
             let android = platform == crate::platform::Platform::Android;
             let matching = if android { 2 } else { 1 };
             let cur = if s.match_window {
@@ -1837,11 +1866,11 @@ pub fn adjust(id: RowId, delta: i32, wrap: bool, ctx: &mut Ctx) -> bool {
             })
         }
         RowId::Aspect => {
-            // Steps from the family shown, so Native (listed as 16:9) moves on
-            // to 16:10 rather than restating 16:9.
-            step_option(Some(family(s)), ASPECTS.len(), delta, wrap).map(|i| {
+            // Steps from the entry shown, so Native (listed under its own entry)
+            // moves on to the next shape rather than restating the one it reads as.
+            step_option(Some(family(s, &fams, platform)), fams.len(), delta, wrap).map(|i| {
                 s.match_window = false;
-                (s.width, s.height) = nearest(i, s.height);
+                (s.width, s.height) = nearest_in(&fams[i], s.height);
             })
         }
         RowId::Refresh => {
@@ -2147,6 +2176,7 @@ pub(crate) mod tests {
             settings: &mut settings,
             store: crate::store::file_store(),
             platform: crate::platform::Platform::Desktop,
+            screen: None,
             pads: &pads,
             deck: false,
             fallback_ui: false,
@@ -2255,6 +2285,7 @@ pub(crate) mod tests {
             settings: &mut settings,
             store: crate::store::file_store(),
             platform: crate::platform::Platform::Desktop,
+            screen: None,
             pads: &pads,
             deck: false,
             fallback_ui: false,
@@ -2292,6 +2323,7 @@ pub(crate) mod tests {
             settings: &mut settings,
             store: crate::store::file_store(),
             platform: crate::platform::Platform::Desktop,
+            screen: None,
             pads: &pads,
             deck: false,
             fallback_ui: false,
@@ -2355,6 +2387,7 @@ pub(crate) mod tests {
             settings: &mut settings,
             store: crate::store::file_store(),
             platform: crate::platform::Platform::Desktop,
+            screen: None,
             pads: &pads,
             deck: false,
             fallback_ui: false,
@@ -2401,6 +2434,7 @@ pub(crate) mod tests {
             settings: &mut settings,
             store: crate::store::file_store(),
             platform: crate::platform::Platform::Desktop,
+            screen: None,
             pads: &pads,
             deck: false,
             fallback_ui: false,
@@ -2435,6 +2469,7 @@ pub(crate) mod tests {
             settings: &mut settings,
             store: crate::store::file_store(),
             platform: crate::platform::Platform::Desktop,
+            screen: None,
             pads: &pads,
             deck: false,
             fallback_ui: false,
@@ -2480,6 +2515,7 @@ pub(crate) mod tests {
             settings: &mut settings,
             store: crate::store::file_store(),
             platform: crate::platform::Platform::Android,
+            screen: None,
             pads: &pads,
             deck: false,
             fallback_ui: true,
@@ -2519,6 +2555,7 @@ pub(crate) mod tests {
             settings: &mut settings,
             store: crate::store::file_store(),
             platform: crate::platform::Platform::Desktop,
+            screen: None,
             pads: &pads,
             deck: false,
             fallback_ui: false,
@@ -2554,6 +2591,52 @@ pub(crate) mod tests {
         assert!(!ctx.settings.match_window, "a size clears the policy");
     }
 
+    /// A phone leads the Aspect row with its own screen and safe area, and Native
+    /// (safe area) reads as the latter.
+    #[test]
+    fn a_phone_leads_the_aspect_row_with_its_own_shapes() {
+        let (mut settings, pads) = ctx_parts();
+        let library = crate::library::LibraryShared::default();
+        let mut ctx = Ctx {
+            hosts: &[],
+            library: &library,
+            settings: &mut settings,
+            store: crate::store::file_store(),
+            platform: crate::platform::Platform::Android,
+            screen: Some(crate::shell::DeviceScreen {
+                full: (3216, 1440),
+                safe: (3088, 1440),
+            }),
+            pads: &pads,
+            deck: false,
+            fallback_ui: false,
+            pyrowave_ok: true,
+            av1_ok: true,
+            device_name: "t",
+            t: 0.0,
+        };
+        let aspect = |ctx: &Ctx| {
+            row_spec(RowId::Aspect, ctx, &[], &Default::default())
+                .value
+                .unwrap_or_default()
+        };
+        assert_eq!(aspect(&ctx), "Screen", "Native lists the screen");
+        set_extra_bool(ctx.settings, android_keys::SAFE_AREA_MODE, true);
+        assert_eq!(aspect(&ctx), "Safe area");
+        assert!(adjust(RowId::Aspect, -1, false, &mut ctx));
+        assert_eq!(
+            (ctx.settings.width, ctx.settings.height),
+            (2412, 1080),
+            "Screen nearest 1080"
+        );
+        assert!(adjust(RowId::Resolution, 1, false, &mut ctx));
+        assert_eq!((ctx.settings.width, ctx.settings.height), (3216, 1440));
+        assert!(adjust(RowId::Aspect, 1, false, &mut ctx));
+        assert_eq!(aspect(&ctx), "Safe area");
+        assert!(adjust(RowId::Aspect, 1, false, &mut ctx));
+        assert_eq!(aspect(&ctx), "16:9");
+    }
+
     #[test]
     fn toggles_read_left_off_right_on() {
         let (mut settings, pads) = ctx_parts();
@@ -2565,6 +2648,7 @@ pub(crate) mod tests {
             settings: &mut settings,
             store: crate::store::file_store(),
             platform: crate::platform::Platform::Desktop,
+            screen: None,
             pads: &pads,
             deck: false,
             fallback_ui: false,
@@ -2595,6 +2679,7 @@ pub(crate) mod tests {
             settings: &mut settings,
             store: crate::store::file_store(),
             platform: crate::platform::Platform::Desktop,
+            screen: None,
             pads: &pads,
             deck: false,
             fallback_ui: false,
@@ -2631,6 +2716,7 @@ pub(crate) mod tests {
             settings: &mut settings,
             store: crate::store::file_store(),
             platform: crate::platform::Platform::WebOS,
+            screen: None,
             pads: &pads,
             deck: false,
             fallback_ui: true,
@@ -2660,6 +2746,7 @@ pub(crate) mod tests {
             settings: &mut settings,
             store: crate::store::file_store(),
             platform: crate::platform::Platform::Android,
+            screen: None,
             pads: &pads,
             deck: false,
             fallback_ui: false,
@@ -2706,6 +2793,7 @@ pub(crate) mod tests {
             settings: &mut settings,
             store: crate::store::file_store(),
             platform: crate::platform::Platform::Desktop,
+            screen: None,
             pads: &pads,
             deck: false,
             fallback_ui: false,
@@ -2752,6 +2840,7 @@ pub(crate) mod tests {
             settings: &mut settings,
             store: crate::store::file_store(),
             platform: crate::platform::Platform::Desktop,
+            screen: None,
             pads: &pads,
             deck: false,
             fallback_ui: false,
@@ -2784,6 +2873,7 @@ pub(crate) mod tests {
             settings: &mut settings,
             store: crate::store::file_store(),
             platform: crate::platform::Platform::Desktop,
+            screen: None,
             pads: &pads,
             deck: false,
             fallback_ui: false,
@@ -2855,6 +2945,7 @@ pub(crate) mod tests {
             settings: &mut settings,
             store: crate::store::file_store(),
             platform: crate::platform::Platform::Desktop,
+            screen: None,
             pads: &pads,
             deck: false,
             fallback_ui: false,
@@ -2889,6 +2980,7 @@ pub(crate) mod tests {
             settings: &mut settings,
             store: crate::store::file_store(),
             platform: crate::platform::Platform::Desktop,
+            screen: None,
             pads: &pads,
             deck: false,
             fallback_ui: false,
@@ -2921,6 +3013,7 @@ pub(crate) mod tests {
             settings: &mut settings,
             store: crate::store::file_store(),
             platform: crate::platform::Platform::Desktop,
+            screen: None,
             pads: &pads,
             deck: false,
             fallback_ui: false,
@@ -2952,6 +3045,7 @@ pub(crate) mod tests {
             settings: &mut settings,
             store: crate::store::file_store(),
             platform: crate::platform::Platform::Desktop,
+            screen: None,
             pads: &pads,
             deck: false,
             fallback_ui: false,
@@ -2984,6 +3078,7 @@ pub(crate) mod tests {
             settings: &mut settings,
             store: &store,
             platform: crate::platform::Platform::Desktop,
+            screen: None,
             pads: &pads,
             deck: false,
             fallback_ui: false,
@@ -3073,6 +3168,7 @@ pub(crate) mod tests {
             settings: &mut settings,
             store: crate::store::file_store(),
             platform: crate::platform::Platform::Desktop,
+            screen: None,
             pads: &pads,
             deck: false,
             fallback_ui: false,
@@ -3125,6 +3221,7 @@ pub(crate) mod tests {
             settings: &mut settings,
             store: crate::store::file_store(),
             platform: crate::platform::Platform::Desktop,
+            screen: None,
             pads: &pads,
             deck: false,
             fallback_ui: false,
@@ -3157,6 +3254,7 @@ pub(crate) mod tests {
             settings: &mut settings,
             store: crate::store::file_store(),
             platform: crate::platform::Platform::Desktop,
+            screen: None,
             pads: &pads,
             deck: false,
             fallback_ui: false,
@@ -3424,6 +3522,7 @@ pub(crate) mod tests {
             settings: &mut settings,
             store: crate::store::file_store(),
             platform: crate::platform::Platform::Desktop,
+            screen: None,
             pads: &pads,
             deck: false,
             fallback_ui: false,
@@ -3466,6 +3565,7 @@ pub(crate) mod tests {
             settings: &mut settings,
             store: crate::store::file_store(),
             platform: crate::platform::Platform::Desktop,
+            screen: None,
             pads: &pads,
             deck: false,
             fallback_ui: false,
@@ -3503,6 +3603,7 @@ pub(crate) mod tests {
             settings: &mut settings,
             store: crate::store::file_store(),
             platform: crate::platform::Platform::Desktop,
+            screen: None,
             pads: &pads,
             deck: false,
             fallback_ui: false,
@@ -3544,6 +3645,7 @@ pub(crate) mod tests {
             settings: &mut settings,
             store: crate::store::file_store(),
             platform: crate::platform::Platform::Desktop,
+            screen: None,
             pads: &pads,
             deck: false,
             fallback_ui: false,
@@ -3619,6 +3721,7 @@ pub(crate) mod tests {
             settings: &mut settings,
             store: crate::store::file_store(),
             platform: crate::platform::Platform::Desktop,
+            screen: None,
             pads: &pads,
             deck: false,
             fallback_ui: false,
@@ -3675,6 +3778,7 @@ pub(crate) mod tests {
             settings: &mut settings,
             store: store.as_ref(),
             platform: crate::platform::Platform::Desktop,
+            screen: None,
             pads: &pads,
             deck: false,
             fallback_ui: false,
