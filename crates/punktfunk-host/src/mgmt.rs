@@ -310,6 +310,7 @@ fn api_router_parts() -> (Router<Arc<MgmtState>>, utoipa::openapi::OpenApi) {
             settings::get_host_settings,
             settings::patch_host_settings
         ))
+        .routes(routes!(settings::get_playing_apps))
         .routes(routes!(gpu::list_gpus))
         .routes(routes!(gpu::set_gpu_preference))
         .routes(routes!(display::get_display_settings))

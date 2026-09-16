@@ -191,6 +191,33 @@ pub(crate) fn state() -> HostSettingsState {
     }
 }
 
+#[derive(Serialize, ToSchema)]
+pub(crate) struct PlayingApps {
+    /// Lowercased app names, as the voice-chat app list matches them.
+    #[schema(example = json!(["discord", "firefox"]))]
+    apps: Vec<String>,
+}
+
+/// List apps playing audio
+///
+/// Audio output streams on the host right now, by app. Empty on a host that cannot list them.
+#[utoipa::path(
+    get,
+    path = "/host/audio/apps",
+    tag = "host",
+    operation_id = "getPlayingApps",
+    responses(
+        (status = OK, description = "Apps playing audio now", body = PlayingApps),
+        (status = UNAUTHORIZED, description = "Missing or invalid bearer token", body = ApiError),
+    )
+)]
+pub(crate) async fn get_playing_apps() -> Json<PlayingApps> {
+    let apps = tokio::task::spawn_blocking(crate::audio::playing_apps)
+        .await
+        .unwrap_or_default();
+    Json(PlayingApps { apps })
+}
+
 /// Get the host settings
 ///
 /// Every setting this host acts on, with the value in force and what set it.

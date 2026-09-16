@@ -121,6 +121,8 @@ export type PendingDevice = { readonly "access_level"?: string | null, readonly 
 export const PendingDevice = Schema.Struct({ "access_level": Schema.optionalKey(Schema.Union([Schema.String, Schema.Null]).annotate({ "description": "Stored mask's preset. `null` with no stored record — unlike\n[`NativeClient`], where it is always derivable." })), "age_secs": Schema.Number.annotate({ "format": "int64" }).check(Schema.isInt()).check(Schema.isGreaterThanOrEqualTo(0)), "expires_unix": Schema.optionalKey(Schema.Never), "fingerprint": Schema.String.annotate({ "description": "Hex SHA-256 of the device certificate — what approval pins." }), "granted_unix": Schema.optionalKey(Schema.Never), "grants": Schema.optionalKey(Schema.Never), "id": Schema.Number.annotate({ "description": "Approve/deny id. Per-process; entries expire after ~10 minutes.", "format": "int32" }).check(Schema.isInt()).check(Schema.isGreaterThanOrEqualTo(0)), "name": Schema.String.annotate({ "description": "Client's own name, else fingerprint-derived." }), "source": Schema.String.annotate({ "description": "Where the knock came from: `\"lan\"` or `\"wan\"`. A `\"wan\"` device cannot be admitted by\napprove — arm a PIN bound to its fingerprint instead." }), "until_disconnect": Schema.Boolean.annotate({ "description": "Stored \"this session\" setting if this fingerprint was paired before. `false` if unknown." }) }).annotate({ "description": "Knock awaiting delegated approval (pair here instead of fetching a PIN)." })
 export type Plane = "native" | "gamestream"
 export const Plane = Schema.Literals(["native", "gamestream"]).annotate({ "description": "Origin plane. Both planes must emit; filtering is the consumer's job." })
+export type PlayingApps = { readonly "apps": ReadonlyArray<string> }
+export const PlayingApps = Schema.Struct({ "apps": Schema.Array(Schema.String).annotate({ "description": "Lowercased app names, as the voice-chat app list matches them." }) })
 export type PluginLogLine = { readonly "level": string, readonly "msg": string, readonly "source": string, readonly "ts_ms": number }
 export const PluginLogLine = Schema.Struct({ "level": Schema.String.annotate({ "description": "Normalized by [`crate::log_capture::LogRing::push_remote`]; unknown becomes INFO." }), "msg": Schema.String, "source": Schema.String, "ts_ms": Schema.Number.annotate({ "description": "Unix ms, kept verbatim — see [`crate::log_capture::LogRing::push_remote`].", "format": "int64" }).check(Schema.isInt()).check(Schema.isGreaterThanOrEqualTo(0)) })
 export type PluginRegistration = { readonly "category"?: string | null, readonly "title": string, readonly "ui"?: null | { readonly "icon"?: string | null, readonly "port": number, readonly "secret": string }, readonly "version"?: string | null }
@@ -540,6 +542,10 @@ export type GetHostInfo200 = HostInfo
 export const GetHostInfo200 = HostInfo
 export type GetHostInfo401 = ApiError
 export const GetHostInfo401 = ApiError
+export type GetPlayingApps200 = PlayingApps
+export const GetPlayingApps200 = PlayingApps
+export type GetPlayingApps401 = ApiError
+export const GetPlayingApps401 = ApiError
 export type GetHostSettings200 = HostSettingsState
 export const GetHostSettings200 = HostSettingsState
 export type GetHostSettings401 = ApiError
@@ -1414,6 +1420,13 @@ export const make = (
       orElse: unexpectedStatus
     }))
   ),
+    "getPlayingApps": (options) => HttpClientRequest.get(`/api/v1/host/audio/apps`).pipe(
+    withResponse(options?.config)(HttpClientResponse.matchStatus({
+      "2xx": decodeSuccess(GetPlayingApps200),
+      "401": decodeError("GetPlayingApps401", GetPlayingApps401),
+      orElse: unexpectedStatus
+    }))
+  ),
     "getHostSettings": (options) => HttpClientRequest.get(`/api/v1/host/settings`).pipe(
     withResponse(options?.config)(HttpClientResponse.matchStatus({
       "2xx": decodeSuccess(GetHostSettings200),
@@ -2220,6 +2233,10 @@ readonly "setHooks": <Config extends OperationConfig>(options: { readonly payloa
 * Host identity and capabilities
 */
 readonly "getHostInfo": <Config extends OperationConfig>(options: { readonly config?: Config | undefined } | undefined) => Effect.Effect<WithOptionalResponse<typeof GetHostInfo200.Type, Config>, HttpClientError.HttpClientError | SchemaError | PunktfunkError<"GetHostInfo401", typeof GetHostInfo401.Type>>
+  /**
+* Audio output streams on the host right now, by app. Empty on a host that cannot list them.
+*/
+readonly "getPlayingApps": <Config extends OperationConfig>(options: { readonly config?: Config | undefined } | undefined) => Effect.Effect<WithOptionalResponse<typeof GetPlayingApps200.Type, Config>, HttpClientError.HttpClientError | SchemaError | PunktfunkError<"GetPlayingApps401", typeof GetPlayingApps401.Type>>
   /**
 * Every setting this host acts on, with the value in force and what set it.
 */

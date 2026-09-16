@@ -8,7 +8,7 @@ streaming, in both directions — copy a URL on your laptop, paste it on the hos
 
 **Two separate switches have to be on:**
 
-1. The **host** operator has to allow it, with a line in `host.env` and a host restart. Off by
+1. The **host** operator has to allow it, in the web console under **Host → Settings**. Off by
    default.
 2. **You** have to turn it on for that one host, in that host's edit sheet on your client. Off by
    default on the macOS, Windows and Linux clients — **on by default on Android**.
@@ -17,11 +17,15 @@ Flipping one and not the other looks exactly like the feature not existing. Chec
 
 ## 1. Allow it on the host
 
-Add a `PUNKTFUNK_CLIPBOARD` line to the host's `host.env` — `~/.config/punktfunk/host.env` on
-Linux, `%ProgramData%\punktfunk\host.env` on Windows.
+Open the web console, go to **Host → Settings**, and set **Shared clipboard** to **Text** or
+**Text and files**. It applies to the next stream; no restart.
+
+On a host nobody opens the console on, add a `PUNKTFUNK_CLIPBOARD` line to its `host.env` instead —
+`~/.config/punktfunk/host.env` on Linux, `%ProgramData%\punktfunk\host.env` on Windows. A value set
+there wins over the console, which then shows the setting as locked.
 
 ```ini
-PUNKTFUNK_CLIPBOARD=on
+PUNKTFUNK_CLIPBOARD=files
 ```
 
 The accepted values:
@@ -33,7 +37,7 @@ The accepted values:
 | `files` (also `on`, `1`, `true`, `yes`) | On, and file transfer is permitted by policy. |
 
 Values are trimmed and compared case-insensitively. A value the host doesn't recognise is ignored
-with a warning in the host log, so the setting stays off.
+with a warning in the host log, and the console's setting applies instead.
 
 The file is only read at startup, so restart the host. On Linux:
 

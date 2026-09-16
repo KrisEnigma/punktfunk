@@ -2040,6 +2040,7 @@ fn every_route_is_classified_for_the_plugin_and_cert_lanes() {
         // Host settings: operator only. A plugin or a device must not reopen GameStream.
         ("GET", "/api/v1/host/settings", false, false),
         ("PATCH", "/api/v1/host/settings", false, false),
+        ("GET", "/api/v1/host/audio/apps", false, false),
         ("GET", "/api/v1/update/status", false, false),
         ("POST", "/api/v1/update/check", false, false),
         ("POST", "/api/v1/update/apply", false, false),

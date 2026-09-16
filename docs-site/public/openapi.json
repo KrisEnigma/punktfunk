@@ -1727,6 +1727,38 @@
         }
       }
     },
+    "/api/v1/host/audio/apps": {
+      "get": {
+        "tags": [
+          "host"
+        ],
+        "summary": "List apps playing audio",
+        "description": "Audio output streams on the host right now, by app. Empty on a host that cannot list them.",
+        "operationId": "getPlayingApps",
+        "responses": {
+          "200": {
+            "description": "Apps playing audio now",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PlayingApps"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/host/settings": {
       "get": {
         "tags": [
@@ -9794,6 +9826,25 @@
           "native",
           "gamestream"
         ]
+      },
+      "PlayingApps": {
+        "type": "object",
+        "required": [
+          "apps"
+        ],
+        "properties": {
+          "apps": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Lowercased app names, as the voice-chat app list matches them.",
+            "example": [
+              "discord",
+              "firefox"
+            ]
+          }
+        }
       },
       "PluginLogBatch": {
         "type": "object",
