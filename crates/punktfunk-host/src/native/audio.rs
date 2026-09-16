@@ -154,6 +154,9 @@ pub(super) fn audio_thread(
     // This session's live-display record: the sink name goes here on every open, so a
     // later joiner finds the one to tap.
     published: Arc<std::sync::Mutex<Option<String>>>,
+    // Operator mute for THIS session (mgmt `PUT /session/{id}/audio`). Read per frame;
+    // the capturer and the sink stay up so the session sharing them keeps hearing.
+    muted: Arc<AtomicBool>,
 ) {
     use crate::audio::SAMPLE_RATE;
     const FRAME_MS: usize = 5;
@@ -534,6 +537,15 @@ pub(super) fn audio_thread(
             // buffer we send. See [`PtsClock`].
             let pts_ns = clock.pts_ns();
             clock.advance(frame_buf.len());
+            // Muted: drop the frame before it costs an encode or a datagram. The clock
+            // advanced, so unmute resumes at the right pts; `seq` does not, so the client
+            // reads a pause rather than loss. The predecessor a RED frame would advertise
+            // is from before the silence — clear it, and fade back in like a capture hole.
+            if muted.load(Ordering::SeqCst) {
+                prev_frame.clear();
+                resume_fade = true;
+                continue;
+            }
             // One send path for both planes. `None` = Opus encode error (already counted).
             // PCM cannot fail: `from_f32` is scale-and-clamp over a known length.
             let datagram: Option<Vec<u8>> = if pcm_plane {

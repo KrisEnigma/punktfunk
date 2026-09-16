@@ -344,6 +344,7 @@ impl StreamState {
             launch_target,
             client_hdr,
             join_live,
+            controls,
             reframe_to: _,
             frame_map,
             bringup,
@@ -774,6 +775,8 @@ impl StreamState {
             last_resize_ms: resize_ms.clone(),
             game: game_shared,
             capture_health: capture_health.clone(),
+            join: join_live,
+            controls,
         });
 
         // Replaced by `spawn_session_watcher` inside the session span; disconnected until then.

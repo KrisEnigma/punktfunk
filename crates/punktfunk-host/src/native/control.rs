@@ -70,8 +70,12 @@ pub(super) struct Task {
     /// LIVE grant mask, same atomic the datagram filter reads. Deadline/watch
     /// folds console edits in, so a later `ClipControl`/`ClipOffer` sees them.
     pub(super) session_grants: Arc<AtomicU32>,
-    /// Sole writer for deadline/watch `AccessUpdate`s (expiry + grant edits).
+    /// Sole writer for `AccessUpdate`s: the deadline/watch task and the per-session
+    /// management route both send here, so both clear the clipboard the same way.
     pub(super) access_rx: tokio::sync::mpsc::UnboundedReceiver<punktfunk_core::quic::AccessUpdate>,
+    /// Operator mute for this session (mgmt `PUT /session/{id}/audio`), so the client
+    /// can name the silence rather than conceal a gap.
+    pub(super) audio_rx: tokio::sync::mpsc::UnboundedReceiver<punktfunk_core::quic::AudioState>,
 }
 
 /// Ends when the control stream closes or a data-plane channel drops.
@@ -108,6 +112,7 @@ pub(super) async fn run(task: Task) {
         clip,
         session_grants,
         mut access_rx,
+        mut audio_rx,
     } = task;
     let pf_clipboard::ClipCoord {
         available: clip_available,
@@ -125,6 +130,8 @@ pub(super) async fn run(task: Task) {
     // `--open` anonymous sessions never spawn deadline/watch; the sender
     // drops immediately.
     let mut access_closed = false;
+    // Same closed-channel discipline: the mute lane outlives nothing of its own.
+    let mut audio_closed = false;
     let mut active = initial_mode;
     // Backstop against Reconfigure spam. Data-plane drain-to-newest already
     // coalesces a resize drag; 500 ms is half the client's 1 s self-limit.
@@ -398,6 +405,14 @@ pub(super) async fn run(task: Task) {
                 let shape = cursor_shape_rx.borrow_and_update().clone();
                 let Some(shape) = shape else { continue };
                 if io::write_msg(&mut ctrl_send, &shape.encode()).await.is_err() {
+                    break;
+                }
+            }
+            state = audio_rx.recv(), if !audio_closed => {
+                // `None` = every sender gone. Disable the arm; a closed mpsc is
+                // perpetually ready and would spin `select!`.
+                let Some(state) = state else { audio_closed = true; continue };
+                if io::write_msg(&mut ctrl_send, &state.encode()).await.is_err() {
                     break;
                 }
             }

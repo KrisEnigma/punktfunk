@@ -699,10 +699,13 @@ fn access_sleep(deadline: Option<i64>, warned: &[bool; 2], now: i64) -> std::tim
 /// Per-session access: expiry deadline + watch. Best-effort `AccessUpdate` at T−5 m / T−1 m
 /// and on every grant edit; folds the live mask within one event; typed-close at deadline,
 /// "expire now", or unpair. Closes only this connection — the owner's stream is untouched.
+///
+/// A pairing edit wins over a console per-session re-point: this task rewrites both the live
+/// mask and the ceiling the route clamps to.
 async fn access_lifecycle(
     conn: link::SessionLink,
     mut watch_rx: tokio::sync::watch::Receiver<crate::native_pairing::AccessState>,
-    grants: Arc<AtomicU32>,
+    controls: crate::session_status::SessionControls,
     clip_enabled: Arc<AtomicBool>,
     access_tx: tokio::sync::mpsc::UnboundedSender<AccessUpdate>,
     mut deadline: Option<i64>,
@@ -730,7 +733,7 @@ async fn access_lifecycle(
                 if !warned[i] && remaining <= *w {
                     warned[i] = true;
                     let _ = access_tx.send(AccessUpdate {
-                        grants: grants.load(Ordering::Relaxed),
+                        grants: controls.grants.load(Ordering::Relaxed),
                         remaining_secs: u32::try_from(remaining).unwrap_or(u32::MAX),
                     });
                 }
@@ -756,11 +759,15 @@ async fn access_lifecycle(
                 // Live mask updates now; the datagram filter reads it on the next event.
                 // Wider-mask resources stay up and starve (tearing a live uinput pad is churn).
                 // Clipboard is the cheap exception: clear the flag, stop forwarding copies.
-                grants.store(st.grants, Ordering::Relaxed);
+                controls.grants.store(st.grants, Ordering::Relaxed);
+                controls.ceiling.store(st.grants, Ordering::Relaxed);
                 if st.grants & GRANT_CLIPBOARD == 0 {
                     clip_enabled.store(false, Ordering::SeqCst);
                 }
                 deadline = st.deadline_unix;
+                controls
+                    .deadline_unix
+                    .store(deadline.unwrap_or(0), Ordering::Relaxed);
                 let now = wall_unix_now();
                 warned = spent_warnings(deadline, now);
                 // Skip an "expire now" (deadline already past) so we do not advertise a phantom second.
@@ -1605,8 +1612,23 @@ pub(crate) async fn run_admitted(
         }
     };
     let clip_available = clip.available;
-    // Lifecycle → control task (sole writer). No fingerprint → drop the sender, arm disables.
+    // Lifecycle and the per-session management routes → control task. Both lanes stay
+    // open for the whole session: the console can re-point or mute an anonymous client too.
     let (access_tx, access_rx) = tokio::sync::mpsc::unbounded_channel::<AccessUpdate>();
+    let (audio_tx, audio_rx) =
+        tokio::sync::mpsc::unbounded_channel::<punktfunk_core::quic::AudioState>();
+    // What `DELETE /session/{id}` and its siblings act on. `ceiling` is the pairing's own
+    // mask: a live re-point clamps to it, so the console never grants past the pairing.
+    let controls = crate::session_status::SessionControls {
+        grants: session_grants.clone(),
+        ceiling: Arc::new(AtomicU32::new(initial_grants)),
+        muted: Arc::new(AtomicBool::new(false)),
+        deadline_unix: Arc::new(std::sync::atomic::AtomicI64::new(
+            deadline_unix.unwrap_or(0),
+        )),
+        access_tx: Some(access_tx.clone()),
+        audio_tx: Some(audio_tx),
+    };
     tokio::spawn(control::run(control::Task {
         ctrl_send,
         ctrl_recv,
@@ -1639,8 +1661,9 @@ pub(crate) async fn run_admitted(
         clip,
         session_grants: session_grants.clone(),
         access_rx,
+        audio_rx,
     }));
-    // Only a fingerprint has a record to watch; dropping `access_tx` retires the update arm.
+    // Only a fingerprint has a record to watch; with no record there is nothing to expire.
     match (session_fp_hex.clone(), access_watch) {
         (Some(fp_hex), Some(watch_rx)) => {
             // Trust-store name (rename at approval wins), else the sanitized Hello name.
@@ -1662,7 +1685,7 @@ pub(crate) async fn run_admitted(
             tokio::spawn(access_lifecycle(
                 conn.clone(),
                 watch_rx,
-                session_grants.clone(),
+                controls.clone(),
                 clip_enabled.clone(),
                 access_tx,
                 deadline_unix,
@@ -1944,6 +1967,7 @@ pub(crate) async fn run_admitted(
                 .and_then(|(d, _)| d.audio_sink.lock().unwrap().clone())
         });
         let published = audio_sink.clone();
+        let muted = controls.muted.clone();
         std::thread::Builder::new()
             .name("punktfunk1-audio".into())
             .spawn(move || {
@@ -1957,6 +1981,7 @@ pub(crate) async fn run_admitted(
                     sink,
                     join_live,
                     published,
+                    muted,
                 )
             })
             .map_err(|e| tracing::warn!(error = %e, "audio thread spawn failed — session continues without audio"))
@@ -2308,6 +2333,7 @@ pub(crate) async fn run_admitted(
                         launch_target,
                         client_hdr,
                         join_live,
+                        controls,
                         reframe_to,
                         frame_map,
                         bringup: bringup_dp,

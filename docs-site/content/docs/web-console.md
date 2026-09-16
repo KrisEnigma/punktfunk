@@ -135,7 +135,11 @@ Nine destinations in the sidebar (a **More** tab on a phone holds the last five)
 ![Live status during a stream: video and audio streaming, the running game, the session's codec, resolution, frame rate and bitrate](/img/console-live-status.png)
 
 - **Dashboard** — the live status above: what's streaming, which games run, how many clients are
-  paired. Buttons stop a session or ask the encoder for a fresh keyframe.
+  paired. The **Sessions** card lists every connected client — one row each, with its display mode,
+  whether it has its own display or joined another session, and how long it has been up. Each row
+  stops, keyframes, mutes or changes the access level of that one session; the buttons in the card
+  below are host-wide and take every session at once. A Moonlight session has no row controls: the
+  host holds no per-session handle for the compat plane.
 - **Host** — this host's identity (hostname, OS, local IP, version, unique id), the codecs it
   advertises, its ports, the **Updates** card (see [Updating the Host](/docs/updating)), the
   **GPUs** card — Automatic, or prefer one GPU for capture and encode, applied to the next session

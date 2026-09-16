@@ -1025,6 +1025,36 @@ impl AccessUpdate {
     }
 }
 
+/// [`AudioState`]. 0x59: next after [`MSG_ACCESS_UPDATE`].
+pub const MSG_AUDIO_STATE: u8 = 0x59;
+
+/// `host → client` ([`MSG_AUDIO_STATE`]): the operator muted this session from the
+/// console. The host stops sending audio datagrams; nothing on the client's side is
+/// broken, so the client says so instead of concealing a gap. Latest-wins,
+/// best-effort — older clients just go quiet.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AudioState {
+    pub muted: bool,
+}
+
+impl AudioState {
+    pub fn encode(&self) -> Vec<u8> {
+        // magic[0..4] type[4] muted[5]
+        let mut b = Vec::with_capacity(6);
+        b.extend_from_slice(CTL_MAGIC);
+        b.push(MSG_AUDIO_STATE);
+        b.push(u8::from(self.muted));
+        b
+    }
+
+    pub fn decode(b: &[u8]) -> Result<AudioState> {
+        if b.len() != 6 || &b[0..4] != CTL_MAGIC || b[4] != MSG_AUDIO_STATE {
+            return Err(PunktfunkError::InvalidArg("bad AudioState"));
+        }
+        Ok(AudioState { muted: b[5] != 0 })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::config::Mode;
@@ -1565,5 +1595,20 @@ mod tests {
         assert!(CursorRenderMode::decode(&bytes).is_err());
         assert!(AccessUpdate::decode(&[bytes.as_slice(), &[0]].concat()).is_err());
         assert!(AccessUpdate::decode(&bytes[..bytes.len() - 1]).is_err());
+    }
+
+    /// Same six-byte shape as `CursorRenderMode`, so the type byte is the only thing
+    /// that tells them apart — decode must reject the neighbour, not read its flag.
+    #[test]
+    fn audio_state_roundtrip() {
+        for muted in [true, false] {
+            let m = AudioState { muted };
+            assert_eq!(AudioState::decode(&m.encode()).unwrap(), m);
+        }
+        let bytes = AudioState { muted: true }.encode();
+        assert_eq!(bytes[4], MSG_AUDIO_STATE);
+        assert!(CursorRenderMode::decode(&bytes).is_err());
+        assert!(AudioState::decode(&CursorRenderMode { client_draws: true }.encode()).is_err());
+        assert!(AudioState::decode(&bytes[..bytes.len() - 1]).is_err());
     }
 }

@@ -843,5 +843,13 @@
 	"display_q_max_mode_none": "No cap",
 	"display_q_scale": "Scale its screen at",
 	"display_q_scale_desktop": "Whatever the desktop chose",
-	"display_capped": "Up to {mode}"
+	"display_capped": "Up to {mode}",
+	"sessions_title": "Sessions",
+	"sessions_own_display": "Own display",
+	"sessions_joined": "Joined another session",
+	"sessions_uptime": "Up {time}",
+	"sessions_muted": "Muted",
+	"action_mute": "Mute",
+	"action_unmute": "Unmute",
+	"action_mute_failed": "Couldn't change the session's audio"
 }
