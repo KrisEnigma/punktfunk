@@ -665,7 +665,7 @@ fn open_nvenc(
 /// A failed open falls back to VAAPI. See `design/linux-vulkan-video-encode.md`.
 #[cfg(all(target_os = "linux", feature = "vulkan-encode"))]
 fn vulkan_encode_enabled() -> bool {
-    std::env::var("PUNKTFUNK_VULKAN_ENCODE")
+    pf_host_config::knob("PUNKTFUNK_VULKAN_ENCODE")
         .map(|v| !matches!(v.trim(), "0" | "false" | "no" | "off"))
         .unwrap_or(true)
 }

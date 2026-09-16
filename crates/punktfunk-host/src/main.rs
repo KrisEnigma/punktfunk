@@ -426,6 +426,8 @@ fn real_main() -> Result<()> {
     match args.first().map(String::as_str) {
         Some("serve") => {
             let (mgmt_opts, native, gamestream) = parse_serve(&args[1..])?;
+            // Restart-class settings changed after this point wait for a restart.
+            pf_host_config::mark_started();
             // Must run before any new session touches the topology.
             windows::entry::serve_startup_recover();
             gamestream::serve(mgmt_opts, native, gamestream)
@@ -784,10 +786,21 @@ fn parse_serve(args: &[String]) -> Result<(mgmt::Options, native::NativeServe, b
     )
     .parse()
     .map_err(|_| anyhow::anyhow!("bad --webtransport-bind '{webtransport_host}' (want an IP)"))?;
-    // CLI or `PUNKTFUNK_GAMESTREAM`. Packaged units ship native-only ExecStart; env is the pin.
-    let gamestream = gamestream || pf_host_config::config().gamestream;
+    // A flag outranks env and the console's value; pinning it lets the console show why.
+    if gamestream {
+        pf_host_config::pin("gamestream", "--gamestream", serde_json::Value::Bool(true));
+    }
+    if webtransport {
+        pf_host_config::pin(
+            "webtransport",
+            "--webtransport",
+            serde_json::Value::Bool(true),
+        );
+    }
+    let gamestream = pf_host_config::config().gamestream;
     let native = native::NativeServe {
-        webtransport_bind: (webtransport || pf_host_config::config().webtransport)
+        webtransport_bind: pf_host_config::config()
+            .webtransport
             .then_some(webtransport_bind),
         ..native
     };

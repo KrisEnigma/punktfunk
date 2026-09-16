@@ -330,6 +330,18 @@ mod mic_jitter;
 mod mic_pump;
 pub use mic_pump::{MicFrame, MicPump};
 
+/// Apps playing audio on the host right now, lowercased. Empty where the host cannot list them.
+/// Blocks on a PipeWire round trip; call it off the async runtime.
+pub(crate) fn playing_apps() -> Vec<String> {
+    #[cfg(target_os = "linux")]
+    return linux::playing_apps().unwrap_or_else(|e| {
+        tracing::debug!(error = %format!("{e:#}"), "playing apps not listed");
+        Vec::new()
+    });
+    #[cfg(not(target_os = "linux"))]
+    Vec::new()
+}
+
 /// Last wiring-pass assignment on Windows; `None` elsewhere or before the first pass.
 /// Read-only for the status API — never triggers a pass.
 pub(crate) fn wiring_snapshot() -> Option<wiring_plan::Wiring> {

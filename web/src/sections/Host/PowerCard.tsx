@@ -19,7 +19,7 @@ import { m } from "@/paraglide/messages";
 
 /** Localized titles for the KNOWN action ids; unknown ids fall back to the server's title —
  * the contract that lets future host actions appear with no console release. */
-const actionTitle = (a: ActionInfo): string => {
+export const actionTitle = (a: ActionInfo): string => {
 	switch (a.id) {
 		case "power.sleep":
 			return m.host_power_sleep();
@@ -27,6 +27,8 @@ const actionTitle = (a: ActionInfo): string => {
 			return m.host_power_reboot();
 		case "power.shutdown":
 			return m.host_power_shutdown();
+		case "host.restart":
+			return m.host_power_restart_service();
 		default:
 			return a.title;
 	}
@@ -101,7 +103,7 @@ export const PowerSection: FC = () => {
 
 /** The password-confirm dialog keeps its 401 handling local: this route uses 401 for a wrong
  * password, while apiFetch redirects only the auth middleware's `unauthorized` body. */
-const ConfirmDialog: FC<{
+export const ConfirmDialog: FC<{
 	action: ActionInfo;
 	onClose: () => void;
 	onAccepted: (action: ActionInfo) => void;
