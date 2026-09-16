@@ -3253,12 +3253,14 @@ mod tests {
             fn drop(&mut self) {
                 // SAFETY: dropped while SESSION_TEST_LOCK is held; only the session path reads this.
                 unsafe { std::env::remove_var(self.0) };
+                pf_host_config::reload();
             }
         }
         let _env = EnvGuard("PUNKTFUNK_CLIPBOARD");
         // Operator policy on. Serialized on SESSION_TEST_LOCK; only the session path reads this.
         // SAFETY: writers serialized; only this session path reads the variable.
         unsafe { std::env::set_var("PUNKTFUNK_CLIPBOARD", "1") };
+        pf_host_config::reload();
 
         let host = std::thread::spawn(|| {
             run_ephemeral(Punktfunk1Options {
