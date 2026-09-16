@@ -89,10 +89,12 @@ pub fn drm_fourcc(format: PixelFormat) -> Option<u32> {
         Nv12 => drm_fourcc_code(b"NV12"),
         X2Rgb10 => drm_fourcc_code(b"XR30"), // DRM_FORMAT_XRGB2101010
         X2Bgr10 => drm_fourcc_code(b"XB30"), // DRM_FORMAT_XBGR2101010
+        // NV12 at 16 bits per sample, the 10-bit code high (`DRM_FORMAT_P010`).
+        P010 => drm_fourcc_code(b"P010"),
         // 24-bit packed RGB/BGR have no dmabuf import here; use the CPU path.
-        // Rgb10a2/Rgb10a2Sdr/P010 are Windows formats; Yuv444 is convert output, never a
+        // Rgb10a2/Rgb10a2Sdr are Windows formats; Yuv444 is convert output, never a
         // capture source.
-        Rgb | Bgr | Rgb10a2 | Rgb10a2Sdr | P010 | Yuv444 => return None,
+        Rgb | Bgr | Rgb10a2 | Rgb10a2Sdr | Yuv444 => return None,
     })
 }
 

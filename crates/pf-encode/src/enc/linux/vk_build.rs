@@ -148,6 +148,113 @@ pub(super) unsafe fn probe_rgb_direct(
     Ok((x_offset, y_offset))
 }
 
+/// One plane of a multi-planar image as a storage image; the image carries `MUTABLE_FORMAT`.
+unsafe fn make_plane_view(
+    device: &ash::Device,
+    image: vk::Image,
+    fmt: vk::Format,
+    plane: vk::ImageAspectFlags,
+) -> Result<vk::ImageView> {
+    Ok(device.create_image_view(
+        &vk::ImageViewCreateInfo::default()
+            .image(image)
+            .view_type(vk::ImageViewType::TYPE_2D)
+            .format(fmt)
+            .subresource_range(
+                vk::ImageSubresourceRange::default()
+                    .aspect_mask(plane)
+                    .level_count(1)
+                    .layer_count(1),
+            ),
+        None,
+    )?)
+}
+
+/// Can the compute CSC write the encode source's planes directly? True when this profile
+/// lists `pic` for `ENCODE_SRC | STORAGE` with the create flags a plane view needs. A driver
+/// that lists it and still misrenders is what `PUNKTFUNK_VULKAN_DIRECT_PLANES=0` is for.
+pub(super) unsafe fn probe_yuv_storage_planes(
+    vq_inst: &ash::khr::video_queue::Instance,
+    pd: vk::PhysicalDevice,
+    profile: &vk::VideoProfileInfoKHR,
+    pic: vk::Format,
+) -> bool {
+    let profile_arr = [*profile];
+    let plist = vk::VideoProfileListInfoKHR::default().profiles(&profile_arr);
+    let mut fmt_info = vk::PhysicalDeviceVideoFormatInfoKHR::default()
+        .image_usage(vk::ImageUsageFlags::VIDEO_ENCODE_SRC_KHR | vk::ImageUsageFlags::STORAGE);
+    fmt_info.p_next = &plist as *const _ as *const c_void;
+    let get_fmt = vq_inst.fp().get_physical_device_video_format_properties_khr;
+    let mut count = 0u32;
+    if get_fmt(pd, &fmt_info, &mut count, std::ptr::null_mut()) != vk::Result::SUCCESS || count == 0
+    {
+        return false;
+    }
+    let mut props = vec![vk::VideoFormatPropertiesKHR::default(); count as usize];
+    let r = get_fmt(pd, &fmt_info, &mut count, props.as_mut_ptr());
+    if r != vk::Result::SUCCESS && r != vk::Result::INCOMPLETE {
+        return false;
+    }
+    planes_writable(&props[..count as usize], pic)
+}
+
+/// Pure half of [`probe_yuv_storage_planes`].
+pub(super) fn planes_writable(props: &[vk::VideoFormatPropertiesKHR], pic: vk::Format) -> bool {
+    let flags = vk::ImageCreateFlags::MUTABLE_FORMAT | vk::ImageCreateFlags::EXTENDED_USAGE;
+    props.iter().any(|p| {
+        p.format == pic
+            && p.image_tiling == vk::ImageTiling::OPTIMAL
+            && p.image_usage_flags.contains(vk::ImageUsageFlags::STORAGE)
+            && p.image_create_flags.contains(flags)
+    })
+}
+
+#[cfg(test)]
+mod direct_planes_tests {
+    use super::*;
+
+    fn listed(
+        usage: vk::ImageUsageFlags,
+        flags: vk::ImageCreateFlags,
+    ) -> vk::VideoFormatPropertiesKHR<'static> {
+        vk::VideoFormatPropertiesKHR::default()
+            .format(NV12)
+            .image_tiling(vk::ImageTiling::OPTIMAL)
+            .image_usage_flags(usage)
+            .image_create_flags(flags)
+    }
+
+    /// Storage on the picture format plus both create flags, or the scratch path stays.
+    #[test]
+    fn direct_planes_need_storage_and_the_view_flags_on_the_picture_format() {
+        let full = vk::ImageCreateFlags::MUTABLE_FORMAT | vk::ImageCreateFlags::EXTENDED_USAGE;
+        let src = vk::ImageUsageFlags::VIDEO_ENCODE_SRC_KHR;
+        assert!(planes_writable(
+            &[listed(src | vk::ImageUsageFlags::STORAGE, full)],
+            NV12
+        ));
+        assert!(
+            !planes_writable(&[listed(src, full)], NV12),
+            "no storage usage"
+        );
+        assert!(
+            !planes_writable(
+                &[listed(
+                    src | vk::ImageUsageFlags::STORAGE,
+                    vk::ImageCreateFlags::MUTABLE_FORMAT
+                )],
+                NV12
+            ),
+            "no extended usage"
+        );
+        assert!(
+            !planes_writable(&[listed(src | vk::ImageUsageFlags::STORAGE, full)], P010),
+            "other format"
+        );
+        assert!(!planes_writable(&[], NV12));
+    }
+}
+
 /// EFC colour model for this depth (709 SDR / 2020 HDR) — the same matrices the compute-CSC
 /// shaders use, so encode-src and SPS/sequence-header colour signalling stay interchangeable.
 pub(super) fn rgb_model_for(ten_bit: bool) -> u32 {
@@ -170,7 +277,36 @@ pub(super) unsafe fn make_video_image(
     profile_list: &mut vk::VideoProfileListInfoKHR,
     concurrent: &[u32],
 ) -> Result<(vk::Image, vk::DeviceMemory)> {
+    make_video_image_flags(
+        device,
+        mp,
+        fmt,
+        w,
+        h,
+        layers,
+        usage,
+        vk::ImageCreateFlags::empty(),
+        profile_list,
+        concurrent,
+    )
+}
+
+/// [`make_video_image`] with image create flags (`MUTABLE_FORMAT` for plane views).
+#[allow(clippy::too_many_arguments)]
+pub(super) unsafe fn make_video_image_flags(
+    device: &ash::Device,
+    mp: &vk::PhysicalDeviceMemoryProperties,
+    fmt: vk::Format,
+    w: u32,
+    h: u32,
+    layers: u32,
+    usage: vk::ImageUsageFlags,
+    flags: vk::ImageCreateFlags,
+    profile_list: &mut vk::VideoProfileListInfoKHR,
+    concurrent: &[u32],
+) -> Result<(vk::Image, vk::DeviceMemory)> {
     let mut ci = vk::ImageCreateInfo::default()
+        .flags(flags)
         .image_type(vk::ImageType::TYPE_2D)
         .format(fmt)
         .extent(vk::Extent3D {
@@ -242,6 +378,7 @@ pub(super) unsafe fn make_frame(
     csc: bool,
     pad_fmt: Option<vk::Format>,
     hdr: bool,
+    direct_planes: bool,
     f: &mut Frame,
 ) -> Result<()> {
     // "no cursor uploaded yet" sentinel — a real serial may be 0 (see `prep_cursor`).
@@ -278,6 +415,7 @@ pub(super) unsafe fn make_frame(
             csc_pool,
             sampler,
             hdr,
+            direct_planes,
             f,
         )?;
     }
@@ -294,7 +432,8 @@ pub(super) unsafe fn make_frame(
     )
 }
 
-/// CSC half of [`make_frame`]: NV12 encode-src, Y/UV scratch, cursor, descriptors.
+/// CSC half of [`make_frame`]: the NV12/P010 encode-src, what the CSC writes (its planes, or
+/// Y/UV scratch copied in afterwards), cursor, descriptors.
 #[allow(clippy::too_many_arguments)]
 unsafe fn make_frame_csc(
     device: &ash::Device,
@@ -307,45 +446,72 @@ unsafe fn make_frame_csc(
     csc_pool: vk::DescriptorPool,
     sampler: vk::Sampler,
     hdr: bool,
+    direct_planes: bool,
     f: &mut Frame,
 ) -> Result<()> {
     let pic = yuv_format(hdr);
-    (f.nv12_src, f.nv12_mem) = make_video_image(
-        device,
-        mem_props,
-        pic,
-        w,
-        h,
-        1,
-        vk::ImageUsageFlags::VIDEO_ENCODE_SRC_KHR | vk::ImageUsageFlags::TRANSFER_DST,
-        profile_list,
-        fams,
-    )?;
-    f.nv12_view = make_view(device, f.nv12_src, pic, 0)?;
-    // Scratch is a storage-image format size-compatible with the picture planes (`vkCmdCopyImage`
-    // needs equal texel-block size). 10-bit ycbcr planes are not storage formats, so R16/RG16
-    // and `rgb2yuv10.comp` writes the value into the high bits.
+    // The CSC's plane formats, size-compatible with the picture planes. 10-bit ycbcr planes
+    // are not storage formats, so R16/RG16 and `rgb2yuv10.comp` writes the value into the
+    // high bits.
     let (y_fmt, uv_fmt) = if hdr {
         (vk::Format::R16_UNORM, vk::Format::R16G16_UNORM)
     } else {
         (vk::Format::R8_UNORM, vk::Format::R8G8_UNORM)
     };
-    (f.y_img, f.y_mem, f.y_view) = make_plain_image(
-        device,
-        mem_props,
-        y_fmt,
-        w,
-        h,
-        vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::TRANSFER_SRC,
-    )?;
-    (f.uv_img, f.uv_mem, f.uv_view) = make_plain_image(
-        device,
-        mem_props,
-        uv_fmt,
-        w / 2,
-        h / 2,
-        vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::TRANSFER_SRC,
-    )?;
+    f.direct_planes = direct_planes;
+    if direct_planes {
+        // The CSC writes the picture's planes through plane views: no scratch, no copies.
+        // MUTABLE_FORMAT allows a plane view; EXTENDED_USAGE lets STORAGE be a view-format
+        // capability the picture format itself lacks.
+        (f.nv12_src, f.nv12_mem) = make_video_image_flags(
+            device,
+            mem_props,
+            pic,
+            w,
+            h,
+            1,
+            vk::ImageUsageFlags::VIDEO_ENCODE_SRC_KHR
+                | vk::ImageUsageFlags::STORAGE
+                | vk::ImageUsageFlags::TRANSFER_DST,
+            vk::ImageCreateFlags::MUTABLE_FORMAT | vk::ImageCreateFlags::EXTENDED_USAGE,
+            profile_list,
+            fams,
+        )?;
+        f.nv12_view = make_view(device, f.nv12_src, pic, 0)?;
+        f.y_view = make_plane_view(device, f.nv12_src, y_fmt, vk::ImageAspectFlags::PLANE_0)?;
+        f.uv_view = make_plane_view(device, f.nv12_src, uv_fmt, vk::ImageAspectFlags::PLANE_1)?;
+    } else {
+        (f.nv12_src, f.nv12_mem) = make_video_image(
+            device,
+            mem_props,
+            pic,
+            w,
+            h,
+            1,
+            vk::ImageUsageFlags::VIDEO_ENCODE_SRC_KHR | vk::ImageUsageFlags::TRANSFER_DST,
+            profile_list,
+            fams,
+        )?;
+        f.nv12_view = make_view(device, f.nv12_src, pic, 0)?;
+        // Scratch planes, copied into the picture after the CSC (`vkCmdCopyImage` needs equal
+        // texel-block size).
+        (f.y_img, f.y_mem, f.y_view) = make_plain_image(
+            device,
+            mem_props,
+            y_fmt,
+            w,
+            h,
+            vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::TRANSFER_SRC,
+        )?;
+        (f.uv_img, f.uv_mem, f.uv_view) = make_plain_image(
+            device,
+            mem_props,
+            uv_fmt,
+            w / 2,
+            h / 2,
+            vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::TRANSFER_SRC,
+        )?;
+    }
     // Cursor overlay: CURSOR_MAX² RGBA8 + host staging. View/descriptor stay bound;
     // only the image content changes (`prep_cursor`).
     (f.cursor_img, f.cursor_mem, f.cursor_view) = make_plain_image(

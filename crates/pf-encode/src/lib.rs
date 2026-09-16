@@ -670,28 +670,36 @@ fn vulkan_encode_enabled() -> bool {
         .unwrap_or(true)
 }
 
-/// Whether this session can ingest producer-native NV12. Only Vulkan Video
-/// can; the VAAPI session takes RGB from the compositor.
-///
-/// Once the producer has been asked for two-plane NV12 there is **no
-/// fallback**. [`open_video`] makes a failed Vulkan open fatal rather than
-/// degrade to VAAPI (silent garbage). A wrong `true` kills the session at
-/// its first frame. Conjuncts are cheapest-first; the device probe runs last.
+/// Whether this session can ingest a producer's own NV12 without a host pass. Both AMD/Intel
+/// lanes can: Vulkan Video imports it as its picture, the native libva session encodes it as
+/// imported. AV1 is Vulkan Video's alone. The NVENC lane's fused convert reads RGB only.
 #[cfg(target_os = "linux")]
 pub fn linux_native_nv12_ok(codec: Codec) -> bool {
-    #[cfg(feature = "vulkan-encode")]
-    {
-        matches!(codec, Codec::H265 | Codec::Av1)
-            && vulkan_encode_enabled()
-            // Same auto+pref decision `open_video` makes. A denylist of explicit
-            // skip prefs misses `""` → `auto` → NVENC on NVIDIA.
-            && linux_zero_copy_is_vaapi()
-            // Last: this opens a Vulkan instance.
-            && vulkan_encode_available(codec)
+    if !linux_zero_copy_is_vaapi() {
+        return false;
     }
-    #[cfg(not(feature = "vulkan-encode"))]
+    match codec {
+        Codec::H264 | Codec::H265 => true,
+        #[cfg(feature = "vulkan-encode")]
+        Codec::Av1 => vulkan_encode_enabled() && vulkan_encode_available(codec),
+        _ => false,
+    }
+}
+
+/// May the capture hand the NVENC lane its held dmabufs? The encoder's zero-copy worker then
+/// converts each straight into a registered input slot (`PUNKTFUNK_NVENC_RAW`). Off without
+/// direct-SDK NVENC, on the VAAPI plane, or once the raw-dmabuf latch tripped.
+#[cfg(target_os = "linux")]
+pub fn linux_nvenc_raw_dmabuf_ok() -> bool {
+    #[cfg(feature = "nvenc")]
     {
-        let _ = codec;
+        !linux_zero_copy_is_vaapi()
+            && pf_zerocopy::nvenc_raw_enabled()
+            && !pf_zerocopy::raw_dmabuf_import_disabled()
+            && pf_zerocopy::fused_convert_available()
+    }
+    #[cfg(not(feature = "nvenc"))]
+    {
         false
     }
 }

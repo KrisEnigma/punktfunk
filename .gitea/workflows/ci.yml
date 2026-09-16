@@ -167,6 +167,7 @@ jobs:
           apt-get install -y --no-install-recommends glslang-tools spirv-tools
           for p in crates/pf-zerocopy/src/imp/rgb2nv12_buf \
                    crates/pf-zerocopy/src/imp/cursor_blend \
+                   crates/pf-zerocopy/src/imp/convert_img \
                    crates/pf-zerocopy/src/imp/reframe_buf \
                    crates/pf-encode/src/enc/linux/reframe \
                    crates/pf-encode/src/enc/linux/rgb2yuv \
