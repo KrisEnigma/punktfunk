@@ -764,6 +764,14 @@ fn pump(
     // This pair is the request: core derives the cap from it being specified, so
     // `None` must reach the wire as unspecified, not as an explicit 48 000/16.
     let (audio_rate_hz, audio_bits) = hires.unwrap_or(AUDIO_FORMAT_UNSPECIFIED);
+    // What the last Automatic session on THIS address proved. Keyed by address as well
+    // as host: a LAN lease and a tunnel to the same box are two different links, and one
+    // number would be wrong for one of them. TOFU has no key yet, so it starts cold.
+    let abr_seed = params
+        .pin
+        .as_ref()
+        .map(crate::trust::hex)
+        .and_then(|fp| crate::trust::abr_seed(&fp, &params.host));
     let connector = match NativeClient::connect_with_audio_format(
         &params.host,
         params.port,
@@ -813,6 +821,7 @@ fn pump(
         params.pin,
         Some(params.identity),
         params.connect_timeout,
+        abr_seed,
         // Session stop flag, so cancel reaches a dial that has not landed. Without
         // it this parks the pump for the whole budget (185 s on a request-access
         // connect the host holds pending) and cancel cannot be answered until return.
@@ -1437,6 +1446,13 @@ fn pump(
         total_frames,
         reason = end.as_deref().unwrap_or("user"),
         "session ended"
+    );
+    // Per address, like the seed: this session only proved the path it ran on. A
+    // pinned rate or an old host leaves the mark all-zero, which stores nothing.
+    crate::trust::remember_abr(
+        &crate::trust::hex(&connector.host_fingerprint),
+        &params.host,
+        connector.abr_memory(),
     );
     stop.store(true, Ordering::SeqCst);
     // About to drop the uplink — stop claiming a mute surface, so an embedder still

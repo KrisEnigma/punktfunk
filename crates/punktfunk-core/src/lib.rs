@@ -23,8 +23,10 @@
 // JS identifier.
 #[cfg(not(target_family = "wasm"))]
 pub mod abi;
+// Public for the one type the embedder persists per host; the controller stays crate-private.
+/// cbindgen:ignore
 #[cfg(feature = "quic")]
-mod abr;
+pub mod abr;
 pub mod audio;
 #[cfg(feature = "quic")]
 pub mod client;
