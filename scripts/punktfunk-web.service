@@ -32,7 +32,8 @@ Type=simple
 # on every call. punktfunk-web-init.service waits for it, so this no longer fails on a fresh
 # install's first enable; if it is somehow still absent the unit fails + Restart retries.
 # web-password is '-' optional (web-init creates it first, but a manual operator may inject
-# PUNKTFUNK_UI_PASSWORD another way).
+# PUNKTFUNK_UI_PASSWORD another way). It carries PUNKTFUNK_UI_PASSWORD_HASH once the console has
+# hashed the generated password; the console rewrites the file itself, so nothing here changes.
 EnvironmentFile=%h/.config/punktfunk/mgmt-token
 EnvironmentFile=-%h/.config/punktfunk/web-password
 # The host's ACTUAL mgmt port: `serve` writes this file (mgmt::publish_endpoint) with the port it
