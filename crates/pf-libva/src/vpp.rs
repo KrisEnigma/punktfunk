@@ -87,7 +87,7 @@ impl Vpp {
         source: VaSurfaceId,
         source_size: (u32, u32),
         source_is_rgb: bool,
-        ten_bit: bool,
+        colour: [u8; 3],
         target: VaSurfaceId,
     ) -> Result<()> {
         let [x, y, width, height] = self.crop.unwrap_or([0, 0, source_size.0, source_size.1]);
@@ -103,7 +103,7 @@ impl Vpp {
             width: self.width as u16,
             height: self.height as u16,
         };
-        let mut params = VaProcPipelineParameterBuffer::convert(source, source_is_rgb, ten_bit);
+        let mut params = VaProcPipelineParameterBuffer::convert(source, source_is_rgb, colour);
         params.surface_region = &source_region;
         params.output_region = &output_region;
         if (width, height) != (self.width, self.height) {
