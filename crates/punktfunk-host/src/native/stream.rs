@@ -320,6 +320,10 @@ pub(super) struct SessionContext {
     pub(super) stop: Arc<AtomicBool>,
     /// Set on `QUIT_CODE`. Display lease skips keep-alive linger for a user stop.
     pub(super) quit: Arc<AtomicBool>,
+    /// [`crate::events::SessionEndReason`] latch for the session summary; first write wins.
+    pub(super) end_reason: Arc<std::sync::atomic::AtomicU8>,
+    /// Session totals for the summary; the encode loop notes every bitrate it runs at.
+    pub(super) counters: Arc<crate::session_status::SessionCounters>,
     pub(super) reconfig: std::sync::mpsc::Receiver<punktfunk_core::Mode>,
     pub(super) keyframe: std::sync::mpsc::Receiver<()>,
     /// Lost-frame range `(first, last)`. Prefer `invalidate_ref_frames` over a full IDR.
@@ -381,6 +385,8 @@ pub(super) struct SessionContext {
     pub(super) client_hdr: Option<pf_frame::HdrMeta>,
     /// Admitted by `mode_conflict: join`: share the live display instead of creating one.
     pub(super) join_live: bool,
+    /// Per-session handles the management routes act on; published to the registry.
+    pub(super) controls: crate::session_status::SessionControls,
     /// A joiner's view and fit ([`SessionPlan::reframe_to`](crate::session_plan::SessionPlan::reframe_to)).
     pub(super) reframe_to: Option<(punktfunk_core::video_fit::VideoFit, (u32, u32))>,
     /// The encoder's framing, published for the input thread.

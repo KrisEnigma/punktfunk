@@ -291,6 +291,9 @@ pub(super) async fn negotiate(
     u16,
     Option<std::net::UdpSocket>,
     Start,
+    // What the client calls itself (`EXT_TAG_CLIENT` on `Start`); `None` from one that sent no
+    // block. Log only: two dialers from one device are told apart by that line.
+    Option<String>,
     Option<crate::vdisplay::Compositor>,
     // Gamescope sub-mode as a value, not process env — a concurrent connect would overwrite env.
     Option<crate::vdisplay::GamescopeRoute>,
@@ -655,7 +658,9 @@ pub(super) async fn negotiate(
                 punktfunk_core::quic::HOST_CAP2_TOUCH
             } else {
                 0
-            },
+            }
+            // Invites the client's `Start` extension block, which is where it names itself.
+            | punktfunk_core::quic::HOST_CAP2_EXT,
     };
     io::write_msg(send, &welcome.encode()).await?;
     bringup.mark("welcome");
@@ -729,8 +734,16 @@ pub(super) async fn negotiate(
         _ => None,
     };
 
-    let start =
-        Start::decode(&io::read_msg(recv).await?).map_err(|e| anyhow!("Start decode: {e:?}"))?;
+    let start_msg = io::read_msg(recv).await?;
+    let start = Start::decode(&start_msg).map_err(|e| anyhow!("Start decode: {e:?}"))?;
+    // What the client calls itself, when it sent one. A label for the log: a bad block fails the
+    // handshake (`decode_ext`'s rule), an unknown tag is skipped, and absence says nothing.
+    let client_label = Start::decode_ext(&start_msg)
+        .map_err(|e| anyhow!("Start extensions: {e:?}"))?
+        .into_iter()
+        .find(|(tag, _)| *tag == punktfunk_core::quic::EXT_TAG_CLIENT)
+        .map(|(_, v)| punktfunk_core::quic::client_label(&String::from_utf8_lossy(v)))
+        .filter(|s| !s.is_empty());
     bringup.mark("start");
     // `wire_mtu::spawn_watch` is started by `serve_session` once the control-task channels
     // exist; it also drives mid-session shard renegotiation (needs the control writer).
@@ -740,6 +753,7 @@ pub(super) async fn negotiate(
         udp_port,
         data_sock,
         start,
+        client_label,
         compositor,
         gamescope_route,
         prep,

@@ -154,7 +154,14 @@ pub(super) fn audio_thread(
     // This session's live-display record: the sink name goes here on every open, so a
     // later joiner finds the one to tap.
     published: Arc<std::sync::Mutex<Option<String>>>,
+    // Operator mute for THIS session (mgmt `PUT /session/{id}/audio`). Read per frame;
+    // the capturer and the sink stay up so the session sharing them keeps hearing.
+    muted: Arc<AtomicBool>,
+    // Session totals for the summary. The per-window `SendStats` below keeps resetting; these
+    // do not, because the thread outlives the summary that wants them.
+    counters: Arc<crate::session_status::SessionCounters>,
 ) {
+    counters.note_audio_started();
     use crate::audio::SAMPLE_RATE;
     const FRAME_MS: usize = 5;
     /// Ceiling on a single pacing sleep. The capture channel is finite and `next_chunk` has to be
@@ -467,6 +474,7 @@ pub(super) fn audio_thread(
                 Some(due) if due > now => break,
                 Some(due) if now.duration_since(due) > PACE_REANCHOR => {
                     send_stats.observe_reanchor();
+                    counters.note_audio_reanchor();
                     pace_due = None;
                 }
                 Some(due) => late = now.duration_since(due),
@@ -534,6 +542,15 @@ pub(super) fn audio_thread(
             // buffer we send. See [`PtsClock`].
             let pts_ns = clock.pts_ns();
             clock.advance(frame_buf.len());
+            // Muted: drop the frame before it costs an encode or a datagram. The clock
+            // advanced, so unmute resumes at the right pts; `seq` does not, so the client
+            // reads a pause rather than loss. The predecessor a RED frame would advertise
+            // is from before the silence — clear it, and fade back in like a capture hole.
+            if muted.load(Ordering::SeqCst) {
+                prev_frame.clear();
+                resume_fade = true;
+                continue;
+            }
             // One send path for both planes. `None` = Opus encode error (already counted).
             // PCM cannot fail: `from_f32` is scale-and-clamp over a known length.
             let datagram: Option<Vec<u8>> = if pcm_plane {
@@ -591,11 +608,12 @@ pub(super) fn audio_thread(
                     seq = seq.wrapping_add(1);
                     // Score against the slot and the previous departure. `now` is from the
                     // top of this iteration — one clock read cheaper, ~200/s.
-                    send_stats.observe_departure(
+                    let was_late = send_stats.observe_departure(
                         late,
                         last_departure.map(|t| now.duration_since(t)),
                         infilled,
                     );
+                    counters.note_audio_frame(late, infilled, was_late);
                     last_departure = Some(now);
                     // From here there is a continuity worth protecting, and `clock` has a real
                     // anchor to continue from — both preconditions for synthesizing anything.

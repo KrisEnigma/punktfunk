@@ -314,7 +314,7 @@ class MainActivity : ComponentActivity() {
         // has to happen HERE, before this instance is resumed, not inside the composition (which
         // only ever sees the rare `onNewIntent` case). Finishing now leaves the streaming task in
         // front, untouched.
-        val live = liveStream
+        val live = SessionGate.live
         if (live != null && deepLinkFrom(intent) != null) {
             // Pointing at the host already being streamed is the one exception, and its right
             // answer is to do nothing: the intent has already brought the app forward, which is
@@ -510,6 +510,12 @@ class MainActivity : ComponentActivity() {
             startSc2MenuNav()
         }
     }
+
+    /**
+     * Buzz the captured SC2's own grip motors — the rumble test for a pad the input stack cannot
+     * see, so [testRumble] has no `InputDevice` to reach for. False when nothing is captured.
+     */
+    fun testSc2Rumble(): Boolean = sc2Menu?.testRumble() == true
 
     /** Release the menu-time SC2 capture (backgrounded / stream taking over). Idempotent. */
     fun stopSc2MenuNav() {
@@ -992,27 +998,10 @@ class MainActivity : ComponentActivity() {
     }
 
     /** Does [intent]'s link resolve to the host [live] is already streaming? */
-    private fun targetsHost(intent: Intent?, live: LiveStream): Boolean {
+    private fun targetsHost(intent: Intent?, live: SessionGate.Live): Boolean {
         val url = deepLinkFrom(intent) ?: return false
         val parsed = DeepLinks.parse(url) as? DeepLinkResult.Parsed ?: return false
         val target = DeepLinks.resolveHost(parsed.link, KnownHostStore(this).all())
         return target is HostResolution.Record && target.host.id == live.hostId
-    }
-
-    /** The host a live stream is on — see [liveStream]. */
-    data class LiveStream(val hostId: String?)
-
-    companion object {
-        /**
-         * The live stream, PROCESS-wide (null = not streaming), published by the composition that
-         * owns it.
-         *
-         * Deliberately not per-instance state: `launchMode` is `standard`, so a `punktfunk://`
-         * link arrives as a second activity instance that knows nothing about the first — and the
-         * one thing it must know is that a session is already running. Static state is what
-         * crosses that gap; the process dying resets it, which is also correct.
-         */
-        @Volatile
-        var liveStream: LiveStream? = null
     }
 }
