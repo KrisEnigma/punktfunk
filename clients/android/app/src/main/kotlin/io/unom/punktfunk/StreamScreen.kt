@@ -30,6 +30,7 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.absolutePadding
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.Spacer
@@ -559,6 +560,11 @@ fun StreamScreen(session: ActiveSession, onSessionEnded: (SessionEndReason) -> U
     var padSize by remember { mutableStateOf(IntSize.Zero) }
     val hinge = rememberFoldHinge()
     val split = if (padShown) hinge?.let { foldSplit(it, rootSize) } else null
+    // A safe-area mode asked the host for a picture narrower than the panel by the housing on each
+    // side, so the box it lands in is the safe rectangle rather than the whole width: a hole on one
+    // side would otherwise sit over a picture centred in the other. Absolute, not start/end — the
+    // cutout's sides are physical, and an RTL layout must not swap them.
+    val safe = if (initialSettings.width == SAFE_AREA_MODE) displaySafeInsets(context, initialSettings) else null
     Column(modifier = Modifier.fillMaxSize().background(Color.Black).onSizeChanged { rootSize = it }) {
         Box(
             modifier = Modifier
@@ -568,6 +574,16 @@ fun StreamScreen(session: ActiveSession, onSessionEnded: (SessionEndReason) -> U
                         Modifier.height(with(density) { split.videoPx.toDp() })
                     } else {
                         Modifier.weight(1f)
+                    },
+                )
+                .then(
+                    if (safe != null) {
+                        Modifier.absolutePadding(
+                            left = with(density) { safe.left.toDp() },
+                            right = with(density) { safe.right.toDp() },
+                        )
+                    } else {
+                        Modifier
                     },
                 )
                 .onSizeChanged { containerSize = it },
