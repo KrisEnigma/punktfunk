@@ -106,24 +106,14 @@ pub fn decide(
 /// Per device (`design/web-console-overhaul.md` §6.1): the TV wants to take over,
 /// the tablet wants its own screen, and one host policy cannot serve both.
 ///
-/// On Windows this still maps `separate` (including the unconfigured
-/// default) to `reject` unless `PUNKTFUNK_WIN_SEPARATE=1`. Each identity
-/// already has its own monitor slot, so the flip is a validation hatch,
-/// not a correctness guard (`design/windows-parallel-virtual-displays.md`).
-/// `join` / `steal` stay explicit opt-ins. Linux is real `separate`.
+/// Every platform means the same `separate`: on Windows each identity gets its own
+/// monitor slot and sealed ring (`design/windows-parallel-virtual-displays.md`).
 /// Shared by the native and GameStream admission paths.
 pub fn effective_conflict(fp: Option<[u8; 32]>) -> ModeConflict {
-    let conflict = policy::prefs()
+    policy::prefs()
         .configured()
         .map(|p| p.effective_for(policy::fp_hex(fp).as_deref()).mode_conflict)
-        .unwrap_or(ModeConflict::Separate);
-    #[cfg(windows)]
-    if matches!(conflict, ModeConflict::Separate)
-        && !std::env::var("PUNKTFUNK_WIN_SEPARATE").is_ok_and(|v| v == "1")
-    {
-        return ModeConflict::Reject;
-    }
-    conflict
+        .unwrap_or(ModeConflict::Separate)
 }
 
 /// [`effective_conflict`] + [`decide`] against the live set. When

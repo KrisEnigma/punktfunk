@@ -222,8 +222,7 @@ async fn h_launch(
     addr: Option<Extension<PeerAddr>>,
     Query(q): Query<HashMap<String, String>>,
 ) -> Response {
-    // Native default: `separate` → reject. A second Moonlight client then gets 503
-    // instead of wedging the shared monitor's capture.
+    // GameStream holds one session, so the default `separate` steals it (`gamestream_admission`).
     // GameStream has no per-device overlay to apply: its peer identity is the
     // pairing cert, not the native fingerprint the overlay is keyed by.
     let conflict = crate::vdisplay::admission::effective_conflict(None);
