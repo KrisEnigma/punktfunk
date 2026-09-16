@@ -1016,6 +1016,10 @@ impl NvencCudaEncoder {
         }
         if let Some(w) = self.worker.as_mut() {
             w.forget_slots();
+            // The ring is retired, so every dmabuf the worker cached against it is stale.
+            // This releases the held fds and the Vulkan images they imported; without it a
+            // renegotiation leaves the old pool's imports sitting under the new one's.
+            w.clear_cache();
         }
         self.worker_slots.clear();
         self.last_raw = None;
