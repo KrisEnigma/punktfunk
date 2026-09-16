@@ -51,13 +51,25 @@ export const LastSession: FC<{ session?: SessionSummary }> = ({ session }) => {
 	const [copied, setCopied] = useState(false);
 	if (!session) return null;
 
+	// The session average where the host kept a span, else the rate it finished on —
+	// a single number that moved all session is the one thing worth not printing.
+	const span = session.bitrate;
 	const facts = [
 		formatUptime(session.duration_s),
 		session.mode,
 		`${session.codec.toUpperCase()} ${session.bit_depth}-bit ${session.chroma}`,
-		m.status_last_bitrate({ mbit: fmtNumber(session.bitrate_kbps / 1000, 1) }),
+		span
+			? m.status_last_bitrate_avg({ mbit: fmtNumber(span.avg_kbps / 1000, 1) })
+			: m.status_last_bitrate({
+					mbit: fmtNumber(session.bitrate_kbps / 1000, 1),
+				}),
+		span &&
+			span.adaptive_steps > 0 &&
+			m.status_last_steps({ count: span.adaptive_steps }),
 		session.frames_dropped != null &&
 			m.status_last_dropped({ count: session.frames_dropped }),
+		session.audio && m.status_last_audio_late({ count: session.audio.late }),
+		session.gyro && m.status_last_gyro({ count: session.gyro.stalls }),
 		session.hdr && "HDR",
 		session.join && m.status_last_join(),
 		m.status_last_ended({ reason: endedLabel(session) }),

@@ -5562,6 +5562,47 @@
           }
         }
       },
+      "AudioEgress": {
+        "type": "object",
+        "description": "Audio egress for the whole session. Absent when the session had no audio plane.",
+        "required": [
+          "sent",
+          "infilled",
+          "late",
+          "max_late_ms",
+          "reanchors"
+        ],
+        "properties": {
+          "infilled": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Frames synthesized over a capture hole. Wire continuity is not captured continuity.",
+            "minimum": 0
+          },
+          "late": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Departures a whole frame or more behind their slot.",
+            "minimum": 0
+          },
+          "max_late_ms": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "reanchors": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Times the pacer fell far enough behind to forgive its debt and re-anchor.",
+            "minimum": 0
+          },
+          "sent": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
       "AudioWiring": {
         "type": "object",
         "description": "Windows audio wiring: which endpoint carries each role. Names are the Sound-settings friendly names.",
@@ -5631,6 +5672,40 @@
           },
           "label": {
             "type": "string"
+          }
+        }
+      },
+      "BitrateSpan": {
+        "type": "object",
+        "description": "What the encoder's target did over the session. Absent when no encoder opened.",
+        "required": [
+          "min_kbps",
+          "avg_kbps",
+          "max_kbps",
+          "adaptive_steps"
+        ],
+        "properties": {
+          "adaptive_steps": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Times the target moved after the opening rate: adaptive-bitrate decisions, plus a\nrebuild re-resolving what it actually encodes.",
+            "minimum": 0
+          },
+          "avg_kbps": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Mean of the targets the session ran at, NOT weighted by how long each held.\nA rate held for a second counts as much as one held for an hour.",
+            "minimum": 0
+          },
+          "max_kbps": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "min_kbps": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
           }
         }
       },
@@ -7696,6 +7771,27 @@
           }
         }
       },
+      "GyroCadence": {
+        "type": "object",
+        "description": "Client gyro arrival counts. Absent when no pad ever sent motion.",
+        "required": [
+          "samples",
+          "stalls"
+        ],
+        "properties": {
+          "samples": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "stalls": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Gaps of 500 ms or more — the feed stopping, not jitter.",
+            "minimum": 0
+          }
+        }
+      },
       "Health": {
         "type": "object",
         "required": [
@@ -8088,6 +8184,42 @@
           "per-client",
           "per-client-mode"
         ]
+      },
+      "InputCounts": {
+        "type": "object",
+        "description": "Client datagrams this session took, by class.\n\nCounted up to the moment the session was summarized: the reader task ends with the\nconnection, which closes after this, so a last straggler can fall outside.",
+        "required": [
+          "events",
+          "mic",
+          "rich",
+          "dropped"
+        ],
+        "properties": {
+          "dropped": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Offers the input queue refused because it was full. Not a wire loss.",
+            "minimum": 0
+          },
+          "events": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Keyboard, pointer and touch events.",
+            "minimum": 0
+          },
+          "mic": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Opus microphone frames.",
+            "minimum": 0
+          },
+          "rich": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Gamepad and stylus batches.",
+            "minimum": 0
+          }
+        }
       },
       "InstallRequest": {
         "type": "object",
@@ -9818,20 +9950,43 @@
           "bit_depth",
           "chroma",
           "bitrate_kbps",
+          "input",
           "bringup_ms",
           "ended"
         ],
         "properties": {
+          "audio": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/AudioEgress",
+                "description": "Absent when the session ran no audio plane (synthetic source, or the thread never started)."
+              }
+            ]
+          },
           "bit_depth": {
             "type": "integer",
             "format": "int32",
             "description": "8 or 10. Independent of `hdr` — 10-bit SDR is a mode.",
             "minimum": 0
           },
+          "bitrate": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/BitrateSpan",
+                "description": "What the encoder's target did. Absent on a session that opened no encoder."
+              }
+            ]
+          },
           "bitrate_kbps": {
             "type": "integer",
             "format": "int32",
-            "description": "The encoder's target when the session ended, kbps. Adaptive bitrate moves it;\nthe host keeps no per-session min/avg/max to report.",
+            "description": "The encoder's target when the session ended, kbps. `bitrate` has the span.",
             "minimum": 0
           },
           "bringup_ms": {
@@ -9879,6 +10034,17 @@
             "description": "Access units the send thread put on the wire. Absent when the video loop\nnever reached its tail — the `host_error` case.",
             "minimum": 0
           },
+          "gyro": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/GyroCadence",
+                "description": "Absent when no pad sent motion — most sessions."
+              }
+            ]
+          },
           "hdr": {
             "type": "boolean"
           },
@@ -9887,6 +10053,9 @@
             "format": "int64",
             "description": "Same id [`SessionRef`] and the per-session routes carry.",
             "minimum": 0
+          },
+          "input": {
+            "$ref": "#/components/schemas/InputCounts"
           },
           "join": {
             "type": "boolean",

@@ -122,6 +122,56 @@ impl SessionEndReason {
     }
 }
 
+/// Client datagrams this session took, by class.
+///
+/// Counted up to the moment the session was summarized: the reader task ends with the
+/// connection, which closes after this, so a last straggler can fall outside.
+#[derive(Serialize, Deserialize, ToSchema, Clone, Debug)]
+pub struct InputCounts {
+    /// Keyboard, pointer and touch events.
+    pub events: u64,
+    /// Opus microphone frames.
+    pub mic: u64,
+    /// Gamepad and stylus batches.
+    pub rich: u64,
+    /// Offers the input queue refused because it was full. Not a wire loss.
+    pub dropped: u64,
+}
+
+/// Client gyro arrival counts. Absent when no pad ever sent motion.
+#[derive(Serialize, Deserialize, ToSchema, Clone, Debug)]
+pub struct GyroCadence {
+    pub samples: u64,
+    /// Gaps of 500 ms or more — the feed stopping, not jitter.
+    pub stalls: u64,
+}
+
+/// Audio egress for the whole session. Absent when the session had no audio plane.
+#[derive(Serialize, Deserialize, ToSchema, Clone, Debug)]
+pub struct AudioEgress {
+    pub sent: u64,
+    /// Frames synthesized over a capture hole. Wire continuity is not captured continuity.
+    pub infilled: u64,
+    /// Departures a whole frame or more behind their slot.
+    pub late: u64,
+    pub max_late_ms: u64,
+    /// Times the pacer fell far enough behind to forgive its debt and re-anchor.
+    pub reanchors: u64,
+}
+
+/// What the encoder's target did over the session. Absent when no encoder opened.
+#[derive(Serialize, Deserialize, ToSchema, Clone, Debug)]
+pub struct BitrateSpan {
+    pub min_kbps: u32,
+    /// Mean of the targets the session ran at, NOT weighted by how long each held.
+    /// A rate held for a second counts as much as one held for an hour.
+    pub avg_kbps: u32,
+    pub max_kbps: u32,
+    /// Times the target moved after the opening rate: adaptive-bitrate decisions, plus a
+    /// rebuild re-resolving what it actually encodes.
+    pub adaptive_steps: u32,
+}
+
 /// Everything the host knows about one finished session.
 ///
 /// The `session.ended` payload AND the body of `GET /api/v1/session/last`: one struct,
@@ -150,9 +200,11 @@ pub struct SessionSummary {
     pub bit_depth: u8,
     /// `4:2:0` or `4:4:4`.
     pub chroma: String,
-    /// The encoder's target when the session ended, kbps. Adaptive bitrate moves it;
-    /// the host keeps no per-session min/avg/max to report.
+    /// The encoder's target when the session ended, kbps. `bitrate` has the span.
     pub bitrate_kbps: u32,
+    /// What the encoder's target did. Absent on a session that opened no encoder.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bitrate: Option<BitrateSpan>,
     /// Access units the send thread put on the wire. Absent when the video loop
     /// never reached its tail — the `host_error` case.
     #[schema(value_type = u64, required = false)]
@@ -163,6 +215,13 @@ pub struct SessionSummary {
     #[schema(value_type = u64, required = false)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub frames_dropped: Option<u64>,
+    pub input: InputCounts,
+    /// Absent when no pad sent motion — most sessions.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gyro: Option<GyroCadence>,
+    /// Absent when the session ran no audio plane (synthetic source, or the thread never started).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub audio: Option<AudioEgress>,
     /// Hello → first video packet, ms. `0` if no packet ever left.
     pub bringup_ms: u32,
     /// Path MTU the QUIC stack settled on, bytes. Absent as `frames_sent` is.
@@ -233,7 +292,8 @@ pub enum EventKind {
     SessionEnded {
         session: SessionRef,
         /// Every number the host has for the finished session, including why it ended.
-        summary: SessionSummary,
+        // Boxed, not inline: every variant of this enum would otherwise pay its size.
+        summary: Box<SessionSummary>,
     },
     #[serde(rename = "stream.started")]
     StreamStarted { stream: StreamRef },
@@ -774,7 +834,7 @@ mod tests {
                     mode: mode_str(1920, 1080, 30),
                     hdr: false,
                 },
-                summary: SessionSummary {
+                summary: Box::new(SessionSummary {
                     id: 3,
                     client: "a1b2c3d4e5f6".into(),
                     client_name: Some("Living Room TV".into()),
@@ -787,20 +847,44 @@ mod tests {
                     bit_depth: 8,
                     chroma: "4:2:0".into(),
                     bitrate_kbps: 12_400,
+                    bitrate: Some(BitrateSpan {
+                        min_kbps: 9_000,
+                        avg_kbps: 12_100,
+                        max_kbps: 15_000,
+                        adaptive_steps: 4,
+                    }),
                     frames_sent: Some(73_800),
                     frames_dropped: Some(0),
+                    input: InputCounts {
+                        events: 7457,
+                        mic: 0,
+                        rich: 150_983,
+                        dropped: 0,
+                    },
+                    gyro: Some(GyroCadence {
+                        samples: 150_983,
+                        stalls: 0,
+                    }),
+                    audio: Some(AudioEgress {
+                        sent: 492_000,
+                        infilled: 12,
+                        late: 3,
+                        max_late_ms: 11,
+                        reanchors: 1,
+                    }),
                     bringup_ms: 603,
                     path_mtu: Some(1369),
                     ended: SessionEndReason::GameExited,
-                },
+                }),
             },
         };
         assert_eq!(
             serde_json::to_string(&ev).unwrap(),
-            r#"{"seq":7,"ts_ms":1700000000000,"schema":1,"kind":"session.ended","session":{"id":3,"client":"a1b2c3d4e5f6","mode":"1920x1080@30","hdr":false},"summary":{"id":3,"client":"a1b2c3d4e5f6","client_name":"Living Room TV","started_unix":1700000000,"duration_s":2460,"mode":"1920x1080@30","hdr":false,"join":false,"codec":"hevc","bit_depth":8,"chroma":"4:2:0","bitrate_kbps":12400,"frames_sent":73800,"frames_dropped":0,"bringup_ms":603,"path_mtu":1369,"ended":"game_exited"}}"#
+            r#"{"seq":7,"ts_ms":1700000000000,"schema":1,"kind":"session.ended","session":{"id":3,"client":"a1b2c3d4e5f6","mode":"1920x1080@30","hdr":false},"summary":{"id":3,"client":"a1b2c3d4e5f6","client_name":"Living Room TV","started_unix":1700000000,"duration_s":2460,"mode":"1920x1080@30","hdr":false,"join":false,"codec":"hevc","bit_depth":8,"chroma":"4:2:0","bitrate_kbps":12400,"bitrate":{"min_kbps":9000,"avg_kbps":12100,"max_kbps":15000,"adaptive_steps":4},"frames_sent":73800,"frames_dropped":0,"input":{"events":7457,"mic":0,"rich":150983,"dropped":0},"gyro":{"samples":150983,"stalls":0},"audio":{"sent":492000,"infilled":12,"late":3,"max_late_ms":11,"reanchors":1},"bringup_ms":603,"path_mtu":1369,"ended":"game_exited"}}"#
         );
 
-        // A loop that bailed has no totals: the three are omitted, never zeroed.
+        // A loop that bailed has no totals: every optional one is omitted, never zeroed.
+        // `input` stays: the datagram reader runs from before the session registers.
         let ev = HostEvent {
             seq: 8,
             ts_ms: 1_700_000_000_000,
@@ -812,7 +896,7 @@ mod tests {
                     mode: mode_str(0, 0, 0),
                     hdr: false,
                 },
-                summary: SessionSummary {
+                summary: Box::new(SessionSummary {
                     id: 4,
                     client: "192.0.2.7".into(),
                     client_name: None,
@@ -825,17 +909,26 @@ mod tests {
                     bit_depth: 10,
                     chroma: "4:4:4".into(),
                     bitrate_kbps: 0,
+                    bitrate: None,
                     frames_sent: None,
                     frames_dropped: None,
+                    input: InputCounts {
+                        events: 0,
+                        mic: 0,
+                        rich: 0,
+                        dropped: 0,
+                    },
+                    gyro: None,
+                    audio: None,
                     bringup_ms: 0,
                     path_mtu: None,
                     ended: SessionEndReason::HostError,
-                },
+                }),
             },
         };
         assert_eq!(
             serde_json::to_string(&ev).unwrap(),
-            r#"{"seq":8,"ts_ms":1700000000000,"schema":1,"kind":"session.ended","session":{"id":4,"client":"192.0.2.7","mode":"0x0@0","hdr":false},"summary":{"id":4,"client":"192.0.2.7","started_unix":1700000000,"duration_s":1,"mode":"0x0@0","hdr":false,"join":false,"codec":"av1","bit_depth":10,"chroma":"4:4:4","bitrate_kbps":0,"bringup_ms":0,"ended":"host_error"}}"#
+            r#"{"seq":8,"ts_ms":1700000000000,"schema":1,"kind":"session.ended","session":{"id":4,"client":"192.0.2.7","mode":"0x0@0","hdr":false},"summary":{"id":4,"client":"192.0.2.7","started_unix":1700000000,"duration_s":1,"mode":"0x0@0","hdr":false,"join":false,"codec":"av1","bit_depth":10,"chroma":"4:4:4","bitrate_kbps":0,"input":{"events":0,"mic":0,"rich":0,"dropped":0},"bringup_ms":0,"ended":"host_error"}}"#
         );
     }
 

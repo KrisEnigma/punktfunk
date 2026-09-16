@@ -149,6 +149,8 @@ pub(super) struct StreamState {
     /// Why this session ended, for its summary. First write wins, so the path that knows
     /// (game exit, operator stop, the peer's own close) beats the loop's clean tail.
     pub(super) end_reason: Arc<std::sync::atomic::AtomicU8>,
+    /// Session totals; this loop notes every encoder rate it adopts.
+    pub(super) counters: Arc<crate::session_status::SessionCounters>,
     pub(super) conn: super::super::link::SessionLink,
     /// The client's ask. Encoders fit to it; the display may deliver another size.
     pub(super) negotiated: punktfunk_core::Mode,
@@ -246,7 +248,12 @@ impl StreamState {
         }
     }
 
+    /// A rebuild re-resolved what it encodes. Noted for the summary's bitrate span: the
+    /// rate the session runs at moved, whoever decided it.
     pub(super) fn adopt_built_bitrate(&mut self, built: u32) {
+        if built != self.bitrate_kbps {
+            self.counters.note_bitrate(built);
+        }
         adopt_built_bitrate(
             &mut self.bitrate_kbps,
             built,
@@ -306,6 +313,7 @@ impl StreamState {
             stop,
             quit,
             end_reason,
+            counters,
             reconfig,
             keyframe,
             rfi,
@@ -806,6 +814,7 @@ impl StreamState {
             bit_depth,
             chroma: plan.chroma,
             end_reason: end_reason.clone(),
+            counters: counters.clone(),
         });
 
         // Replaced by `spawn_session_watcher` inside the session span; disconnected until then.
@@ -817,6 +826,7 @@ impl StreamState {
             stop,
             quit,
             end_reason,
+            counters,
             conn,
             negotiated: mode,
             bitrate_auto,

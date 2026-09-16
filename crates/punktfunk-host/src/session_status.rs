@@ -15,14 +15,18 @@
 //!
 //! The same drop builds a [`crate::events::SessionSummary`] — the session's own
 //! numbers plus why it ended — onto `session.ended` and into [`recent`], which is
-//! what `GET /api/v1/session/last` serves.
+//! what `GET /api/v1/session/last` serves. [`SessionCounters`] is the shared block
+//! the input, audio and encode paths bump so the summary can read totals from
+//! threads that outlive it.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::encode::{ChromaFormat, Codec};
-use crate::events::{SessionEndReason, SessionSummary};
+use crate::events::{
+    AudioEgress, BitrateSpan, GyroCadence, InputCounts, SessionEndReason, SessionSummary,
+};
 
 /// One live native session. The Arcs are the video loop's own handles, so a
 /// mid-stream mode/bitrate change shows on `/status` with no second write.
@@ -71,6 +75,8 @@ struct LiveSession {
     /// What the video loop counted, stored once at its tail ([`record_tally`]).
     /// `None` on a loop that bailed before it.
     tally: Option<SessionTally>,
+    /// Totals the input, audio and encode paths bump while the session runs.
+    counters: Arc<SessionCounters>,
 }
 
 /// The video loop's own totals, handed over as it finishes.
@@ -153,6 +159,87 @@ impl SessionControls {
     }
 }
 
+/// Session totals the loops bump and the summary reads.
+///
+/// One block rather than a dozen `Arc<Atomic…>`: the input task, the audio thread and the
+/// encode loop all outlive [`LiveSessionGuard::drop`], so the summary cannot wait for them
+/// to hand a figure over. Relaxed throughout — diagnostics, not synchronisation.
+#[derive(Default)]
+pub struct SessionCounters {
+    /// Datagrams accepted by class, and offers the input queue refused when full.
+    pub input_events: AtomicU64,
+    pub input_mic: AtomicU64,
+    pub input_rich: AtomicU64,
+    pub input_dropped: AtomicU64,
+    /// `RichInput::Motion` arrivals, and the gaps ≥ 500 ms among them.
+    motion_samples: AtomicU64,
+    motion_stalls: AtomicU64,
+    /// Set when the audio thread starts. Distinguishes a silent plane from no plane.
+    audio_ran: AtomicBool,
+    audio_sent: AtomicU64,
+    audio_infilled: AtomicU64,
+    audio_late: AtomicU64,
+    audio_max_late_us: AtomicU64,
+    audio_reanchors: AtomicU64,
+    /// Every encoder target the session ran at. `notes` counts them; the first is the
+    /// opening rate, so the rest are the moves.
+    bitrate_min_kbps: AtomicU32,
+    bitrate_max_kbps: AtomicU32,
+    bitrate_sum_kbps: AtomicU64,
+    bitrate_notes: AtomicU32,
+}
+
+impl SessionCounters {
+    /// One motion arrival. `stalled` is [`crate::native::motion_cadence`]'s own verdict, so
+    /// what counts as a break in the feed is defined in exactly one place.
+    pub fn note_motion(&self, stalled: bool) {
+        self.motion_samples.fetch_add(1, Ordering::Relaxed);
+        if stalled {
+            self.motion_stalls.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// The audio plane is up for this session, however little it goes on to send.
+    pub fn note_audio_started(&self) {
+        self.audio_ran.store(true, Ordering::Relaxed);
+    }
+
+    /// One audio frame on the wire. `late` is the miss against its slot and `was_late` the
+    /// window's own verdict on it — same split as [`note_motion`](Self::note_motion).
+    pub fn note_audio_frame(&self, late: std::time::Duration, infilled: bool, was_late: bool) {
+        self.audio_sent.fetch_add(1, Ordering::Relaxed);
+        if infilled {
+            self.audio_infilled.fetch_add(1, Ordering::Relaxed);
+        }
+        if was_late {
+            self.audio_late.fetch_add(1, Ordering::Relaxed);
+        }
+        self.audio_max_late_us
+            .fetch_max(late.as_micros() as u64, Ordering::Relaxed);
+    }
+
+    pub fn note_audio_reanchor(&self) {
+        self.audio_reanchors.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// One encoder target the session ran at. Call it wherever the rate actually changed:
+    /// a repeat would read as a move that never happened.
+    pub fn note_bitrate(&self, kbps: u32) {
+        if kbps == 0 {
+            return;
+        }
+        self.bitrate_min_kbps
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |m| {
+                Some(if m == 0 { kbps } else { m.min(kbps) })
+            })
+            .ok();
+        self.bitrate_max_kbps.fetch_max(kbps, Ordering::Relaxed);
+        self.bitrate_sum_kbps
+            .fetch_add(u64::from(kbps), Ordering::Relaxed);
+        self.bitrate_notes.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
 /// Resolved read of one live session for `/status`.
 #[derive(Clone)]
 pub struct SessionSnapshot {
@@ -210,6 +297,37 @@ fn unix_now() -> i64 {
         .map_or(0, |d| d.as_secs() as i64)
 }
 
+/// `None` until a pad sends motion: a keyboard-and-mouse session owes no gyro row.
+fn gyro_cadence(c: &SessionCounters) -> Option<GyroCadence> {
+    let samples = c.motion_samples.load(Ordering::Relaxed);
+    let stalls = c.motion_stalls.load(Ordering::Relaxed);
+    (samples > 0 || stalls > 0).then_some(GyroCadence { samples, stalls })
+}
+
+/// `None` when no audio thread ran. A thread that ran and sent nothing reports zeros —
+/// a silent plane and no plane are different faults.
+fn audio_egress(c: &SessionCounters) -> Option<AudioEgress> {
+    c.audio_ran.load(Ordering::Relaxed).then(|| AudioEgress {
+        sent: c.audio_sent.load(Ordering::Relaxed),
+        infilled: c.audio_infilled.load(Ordering::Relaxed),
+        late: c.audio_late.load(Ordering::Relaxed),
+        max_late_ms: c.audio_max_late_us.load(Ordering::Relaxed) / 1_000,
+        reanchors: c.audio_reanchors.load(Ordering::Relaxed),
+    })
+}
+
+/// `None` until an opening rate is noted. The first note is that rate, so the moves are
+/// the notes after it.
+fn bitrate_span(c: &SessionCounters) -> Option<BitrateSpan> {
+    let notes = c.bitrate_notes.load(Ordering::Relaxed);
+    (notes > 0).then(|| BitrateSpan {
+        min_kbps: c.bitrate_min_kbps.load(Ordering::Relaxed),
+        avg_kbps: (c.bitrate_sum_kbps.load(Ordering::Relaxed) / u64::from(notes)) as u32,
+        max_kbps: c.bitrate_max_kbps.load(Ordering::Relaxed),
+        adaptive_steps: notes - 1,
+    })
+}
+
 /// Everything this session ended up being. Built once, in [`LiveSessionGuard::drop`],
 /// and shared by `session.ended` and `GET /session/last`.
 fn summary(s: &LiveSession) -> SessionSummary {
@@ -227,6 +345,15 @@ fn summary(s: &LiveSession) -> SessionSummary {
         bit_depth: s.bit_depth,
         chroma: if s.chroma.is_444() { "4:4:4" } else { "4:2:0" }.to_string(),
         bitrate_kbps: s.bitrate_kbps.load(Ordering::Relaxed),
+        bitrate: bitrate_span(&s.counters),
+        input: InputCounts {
+            events: s.counters.input_events.load(Ordering::Relaxed),
+            mic: s.counters.input_mic.load(Ordering::Relaxed),
+            rich: s.counters.input_rich.load(Ordering::Relaxed),
+            dropped: s.counters.input_dropped.load(Ordering::Relaxed),
+        },
+        gyro: gyro_cadence(&s.counters),
+        audio: audio_egress(&s.counters),
         frames_sent: s.tally.map(|t| t.frames_sent),
         frames_dropped: s.tally.and_then(|t| t.frames_dropped),
         bringup_ms: s.ttff_ms.load(Ordering::Relaxed),
@@ -274,6 +401,8 @@ pub struct Registration {
     /// [`SessionEndReason`] latch, shared with the paths that know why: the connection
     /// watcher, the game-exit close, an operator stop, and the loop's own clean tail.
     pub end_reason: Arc<AtomicU8>,
+    /// The session's shared counter block, already being bumped by its side threads.
+    pub counters: Arc<SessionCounters>,
 }
 
 /// Publish a live native session. The guard removes it on drop and pairs
@@ -298,6 +427,7 @@ pub fn register(reg: Registration) -> LiveSessionGuard {
         bit_depth,
         chroma,
         end_reason,
+        counters,
     } = reg;
     let id = next_id();
     let session = LiveSession {
@@ -323,7 +453,13 @@ pub fn register(reg: Registration) -> LiveSessionGuard {
         chroma,
         end_reason,
         tally: None,
+        counters,
     };
+    // The opening rate, so the span has a floor before adaptive bitrate moves it. Registration
+    // is after the encoder opened, so this is what it actually runs at.
+    session
+        .counters
+        .note_bitrate(session.bitrate_kbps.load(Ordering::Relaxed));
     crate::events::emit(crate::events::EventKind::SessionStarted {
         session: session_ref(&session),
     });
@@ -355,7 +491,7 @@ impl Drop for LiveSessionGuard {
             push_recent(summary.clone());
             crate::events::emit(crate::events::EventKind::SessionEnded {
                 session: session_ref(&session),
-                summary,
+                summary: Box::new(summary),
             });
         }
     }
@@ -660,12 +796,17 @@ mod tests {
     use super::*;
 
     fn fake_session(client: &str) -> (LiveSessionGuard, Arc<AtomicBool>, Arc<AtomicBool>) {
-        fake_session_with_reason(client, Arc::new(AtomicU8::new(0)))
+        fake_session_with_reason(
+            client,
+            Arc::new(AtomicU8::new(0)),
+            Arc::new(SessionCounters::default()),
+        )
     }
 
     fn fake_session_with_reason(
         client: &str,
         end_reason: Arc<AtomicU8>,
+        counters: Arc<SessionCounters>,
     ) -> (LiveSessionGuard, Arc<AtomicBool>, Arc<AtomicBool>) {
         let stop = Arc::new(AtomicBool::new(false));
         let quit = Arc::new(AtomicBool::new(false));
@@ -688,6 +829,7 @@ mod tests {
             bit_depth: 8,
             chroma: ChromaFormat::Yuv420,
             end_reason,
+            counters,
         });
         (guard, stop, quit)
     }
@@ -773,8 +915,17 @@ mod tests {
             bit_depth: 8,
             chroma: "4:2:0".into(),
             bitrate_kbps: 0,
+            bitrate: None,
             frames_sent: None,
             frames_dropped: None,
+            input: InputCounts {
+                events: 0,
+                mic: 0,
+                rich: 0,
+                dropped: 0,
+            },
+            gyro: None,
+            audio: None,
             bringup_ms: 0,
             path_mtu: None,
             ended: SessionEndReason::HostEnded,
@@ -804,8 +955,23 @@ mod tests {
     #[test]
     fn a_finished_session_lands_in_the_ring_with_its_numbers() {
         let reason = Arc::new(AtomicU8::new(0));
-        let (guard, _stop, _quit) = fake_session_with_reason("192.0.2.9", reason.clone());
+        let counters = Arc::new(SessionCounters::default());
+        let (guard, _stop, _quit) =
+            fake_session_with_reason("192.0.2.9", reason.clone(), counters.clone());
         let id = guard.id;
+        // What the side threads bump while the session runs, each through its own note.
+        counters.input_events.fetch_add(7457, Ordering::Relaxed);
+        counters.input_rich.fetch_add(150_983, Ordering::Relaxed);
+        for stalled in [false, false, true] {
+            counters.note_motion(stalled);
+        }
+        counters.note_audio_started();
+        counters.note_audio_frame(std::time::Duration::from_millis(11), true, true);
+        counters.note_audio_frame(std::time::Duration::from_millis(1), false, false);
+        counters.note_audio_reanchor();
+        // 20 000 was seeded at registration, so these two are the moves.
+        counters.note_bitrate(10_000);
+        counters.note_bitrate(30_000);
         record_tally(
             id,
             SessionTally {
@@ -829,6 +995,25 @@ mod tests {
         assert_eq!(mine.codec, "hevc");
         assert_eq!(mine.chroma, "4:2:0");
         assert_eq!(mine.bitrate_kbps, 20_000);
+
+        let input = &mine.input;
+        assert_eq!((input.events, input.rich, input.mic), (7457, 150_983, 0));
+
+        let gyro = mine.gyro.expect("a pad sent motion");
+        assert_eq!((gyro.samples, gyro.stalls), (3, 1));
+
+        let audio = mine.audio.expect("the audio plane ran");
+        assert_eq!((audio.sent, audio.infilled, audio.late), (2, 1, 1));
+        assert_eq!(audio.max_late_ms, 11, "the worst miss, not the last");
+        assert_eq!(audio.reanchors, 1);
+
+        // Mean of 20 000, 10 000 and 30 000 — the targets, not their durations.
+        let b = mine.bitrate.expect("an encoder opened");
+        assert_eq!(
+            (b.min_kbps, b.avg_kbps, b.max_kbps),
+            (10_000, 20_000, 30_000)
+        );
+        assert_eq!(b.adaptive_steps, 2, "the opening rate is not a move");
     }
 
     /// A session whose loop never reached its tail reports the fault and no totals,
@@ -846,5 +1031,10 @@ mod tests {
         assert_eq!(mine.ended, SessionEndReason::HostError);
         assert_eq!(mine.frames_sent, None);
         assert_eq!(mine.path_mtu, None);
+        // No pad, no audio thread: absent, not a row of zeros that reads as "all fine".
+        assert!(mine.gyro.is_none());
+        assert!(mine.audio.is_none());
+        // The datagram reader is up before a session registers, so its counts are always a claim.
+        assert_eq!(mine.input.events, 0);
     }
 }

@@ -322,6 +322,8 @@ pub(super) struct SessionContext {
     pub(super) quit: Arc<AtomicBool>,
     /// [`crate::events::SessionEndReason`] latch for the session summary; first write wins.
     pub(super) end_reason: Arc<std::sync::atomic::AtomicU8>,
+    /// Session totals for the summary; the encode loop notes every bitrate it runs at.
+    pub(super) counters: Arc<crate::session_status::SessionCounters>,
     pub(super) reconfig: std::sync::mpsc::Receiver<punktfunk_core::Mode>,
     pub(super) keyframe: std::sync::mpsc::Receiver<()>,
     /// Lost-frame range `(first, last)`. Prefer `invalidate_ref_frames` over a full IDR.
