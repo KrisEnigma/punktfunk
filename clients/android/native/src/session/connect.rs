@@ -565,6 +565,9 @@ fn connect(req: ConnectRequest) -> jlong {
         // Handshake budget from Kotlin: ~10 s for a normal connect, ~185 s for "request access"
         // (the host parks the connection until the operator approves the device — see ConnectScreen).
         Duration::from_millis(timeout_ms),
+        // No ABR memory: the known-hosts store lives on the Kotlin side here, so nothing
+        // native has this host's previous session to hand in.
+        None,
         // The Kotlin side cancels by dropping the result (`Dial.cancelled`), not by aborting
         // the dial — its connect runs on a pool thread, so a parked one costs a thread, not a
         // stuck UI. Wire a flag through here if that ever stops being true.
