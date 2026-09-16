@@ -128,6 +128,9 @@ mod android_keys {
     pub const SC2: &str = "android.sc2_capture";
     pub const DS_CAPTURE: &str = "android.ds_capture";
     pub const REDUCE_UI_RES: &str = "android.reduce_ui_resolution";
+    /// With `width`/`height` 0: Native narrowed to clear the cutout. Kotlin's `-2`
+    /// sentinel, which an unsigned size cannot carry.
+    pub const SAFE_AREA_MODE: &str = "android.safe_area_mode";
 }
 
 /// The `Settings::extra` keys the webOS rows share with that client (`services::store::shared`),
@@ -293,6 +296,14 @@ use punktfunk_core::resolutions::{aspect_of, nearest, ASPECTS};
 /// the size is Native / Match window / a shape no family has.
 fn family(s: &pf_client_core::trust::Settings) -> usize {
     aspect_of(s.width, s.height).unwrap_or(0)
+}
+
+/// Android's Native (safe area) resolution. The flag only counts on a native size.
+fn safe_area(s: &pf_client_core::trust::Settings, platform: crate::platform::Platform) -> bool {
+    platform == crate::platform::Platform::Android
+        && s.width == 0
+        && !s.match_window
+        && extra_bool(s, android_keys::SAFE_AREA_MODE, false)
 }
 /// `0` = the panel's native refresh, resolved at connect. Must cover every value the desktop
 /// shells can write: on Linux both write the same client-gtk-settings.json, so a box that set
@@ -1256,6 +1267,8 @@ fn row_spec_base(id: RowId, ctx: &Ctx, presets: &[(String, String)]) -> RowSpec 
             "Resolution",
             if s.match_window {
                 "Match window".into()
+            } else if safe_area(s, ctx.platform) {
+                "Native (safe area)".into()
             } else if s.width == 0 {
                 "Native".into()
             } else {
@@ -1855,10 +1868,14 @@ pub fn adjust(id: RowId, delta: i32, wrap: bool, ctx: &mut Ctx) -> bool {
     let s = &mut *ctx.settings;
     match id {
         RowId::Resolution => {
-            // Native, Match window, then the current family's sizes. Match window
-            // is virtual index 1 (`match_window` flag, w/h cleared).
+            // Native, Native (safe area) on Android, Match window, then the current
+            // family's sizes. The policies before the sizes all clear w/h.
             let sizes = ASPECTS[family(s)].sizes;
+            let android = platform == crate::platform::Platform::Android;
+            let matching = if android { 2 } else { 1 };
             let cur = if s.match_window {
+                Some(matching)
+            } else if safe_area(s, platform) {
                 Some(1)
             } else if s.width == 0 {
                 Some(0)
@@ -1866,11 +1883,18 @@ pub fn adjust(id: RowId, delta: i32, wrap: bool, ctx: &mut Ctx) -> bool {
                 sizes
                     .iter()
                     .position(|&wh| wh == (s.width, s.height))
-                    .map(|i| i + 2)
+                    .map(|i| i + matching + 1)
             };
-            step_option(cur, sizes.len() + 2, delta, wrap).map(|i| {
-                s.match_window = i == 1;
-                (s.width, s.height) = if i <= 1 { (0, 0) } else { sizes[i - 2] };
+            step_option(cur, sizes.len() + matching + 1, delta, wrap).map(|i| {
+                s.match_window = i == matching;
+                if android {
+                    set_extra_bool(s, android_keys::SAFE_AREA_MODE, i == 1);
+                }
+                (s.width, s.height) = if i <= matching {
+                    (0, 0)
+                } else {
+                    sizes[i - matching - 1]
+                };
             })
         }
         RowId::Aspect => {
@@ -2497,6 +2521,48 @@ pub(crate) mod tests {
         assert!(adjust(RowId::Resolution, 1, true, &mut ctx));
         assert_eq!(ctx.settings.width, 0, "wrapped to Native");
         assert!(!ctx.settings.match_window);
+    }
+
+    /// Android's safe-area mode is its own slot after Native: shown by name, and a nudge
+    /// moves off it by one step instead of snapping to Native.
+    #[test]
+    fn android_resolution_row_carries_the_safe_area_mode() {
+        let (mut settings, pads) = ctx_parts();
+        settings
+            .extra
+            .insert(android_keys::SAFE_AREA_MODE.into(), true.into());
+        let library = crate::library::LibraryShared::default();
+        let mut ctx = Ctx {
+            hosts: &[],
+            library: &library,
+            settings: &mut settings,
+            store: crate::store::file_store(),
+            platform: crate::platform::Platform::Android,
+            pads: &pads,
+            deck: false,
+            fallback_ui: true,
+            pyrowave_ok: true,
+            av1_ok: true,
+            device_name: "t",
+            t: 0.0,
+        };
+        let value = |ctx: &Ctx| row_spec(RowId::Resolution, ctx, &[], &Default::default()).value;
+        let safe = |ctx: &Ctx| extra_bool(ctx.settings, android_keys::SAFE_AREA_MODE, false);
+        assert_eq!(value(&ctx).as_deref(), Some("Native (safe area)"));
+        assert!(adjust(RowId::Resolution, 1, false, &mut ctx));
+        assert!(ctx.settings.match_window, "safe area → Match window");
+        assert!(!safe(&ctx));
+        assert!(adjust(RowId::Resolution, -1, false, &mut ctx));
+        assert!(
+            safe(&ctx) && !ctx.settings.match_window,
+            "back to safe area"
+        );
+        assert!(adjust(RowId::Resolution, -1, false, &mut ctx));
+        assert_eq!((ctx.settings.width, safe(&ctx)), (0, false), "Native");
+        assert_eq!(value(&ctx).as_deref(), Some("Native"));
+        set_extra_bool(ctx.settings, android_keys::SAFE_AREA_MODE, true);
+        (ctx.settings.width, ctx.settings.height) = (1280, 720);
+        assert_eq!(value(&ctx).as_deref(), Some("1280 × 720"), "a size wins");
     }
 
     /// The Aspect row moves between families at the nearest height; the
