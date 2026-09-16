@@ -156,8 +156,8 @@ opt-in change never dropped it):
   starts](/docs/running-as-a-service#what-the-unit-starts).
 - **Windows** — from an elevated prompt, `punktfunk-host service install --gamestream=off`, then
   `punktfunk-host service restart`.
-- **SteamOS** — re-run the Deck installer without `--gamestream`, or with `--no-gamestream` to force
-  a box that had it on back off.
+- **SteamOS** — re-run the Deck installer without `--gamestream`, and delete `PUNKTFUNK_GAMESTREAM=1`
+  from `host.env` if you set it.
 - **NixOS** — set `services.punktfunk.host.gamestream = false;` (this also drops the GameStream
   firewall ports).
 
