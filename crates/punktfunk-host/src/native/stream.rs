@@ -377,6 +377,9 @@ pub(super) struct SessionContext {
     pub(super) client_name: Option<String>,
     pub(super) launch: Option<String>,
     pub(super) launch_target: Option<crate::library::LaunchTarget>,
+    /// Where this session's launch outcome goes; the control task writes it to
+    /// the client ([`punktfunk_core::quic::LaunchOutcome`]).
+    pub(super) launch_outcome: crate::gamelease::OutcomeTx,
     /// Threaded into the EDID CTA HDR block before `create` so host apps tone-map to the client's panel.
     pub(super) client_hdr: Option<pf_frame::HdrMeta>,
     /// Admitted by `mode_conflict: join`: share the live display instead of creating one.

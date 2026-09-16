@@ -166,6 +166,8 @@ pub struct LeaseShared {
     was_running: AtomicBool,
     /// Last seen running, unix ms. 0 = never.
     last_seen_ms: AtomicU64,
+    /// Client to tell when this launch dies on the spot ([`LeaseRequest::outcome`]).
+    outcome: Option<OutcomeTx>,
 }
 
 impl LeaseShared {
@@ -278,6 +280,9 @@ pub struct LeaseRequest {
     /// exactly as it did before the window stage existed.
     #[cfg(target_os = "linux")]
     pub window_stage: Option<WindowStage>,
+    /// Where to say this launch died on the spot. `None` leaves the finding in
+    /// the log, as it was before the client could be told.
+    pub outcome: Option<OutcomeTx>,
 }
 
 /// Where the window stage looks, and what it does with the first window it
@@ -299,6 +304,10 @@ pub fn launch_clock() -> Option<f64> {
 }
 
 pub type OnExit = Box<dyn Fn() + Send + Sync>;
+
+/// Where a launch outcome goes: the session's control task writes it to the
+/// client. `None` for a lease with nobody streaming to tell.
+pub type OutcomeTx = tokio::sync::mpsc::UnboundedSender<punktfunk_core::quic::LaunchOutcome>;
 
 /// Did this launch die on the spot, or is it a hand-off to a game still coming up?
 ///
@@ -341,6 +350,7 @@ pub fn open(req: LeaseRequest, on_exit: OnExit) -> GameLease {
         workspace,
         #[cfg(target_os = "linux")]
         window_stage,
+        outcome,
     } = req;
 
     // Pin pid to start time before recycle. Unresolvable is dropped: a bare
@@ -387,6 +397,7 @@ pub fn open(req: LeaseRequest, on_exit: OnExit) -> GameLease {
         created_ms: now_ms(),
         was_running: AtomicBool::new(false),
         last_seen_ms: AtomicU64::new(0),
+        outcome,
     });
 
     if launcher {
@@ -608,17 +619,23 @@ fn apply_on_window(stage: &WindowStage, win: &crate::vdisplay::Toplevel) {
 /// Not [`finish`]: nothing ran, so there is no play time to credit and no game
 /// exit to end the session on.
 fn report_early_exit(shared: &LeaseShared, code: Option<i32>, ran: Duration) {
+    let said = early_exit_message(&shared.game.title, code, ran.as_secs_f32());
     tracing::warn!(
         title = %shared.game.title,
         status = ?code,
         ran_s = ran.as_secs_f32(),
-        said = %early_exit_message(&shared.game.title, code, ran.as_secs_f32()),
         "the launch command exited on the spot and nothing of this title is on the box — \
          reporting the launch as failed and un-launching its record"
     );
     shared.set_state(GameState::Exited);
     if let Some(p) = &shared.procs {
         crate::launchreg::unlaunched(p);
+    }
+    if let Some(tx) = &shared.outcome {
+        let _ = tx.send(punktfunk_core::quic::LaunchOutcome::new(
+            punktfunk_core::quic::LaunchOutcomeKind::Failed,
+            &said,
+        ));
     }
 }
 
@@ -1682,6 +1699,7 @@ mod tests {
             workspace: None,
             #[cfg(target_os = "linux")]
             window_stage: None,
+            outcome: None,
         }
     }
 
@@ -1901,7 +1919,8 @@ mod tests {
         assert!(early_exit_message("Quail", None, 1.0).starts_with("Couldn't start Quail"));
     }
 
-    /// The record stops covering, so the retry that follows starts the title
+    /// The whole of ask 2 in one place: the client hears `failed`, and the
+    /// record stops covering — so the retry that follows starts the title
     /// instead of adopting the launch that just died.
     #[test]
     fn a_dead_launch_is_reported_and_stops_covering_the_next_attempt() {
@@ -1909,9 +1928,12 @@ mod tests {
         let first = crate::launchreg::claim(fp, app, false, Some(10.0));
         first.launched();
         let procs = first.procs().expect("recorded");
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
         let lease = open(
             LeaseRequest {
                 procs: Some(procs),
+                outcome: Some(tx),
                 ..req(app.unwrap(), DetectSpec::default(), false)
             },
             Box::new(|| {}),
@@ -1919,6 +1941,12 @@ mod tests {
         let shared = lease.shared();
         report_early_exit(&shared, Some(127), Duration::from_millis(200));
 
+        let said = rx.try_recv().expect("the client is told");
+        assert_eq!(said.kind, punktfunk_core::quic::LaunchOutcomeKind::Failed);
+        assert!(
+            said.message.contains("doesn't have that command"),
+            "{said:?}"
+        );
         assert_eq!(shared.state(), GameState::Exited);
 
         let retry = crate::launchreg::claim(fp, app, false, Some(99.0));

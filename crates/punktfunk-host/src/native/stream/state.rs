@@ -342,6 +342,7 @@ impl StreamState {
             client_name,
             launch,
             launch_target,
+            launch_outcome,
             client_hdr,
             join_live,
             controls,
@@ -611,6 +612,13 @@ impl StreamState {
             }
             None => None,
         };
+        if let Some(t) = launch_target.as_ref() {
+            let _ = launch_outcome.send(launch_verdict(
+                &t.game.title,
+                launch_claim.as_ref(),
+                spawned_now,
+            ));
+        }
         if let Some(c) = launch_claim.as_ref() {
             if spawned_now {
                 c.launched();
@@ -711,6 +719,8 @@ impl StreamState {
                     spawned: spawned_pid,
                     launch_stamp,
                     procs: launch_claim.as_ref().and_then(|c| c.procs()),
+                    // The watcher says so when this launch dies on the spot.
+                    outcome: Some(launch_outcome.clone()),
                     #[cfg(target_os = "linux")]
                     workspace: launch_workspace,
                     // Absent on a backend that names no head: the lease then
@@ -1033,6 +1043,44 @@ pub(super) fn adopt_built_bitrate(
     let _ = retarget.send(built);
 }
 
+/// What this session's launch came to, in the client's vocabulary.
+///
+/// One verdict from the two facts the launch site has: whether it spawned, and
+/// what the registry adopted against. `Spawned` says nothing — the player asked
+/// for a game and is about to get one; only the other three need words.
+fn launch_verdict(
+    title: &str,
+    claim: Option<&crate::launchreg::Claim>,
+    spawned: bool,
+) -> punktfunk_core::quic::LaunchOutcome {
+    use crate::launchreg::Liveness;
+    use punktfunk_core::quic::{LaunchOutcome, LaunchOutcomeKind as Kind};
+    if spawned {
+        return LaunchOutcome::new(Kind::Spawned, "");
+    }
+    match claim.and_then(|c| c.adopted()) {
+        Some(Liveness::Running) => LaunchOutcome::new(
+            Kind::Adopted,
+            &format!(
+                "{title} was already running from an earlier session — this picked that copy up \
+                 instead of starting a second one."
+            ),
+        ),
+        // Adopted on the in-flight window: the host reused a launch it cannot see.
+        Some(_) => LaunchOutcome::new(
+            Kind::AdoptedUnknown,
+            &format!(
+                "{title} was started a moment ago, so this picked that launch up rather than \
+                 starting a second copy. Start it again if nothing comes up."
+            ),
+        ),
+        None => LaunchOutcome::new(
+            Kind::Refused,
+            &format!("Couldn't start {title} — this host had nothing to run for it."),
+        ),
+    }
+}
+
 /// Announce a host-local rebuild gap so the client does not score a straddling window as congestion.
 pub(super) fn announce_pipeline_gap(gap: &tokio::sync::mpsc::UnboundedSender<u32>, gap_ms: u32) {
     if gap_ms == 0 {
@@ -1056,5 +1104,36 @@ mod tests {
         assert_eq!(current, 60_000);
         assert_eq!(live.load(Ordering::Relaxed), 60_000);
         assert_eq!(rx.try_recv().ok(), Some(60_000));
+    }
+
+    /// The registry's liveness vocabulary and the wire's are one set, mapped here
+    /// and nowhere else. A spawn says nothing; a refusal and a blind adoption
+    /// both owe the player a sentence.
+    #[test]
+    fn the_launch_verdict_follows_what_the_registry_adopted() {
+        use punktfunk_core::quic::LaunchOutcomeKind as Kind;
+
+        let spawned = launch_verdict("Quail", None, true);
+        assert_eq!(spawned.kind, Kind::Spawned);
+        assert!(spawned.message.is_empty());
+        assert!(!spawned.kind.needs_telling());
+
+        let refused = launch_verdict("Quail", None, false);
+        assert_eq!(refused.kind, Kind::Refused);
+        assert!(refused.message.starts_with("Couldn't start Quail"));
+        assert!(refused.kind.needs_telling());
+
+        let (fp, app) = (Some("fp-verdict"), Some("custom:verdict"));
+        let first = crate::launchreg::claim(fp, app, false, Some(1.0));
+        first.launched();
+        // Nothing adopted, inside the in-flight window: the host cannot see it.
+        let blind = crate::launchreg::claim(fp, app, false, Some(2.0));
+        assert!(!blind.must_spawn());
+        let out = launch_verdict("Quail", Some(&blind), false);
+        assert_eq!(out.kind, Kind::AdoptedUnknown);
+        assert!(out.message.contains("Start it again"));
+        assert!(out.kind.needs_telling());
+        blind.abandon();
+        drop(first);
     }
 }

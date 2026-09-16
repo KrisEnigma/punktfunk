@@ -313,6 +313,7 @@ pub fn claim(
             plan: Plan::Spawn,
             stamp: fresh_stamp,
             procs: None,
+            adopted: None,
         };
     };
     let reg = reg();
@@ -346,6 +347,7 @@ pub fn claim(
                 plan: Plan::Adopt,
                 stamp,
                 procs: Some(procs),
+                adopted: Some(live),
             };
         }
         // Reset in place so `holders` survives: an older session may
@@ -379,6 +381,7 @@ pub fn claim(
         plan: Plan::Spawn,
         stamp: fresh_stamp,
         procs: Some(procs),
+        adopted: None,
     }
 }
 
@@ -390,11 +393,22 @@ pub struct Claim {
     plan: Plan,
     stamp: Option<f64>,
     procs: Option<LiveProcs>,
+    /// What liveness said when this claim chose [`Plan::Adopt`]. `None` for a
+    /// spawn — the session is about to find out for itself.
+    adopted: Option<Liveness>,
 }
 
 impl Claim {
     pub fn must_spawn(&self) -> bool {
         matches!(self.plan, Plan::Spawn)
+    }
+
+    /// What this claim adopted against, for the outcome the client is told
+    /// ([`punktfunk_core::quic::LaunchOutcome`]). `None` on a spawn.
+    /// [`Liveness::Unknown`] is the case the player is owed a word about: the
+    /// host reused a launch it cannot see.
+    pub fn adopted(&self) -> Option<Liveness> {
+        self.adopted
     }
 
     /// Stamp the lease must adopt ([`crate::gamelease::LeaseRequest::launch_stamp`]).

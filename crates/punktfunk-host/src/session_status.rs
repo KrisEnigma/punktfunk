@@ -618,6 +618,7 @@ mod tests {
                 workspace: None,
                 #[cfg(target_os = "linux")]
                 window_stage: None,
+                outcome: None,
             },
             Box::new(|| {}),
         );
