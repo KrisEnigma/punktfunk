@@ -29,6 +29,7 @@ import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
@@ -347,6 +348,9 @@ fun StreamScreen(session: ActiveSession, onSessionEnded: (SessionEndReason) -> U
                     }
                 }
             }
+            // The operator's per-session mute rides the control stream, so the badge learns it
+            // on this tick. The local bit is in the same mask — the toggle writes it at once.
+            ui.audioMute = NativeBridge.nativeAudioMute(handle)
             if (NativeBridge.nativeSessionEnded(handle)) {
                 // WHY it ended decides what the user is told. This used to show the "host may be
                 // asleep" line for EVERY ending — including a game the player had just quit and a
@@ -736,8 +740,17 @@ fun StreamScreen(session: ActiveSession, onSessionEnded: (SessionEndReason) -> U
                         "${SessionAccess.remainingLabel(ui.accessRemaining)} left"
                 else -> SessionAccess.label(ui.accessGrants)
             }
-            if (accessChip != null) {
-                AccessChip(accessChip, Modifier.align(Alignment.TopEnd).padding(12.dp))
+            // Same corner, stacked: the mute sentence stands whatever the stats tier, because a
+            // player who cannot hear is owed the reason even with chrome off.
+            if (accessChip != null || ui.audioMuteLabel != null) {
+                Column(
+                    Modifier.align(Alignment.TopEnd).padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                    horizontalAlignment = Alignment.End,
+                ) {
+                    ui.audioMuteLabel?.let { AccessChip(it) }
+                    accessChip?.let { AccessChip(it) }
+                }
             }
             // "Hold to quit" hint while the gamepad exit chord is armed — the exit debounces on a ~1 s
             // hold, so without this cue a couch user reads the (deliberately no-longer-instant) chord as
@@ -925,6 +938,9 @@ fun StreamScreen(session: ActiveSession, onSessionEnded: (SessionEndReason) -> U
                             val on = NativeBridge.nativePadMouse(handle)
                             NativeBridge.nativeSetPadMouse(handle, if ((on and t) == t) on and t.inv() else on or t)
                         },
+                        audioMute = { ui.audioMute },
+                        audioMuteLabel = { ui.audioMuteLabel },
+                        toggleStreamMute = { ui.muteStream(!ui.streamMuted) },
                         currentMode = { requestedMode },
                         requestMode = { w, h, hz ->
                             if (NativeBridge.nativeRequestMode(handle, w, h, hz)) {

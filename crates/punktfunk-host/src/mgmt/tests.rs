@@ -1807,6 +1807,17 @@ fn every_route_is_classified_for_the_plugin_and_cert_lanes() {
         // Finished sessions: the same facts `/status` already shows a plugin about a live
         // one. Not the cert lane — it names every other client that streamed here.
         ("GET", "/api/v1/session/last", true, false),
+        // Window list and verbs: console lane only. A window list names titles on
+        // the operator's desk, like the rosters the cert lane withholds, and a cert
+        // caller is not bound to a session id — it could spend another session's
+        // grants. The client's own switcher needs a session-bound lane, not this.
+        ("GET", "/api/v1/session/{id}/windows", false, false),
+        (
+            "POST",
+            "/api/v1/session/{id}/windows/{window}",
+            false,
+            false,
+        ),
         ("GET", "/api/v1/session/settings", true, false),
         ("PUT", "/api/v1/session/settings", true, false),
         ("POST", "/api/v1/game/end", true, false),
@@ -3543,6 +3554,8 @@ fn a_recorded_launch_credits_its_run_to_the_library_stats() {
             procs: Some(std::sync::Arc::new(std::sync::Mutex::new(Vec::new()))),
             #[cfg(target_os = "linux")]
             workspace: None,
+            #[cfg(target_os = "linux")]
+            window_stage: None,
         },
         Box::new(|| {}),
     );

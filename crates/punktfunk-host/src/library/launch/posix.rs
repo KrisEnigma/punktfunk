@@ -23,6 +23,7 @@ pub(super) fn launch_target(
         detect: entry.detect,
         command: Some(command),
         own_workspace: entry.on_window.own_workspace(),
+        on_window: entry.on_window,
     })
 }
 

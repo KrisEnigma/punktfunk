@@ -68,12 +68,36 @@ object Sc2Device {
         else -> null
     }
 
+    /** Grip-rumble output report — the id Steam drives both motors with. */
+    const val ID_OUT_RUMBLE = 0x80
+
     /**
-     * The pending-OUT queue key for an output frame. Steam re-sends `0x80` grip rumble as a level,
-     * so a newer one supersedes the pending one; every other id is a one-shot that must not be lost.
+     * The pending-OUT queue key for an output frame. Steam re-sends [ID_OUT_RUMBLE] grip rumble as
+     * a level, so a newer one supersedes the pending one; every other id is a one-shot that must
+     * not be lost.
      */
     fun outputCoalesceKey(frame: ByteArray): Int =
-        if (frame.firstOrNull() == 0x80.toByte()) OutReportQueue.KEY_RUMBLE else OutReportQueue.NO_COALESCE
+        if (frame.firstOrNull() == ID_OUT_RUMBLE.toByte()) {
+            OutReportQueue.KEY_RUMBLE
+        } else {
+            OutReportQueue.NO_COALESCE
+        }
+
+    /**
+     * `MsgHapticRumble`: `[0x80][type][intensity u16][left.speed u16][left.gain i8]
+     * [right.speed u16][right.gain i8]`, little-endian, 10 bytes on the wire — the same offsets
+     * the host reads back in `triton_proto::parse_triton_rumble`. Type 0 and gain 0 are the
+     * unattenuated default; a frame of zero speeds is what stops the motors again.
+     */
+    fun rumbleFrame(left: Int, right: Int): ByteArray = ByteArray(10).also {
+        it[0] = ID_OUT_RUMBLE.toByte()
+        it[2] = 0xFF.toByte() // intensity: full scale
+        it[3] = 0xFF.toByte()
+        it[4] = (left and 0xFF).toByte()
+        it[5] = ((left shr 8) and 0xFF).toByte()
+        it[7] = (right and 0xFF).toByte()
+        it[8] = ((right shr 8) and 0xFF).toByte()
+    }
 
     /**
      * Incoming: a GATT characteristic value is the bare payload with no HID report-id byte, so

@@ -3922,6 +3922,151 @@
         }
       }
     },
+    "/api/v1/session/{id}/windows": {
+      "get": {
+        "tags": [
+          "session"
+        ],
+        "summary": "List this session's windows",
+        "description": "The toplevels on the head this session streams, so a client in a full-screen\ngame can see what is behind it. Free to every session: those windows are\nalready in the pixels it receives. The operator's other monitors are not in\nthe payload, whatever the caller's access.",
+        "operationId": "getSessionWindows",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Session id from `GET /status`",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Windows on this session's head",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Toplevel"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No live session with that id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/session/{id}/windows/{window}": {
+      "post": {
+        "tags": [
+          "session"
+        ],
+        "summary": "Act on one of this session's windows",
+        "description": "Focus, full-screen or close by id, gated on the session's LIVE grants — the\nsame mask the input thread checks every event against. A view-only guest is\nrefused all three; a controller-only guest raises a window but never closes\none. An id this session's head does not currently hold is a 404, so a stale\nid cannot act on whatever now answers to it.",
+        "operationId": "actOnSessionWindow",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Session id from `GET /status`",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "window",
+            "in": "path",
+            "description": "Window id from `GET /session/{id}/windows`",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WindowActionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "The compositor accepted the verb"
+          },
+          "401": {
+            "description": "Missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "This session's access does not cover the verb",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such session, or no such window on its head",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The compositor refused the verb",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/stats/capture/live": {
       "get": {
         "tags": [
@@ -7062,6 +7207,35 @@
           },
           {
             "type": "object",
+            "description": "Fires when the game's own window reaches the screen, which is often far\nlater than its process: a Proton prefix build, a splash on a black\nwindow, an emulator loading a ROM.",
+            "required": [
+              "game",
+              "title",
+              "app_id",
+              "kind"
+            ],
+            "properties": {
+              "app_id": {
+                "type": "string",
+                "description": "Wayland `app_id`, or the X11 class on an Xwayland window."
+              },
+              "game": {
+                "$ref": "#/components/schemas/GameRefPayload"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "game.window"
+                ]
+              },
+              "title": {
+                "type": "string",
+                "description": "Title the compositor reports for that window."
+              }
+            }
+          },
+          {
+            "type": "object",
             "required": [
               "game",
               "reason",
@@ -8786,8 +8960,29 @@
       },
       "OnWindow": {
         "type": "object",
-        "description": "Per-entry window placement — one knob today: which workspace the launch\nopens on. Absent follows the host's `launch_workspace` display policy.",
+        "description": "Per-entry window placement, applied once when the game's own window first\nreaches the screen. Absent keys take the defaults below; `workspace` alone\nfalls back to the host's `launch_workspace` display policy.",
         "properties": {
+          "focus": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Raise it. Default on: the player launched it, so it is what they want\nin front — a launcher that steals focus back leaves them on the desk."
+          },
+          "fullscreen": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Make it full-screen. Default off: most games set their own mode, and\nforcing it fights a title that wanted a window."
+          },
+          "move_to_stream_output": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Move it onto the streamed head if it opened elsewhere. Default on: a\ngame the player cannot see is the whole failure this stage exists for."
+          },
           "workspace": {
             "oneOf": [
               {
@@ -10535,6 +10730,52 @@
           }
         }
       },
+      "Toplevel": {
+        "type": "object",
+        "description": "One compositor toplevel, as every backend reports it.\n\n`id` is the backend's own handle (a Hyprland address, a sway con id) and is\nopaque above this module: it goes back to the backend that minted it and\nnowhere else. Defined on every platform — the management route and its\nschema exist on a Windows host too, which simply lists nothing.",
+        "required": [
+          "id",
+          "title",
+          "app_id",
+          "focused",
+          "fullscreen",
+          "workspace",
+          "output"
+        ],
+        "properties": {
+          "app_id": {
+            "type": "string",
+            "description": "Wayland `app_id`, or the X11 class on an Xwayland window."
+          },
+          "focused": {
+            "type": "boolean"
+          },
+          "fullscreen": {
+            "type": "boolean"
+          },
+          "id": {
+            "type": "string",
+            "description": "Backend handle. Never parsed above the backend, never reused across one."
+          },
+          "output": {
+            "type": "string",
+            "description": "The head this window is on — always the streamed one, by construction."
+          },
+          "pid": {
+            "type": "integer",
+            "format": "int32",
+            "description": "`None` where the compositor does not report one (some Xwayland cons).",
+            "minimum": 0
+          },
+          "title": {
+            "type": "string"
+          },
+          "workspace": {
+            "type": "string",
+            "description": "Workspace name as the compositor spells it, not its id."
+          }
+        }
+      },
       "Topology": {
         "type": "string",
         "description": "Host topology while managed virtual displays are up.",
@@ -10916,6 +11157,27 @@
             "minimum": 0
           }
         }
+      },
+      "WindowActionRequest": {
+        "type": "object",
+        "required": [
+          "action"
+        ],
+        "properties": {
+          "action": {
+            "$ref": "#/components/schemas/WindowVerb",
+            "description": "`focus` | `fullscreen` | `close`."
+          }
+        }
+      },
+      "WindowVerb": {
+        "type": "string",
+        "description": "What a client may ask of one window.\n\nDefined on every platform: the management route decodes it before any\nbackend is consulted.",
+        "enum": [
+          "focus",
+          "fullscreen",
+          "close"
+        ]
       },
       "WorkspacePlacement": {
         "type": "string",
