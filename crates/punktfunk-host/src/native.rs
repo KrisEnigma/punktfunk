@@ -1446,14 +1446,24 @@ pub(crate) async fn run_admitted(
     let stop = Arc::new(AtomicBool::new(false));
     // Set before `stop` on `QUIT_CODE` so the display lease skips the keep-alive linger.
     let quit = Arc::new(AtomicBool::new(false));
+    // Why the session ended, for its summary. Latched first-writer-wins, so the host's own
+    // close (game exit, clean finish) beats the `Other` this watcher would read it back as.
+    let end_reason = Arc::new(std::sync::atomic::AtomicU8::new(0));
     {
         let stop = stop.clone();
         let quit = quit.clone();
+        let end_reason = end_reason.clone();
         let conn = conn.clone();
         tokio::spawn(async move {
             let reason = conn.closed().await;
             if reason.closed_with(QUIT_CODE) {
                 quit.store(true, Ordering::SeqCst);
+                crate::events::SessionEndReason::Local.latch(&end_reason);
+            } else {
+                // The client's own rule: anything that is not our close code is the link
+                // going away. A close this host made reads as `Other` here too, which is
+                // why the paths that make one latch before they call it.
+                crate::events::SessionEndReason::Lost.latch(&end_reason);
             }
             stop.store(true, Ordering::SeqCst);
         });
@@ -2131,6 +2141,7 @@ pub(crate) async fn run_admitted(
     };
     let stop_stream = stop.clone();
     let quit_stream = quit.clone();
+    let end_reason_stream = end_reason.clone();
     // Client HDR volume for EDID + 0xCE. `None` = older client / no HDR → built-in defaults.
     let client_hdr = hello.display_hdr.map(crate::encode::hdr_meta_from_wire);
     let fec_target_dp = fec_target.clone();
@@ -2291,6 +2302,7 @@ pub(crate) async fn run_admitted(
                         seconds,
                         stop: stop_stream,
                         quit: quit_stream,
+                        end_reason: end_reason_stream,
                         reconfig: reconfig_rx,
                         keyframe: keyframe_rx,
                         rfi: rfi_rx,

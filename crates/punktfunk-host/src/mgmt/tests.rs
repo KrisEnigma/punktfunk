@@ -461,6 +461,9 @@ fn fake_native_session(
         capture_health: Arc::new(std::sync::Mutex::new(None)),
         join: false,
         controls: crate::session_status::SessionControls::open(),
+        bit_depth: 8,
+        chroma: crate::encode::ChromaFormat::Yuv420,
+        end_reason: Arc::new(std::sync::atomic::AtomicU8::new(0)),
     })
 }
 
@@ -505,6 +508,9 @@ fn fake_session_with_flags(
         capture_health: Arc::new(std::sync::Mutex::new(None)),
         join: false,
         controls,
+        bit_depth: 8,
+        chroma: crate::encode::ChromaFormat::Yuv420,
+        end_reason: Arc::new(std::sync::atomic::AtomicU8::new(0)),
     });
     (guard, stop, quit, idr)
 }
@@ -543,6 +549,44 @@ async fn a_per_session_route_404s_an_unknown_id() {
         "the live session is untouched"
     );
     assert!(!idr.load(Ordering::Relaxed));
+}
+
+/// `GET /session/last` answers a host that has streamed and a host that has not: a list,
+/// never a 404 and never a 500. A stopped session arrives on it with the reason attached.
+#[tokio::test]
+async fn the_last_session_route_answers_before_and_after_a_session() {
+    let _serial = SESSION_REGISTRY_LOCK.lock().await;
+    let app = test_app(test_state(), None);
+
+    let (status, body) = send(&app, get_req("/api/v1/session/last")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        body["sessions"].is_array(),
+        "always a list, empty on a host that has not streamed: {body}"
+    );
+
+    let one = fake_session_with_flags("aabbccddeeff").0;
+    let id = one.id;
+    let del = axum::http::Request::delete(format!("/api/v1/session/{id}"))
+        .body(Body::empty())
+        .unwrap();
+    assert_eq!(send(&app, del).await.0, StatusCode::NO_CONTENT);
+    drop(one);
+
+    let (status, body) = send(&app, get_req("/api/v1/session/last")).await;
+    assert_eq!(status, StatusCode::OK);
+    // By id: the ring is process-global and bounded, so a count is not a claim.
+    let mine = body["sessions"]
+        .as_array()
+        .expect("a list")
+        .iter()
+        .find(|s| s["id"] == id)
+        .unwrap_or_else(|| panic!("session {id} is on the list: {body}"));
+    assert_eq!(mine["ended"], "stopped_by_operator");
+    assert_eq!(mine["mode"], "1920x1080@60");
+    assert_eq!(mine["codec"], "hevc");
+    // No video loop ran, so it has no totals to claim — absent, not zero.
+    assert!(mine.get("frames_sent").is_none(), "{mine}");
 }
 
 /// The point of the whole issue: with two clients on one host, stopping one must leave the
@@ -1758,6 +1802,9 @@ fn every_route_is_classified_for_the_plugin_and_cert_lanes() {
         ("POST", "/api/v1/session/{id}/idr", true, false),
         ("PUT", "/api/v1/session/{id}/audio", true, false),
         ("PUT", "/api/v1/session/{id}/access", false, false),
+        // Finished sessions: the same facts `/status` already shows a plugin about a live
+        // one. Not the cert lane — it names every other client that streamed here.
+        ("GET", "/api/v1/session/last", true, false),
         ("GET", "/api/v1/session/settings", true, false),
         ("PUT", "/api/v1/session/settings", true, false),
         ("POST", "/api/v1/game/end", true, false),

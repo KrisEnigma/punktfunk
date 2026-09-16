@@ -23,6 +23,7 @@ import { fmtNumber } from "@/lib/format";
 import type { Loadable } from "@/lib/query";
 import { m } from "@/paraglide/messages";
 import { ActivityCard } from "@/sections/Activity";
+import { LastSessionCard } from "./LastSessionCard";
 import { RunningGames } from "./RunningGames";
 import { SessionList } from "./SessionList";
 
@@ -271,7 +272,9 @@ export const DashboardView: FC<{
 								</CardContent>
 							</Card>
 
-							{/* Below the session card: the past, under the present. */}
+							{/* Below the session card: the past, under the present. The summary
+							    first — it is about the session the page was just showing. */}
+							<LastSessionCard />
 							<ActivityCard />
 						</Stagger>
 					)}

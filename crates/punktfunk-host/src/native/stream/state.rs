@@ -146,6 +146,9 @@ pub(super) struct StreamState {
     pub(super) plan: crate::session_plan::SessionPlan,
     pub(super) stop: Arc<AtomicBool>,
     pub(super) quit: Arc<AtomicBool>,
+    /// Why this session ended, for its summary. First write wins, so the path that knows
+    /// (game exit, operator stop, the peer's own close) beats the loop's clean tail.
+    pub(super) end_reason: Arc<std::sync::atomic::AtomicU8>,
     pub(super) conn: super::super::link::SessionLink,
     /// The client's ask. Encoders fit to it; the display may deliver another size.
     pub(super) negotiated: punktfunk_core::Mode,
@@ -302,6 +305,7 @@ impl StreamState {
             seconds,
             stop,
             quit,
+            end_reason,
             reconfig,
             keyframe,
             rfi,
@@ -635,6 +639,7 @@ impl StreamState {
             let conn = conn.clone();
             let stop = stop.clone();
             let quit = quit.clone();
+            let end_reason = end_reason.clone();
             move || {
                 if !crate::session_settings::get().session_on_game_exit {
                     tracing::info!(
@@ -646,6 +651,7 @@ impl StreamState {
                 tracing::info!(
                     "the launched game exited — ending the session cleanly (APP_EXITED)"
                 );
+                crate::events::SessionEndReason::GameExited.latch(&end_reason);
                 conn.close(punktfunk_core::quic::APP_EXITED_CLOSE_CODE, b"game exited");
                 quit.store(true, Ordering::SeqCst);
                 stop.store(true, Ordering::SeqCst);
@@ -797,6 +803,9 @@ impl StreamState {
             capture_health: capture_health.clone(),
             join: join_live,
             controls,
+            bit_depth,
+            chroma: plan.chroma,
+            end_reason: end_reason.clone(),
         });
 
         // Replaced by `spawn_session_watcher` inside the session span; disconnected until then.
@@ -807,6 +816,7 @@ impl StreamState {
             plan,
             stop,
             quit,
+            end_reason,
             conn,
             negotiated: mode,
             bitrate_auto,
@@ -949,6 +959,10 @@ impl StreamState {
     }
 
     /// The tick loop, then the drain. Every phase is a method; the order is the contract.
+    ///
+    /// Reaching the tail is what makes the end clean: it hands the registry this session's
+    /// totals and latches `host_ended`. Any earlier exit leaves both unset, and the summary
+    /// reads that as `host_error`.
     pub(super) fn run(mut self) -> Result<()> {
         // Concurrent sessions interleave in one log; this stamps every line below with
         // the id `/status` reports. Sync body, so the guard never straddles an await.
@@ -992,6 +1006,15 @@ impl StreamState {
             dropped = src.as_ref().map_or(0, |h| h.dropped_total),
             "punktfunk/1 virtual stream complete"
         );
+        crate::session_status::record_tally(
+            self.live_session.id,
+            crate::session_status::SessionTally {
+                frames_sent: self.sent,
+                frames_dropped: src.as_ref().map(|h| h.dropped_total),
+                path_mtu: self.conn.current_mtu(),
+            },
+        );
+        crate::events::SessionEndReason::HostEnded.latch(&self.end_reason);
         Ok(())
     }
 }

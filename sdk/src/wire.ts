@@ -82,10 +82,47 @@ export const SessionStarted = S.Struct({
 	kind: S.Literal("session.started"),
 	session: SessionRef,
 });
+/** Why a session ended, in the same words the client maps from the QUIC close. */
+export const SessionEndReason = S.Literals([
+	"local",
+	"game_exited",
+	"host_ended",
+	"host_error",
+	"lost",
+	"stopped_by_operator",
+]);
+export type SessionEndReason = S.Schema.Type<typeof SessionEndReason>;
+
+/**
+ * Everything the host knows about a finished session. `GET /api/v1/session/last` returns the
+ * same shape. A total the host does not keep per session is absent, never zero.
+ */
+export const SessionSummary = S.Struct({
+	id: S.Number,
+	client: S.String,
+	client_name: S.optional(S.String),
+	started_unix: S.Number,
+	duration_s: S.Number,
+	mode: S.String,
+	hdr: S.Boolean,
+	join: S.Boolean,
+	codec: S.String,
+	bit_depth: S.Number,
+	chroma: S.String,
+	bitrate_kbps: S.Number,
+	frames_sent: S.optional(S.Number),
+	frames_dropped: S.optional(S.Number),
+	bringup_ms: S.Number,
+	path_mtu: S.optional(S.Number),
+	ended: SessionEndReason,
+});
+export type SessionSummary = S.Schema.Type<typeof SessionSummary>;
+
 export const SessionEnded = S.Struct({
 	...envelope,
 	kind: S.Literal("session.ended"),
 	session: SessionRef,
+	summary: SessionSummary,
 });
 export const StreamStarted = S.Struct({
 	...envelope,

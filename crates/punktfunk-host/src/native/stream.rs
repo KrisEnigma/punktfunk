@@ -320,6 +320,8 @@ pub(super) struct SessionContext {
     pub(super) stop: Arc<AtomicBool>,
     /// Set on `QUIT_CODE`. Display lease skips keep-alive linger for a user stop.
     pub(super) quit: Arc<AtomicBool>,
+    /// [`crate::events::SessionEndReason`] latch for the session summary; first write wins.
+    pub(super) end_reason: Arc<std::sync::atomic::AtomicU8>,
     pub(super) reconfig: std::sync::mpsc::Receiver<punktfunk_core::Mode>,
     pub(super) keyframe: std::sync::mpsc::Receiver<()>,
     /// Lost-frame range `(first, last)`. Prefer `invalidate_ref_frames` over a full IDR.
