@@ -22,8 +22,6 @@ pub(crate) struct WorkerArgs {
     pub(crate) compositor: CompositorPref,
     pub(crate) gamepad: GamepadPref,
     pub(crate) bitrate_kbps: u32,
-    /// ABR limit in kbps; `0` = no limit. Read only while `bitrate_kbps` is 0.
-    pub(crate) abr_max_kbps: u32,
     pub(crate) video_caps: u8,
     pub(crate) audio_channels: u8,
     /// Hello request, never the device format. The host answers in `Welcome`; open

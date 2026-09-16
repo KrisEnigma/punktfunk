@@ -25,7 +25,7 @@
 // Not [`WIRE_VERSION`]. The C surface can grow without a wire byte changing.
 // Pin the integer in `abi.rs` (`abi_version_is_pinned`). Per-bump notes live
 // in `CHANGELOG.md`.
-#define PUNKTFUNK_ABI_VERSION 35
+#define PUNKTFUNK_ABI_VERSION 34
 
 // punktfunk/1 wire version. `Hello`/`Welcome` carry it; hosts equality-check it.
 //
@@ -1547,14 +1547,6 @@ typedef struct {
     uint8_t preferred_codec;
     // `PUNKTFUNK_CLIENT_CAP_*` bits ([`punktfunk_connect_ex9`]).
     uint8_t client_caps;
-    // ABR limit in kbps: adapt, but never climb above this. `0` = no limit, and
-    // it is read only while `bitrate_kbps` is `0` (Automatic). The cap binds the
-    // negotiated start too, so a capped session never emits a faster first second.
-    uint32_t abr_max_kbps;
-    // Always `0`. Fills what would otherwise be tail padding: C leaves padding
-    // unspecified even under `= {0}`, so the next appended field would read a
-    // caller's garbage. Spend this before growing the struct again.
-    uint32_t reserved0;
 } PunktfunkConnectOpts;
 #endif
 

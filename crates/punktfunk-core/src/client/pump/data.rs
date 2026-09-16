@@ -46,9 +46,6 @@ pub(super) struct DataPump {
     pub(super) pipeline_gap: Arc<AtomicU32>,
     /// Embedder-requested rate. `0` = Automatic (the only case ABR arms).
     pub(super) bitrate_kbps: u32,
-    /// "Adapt, but never above N" (kbps); `0` = no limit. Only read while
-    /// `bitrate_kbps == 0`. `PUNKTFUNK_ABR_MAX_MBPS` still overrides it.
-    pub(super) abr_max_kbps: u32,
     /// Rate the host actually configured (Welcome echo; old host echoes 0).
     pub(super) resolved_bitrate_kbps: u32,
     pub(super) negotiated_codec: u8,
@@ -74,20 +71,6 @@ pub(super) struct DataPump {
     pub(super) mode_slot: Arc<Mutex<crate::config::Mode>>,
 }
 
-/// Whether the startup capacity probe is worth its burst.
-///
-/// Only Automatic has a ceiling to learn, and only when one is not already
-/// known: under a user's bitrate limit the burst could at best confirm a number
-/// they typed. PyroWave pins the rate, and a host that echoed `0` never moves.
-fn wants_capacity_probe(
-    bitrate_kbps: u32,
-    rate_pinned: bool,
-    resolved_bitrate_kbps: u32,
-    ceiling_cap_kbps: Option<u32>,
-) -> bool {
-    bitrate_kbps == 0 && !rate_pinned && resolved_bitrate_kbps > 0 && ceiling_cap_kbps.is_none()
-}
-
 impl DataPump {
     pub(super) fn run(self) {
         let DataPump {
@@ -109,7 +92,6 @@ impl DataPump {
             recovery_kf: pump_recovery_kf,
             pipeline_gap: pump_pipeline_gap,
             bitrate_kbps,
-            abr_max_kbps,
             resolved_bitrate_kbps,
             negotiated_codec,
             bit_depth,
@@ -148,17 +130,11 @@ impl DataPump {
         // All-intra: no reference chain, so the channel drains to newest
         // (`FrameChannel::set_all_intra`) instead of strict FIFO.
         frames.set_all_intra(negotiated_codec == crate::quic::CODEC_PYROWAVE);
-        // A cap the user typed is the ceiling the probe would go looking for,
-        // so it stands in for the measurement (see `capacity_probe_at`).
-        let ceiling_cap = crate::abr::ceiling_cap_kbps(abr_max_kbps);
-        let mut abr = BitrateController::new(
-            if bitrate_kbps == 0 && !rate_pinned {
-                resolved_bitrate_kbps
-            } else {
-                0
-            },
-            abr_max_kbps,
-        );
+        let mut abr = BitrateController::new(if bitrate_kbps == 0 && !rate_pinned {
+            resolved_bitrate_kbps
+        } else {
+            0
+        });
         // Bound the probe by stream shape, not raw link capacity. A fat LAN
         // otherwise licenses rates no inter-coded stream can use.
         abr.set_stream_cap(stream_cap_kbps);
@@ -180,13 +156,10 @@ impl DataPump {
         // Burst aftermath: queue + QUIC loss-recovery sit between host
         // "complete" and our receipt. A late result is discarded.
         const CAPACITY_PROBE_TIMEOUT: Duration = Duration::from_secs(15);
-        let mut capacity_probe_at: Option<Instant> = (wants_capacity_probe(
-            bitrate_kbps,
-            rate_pinned,
-            resolved_bitrate_kbps,
-            ceiling_cap,
-        ) && std::env::var("PUNKTFUNK_ABR_PROBE")
-            .map_or(true, |v| v != "0"))
+        let mut capacity_probe_at: Option<Instant> = (bitrate_kbps == 0
+            && !rate_pinned
+            && resolved_bitrate_kbps > 0
+            && std::env::var("PUNKTFUNK_ABR_PROBE").map_or(true, |v| v != "0"))
         .then(|| Instant::now() + CAPACITY_PROBE_DELAY);
         let mut capacity_probe_deadline: Option<Instant> = None;
         // Leading/trailing edge of any probe (startup or embedder). An
@@ -862,23 +835,6 @@ fn wire_bytes(st: &crate::stats::Stats) -> u64 {
 mod tests {
     use super::*;
 
-    /// A known ceiling makes the startup burst pointless: with a limit set the
-    /// probe could only confirm a number the user typed.
-    #[test]
-    fn a_bitrate_limit_stands_in_for_the_startup_capacity_probe() {
-        assert!(wants_capacity_probe(0, false, 20_000, None), "Automatic");
-        assert!(
-            !wants_capacity_probe(0, false, 20_000, Some(12_000)),
-            "a limit already names the ceiling"
-        );
-        assert!(!wants_capacity_probe(50_000, false, 50_000, None), "fixed");
-        assert!(!wants_capacity_probe(0, true, 20_000, None), "PyroWave");
-        assert!(
-            !wants_capacity_probe(0, false, 0, None),
-            "old host echoed 0"
-        );
-    }
-
     /// DeliveryReport: "zero" while true, one confirmation when video
     /// starts, then silence (older hosts warn per unknown message).
     #[test]
@@ -1071,7 +1027,6 @@ mod tests {
             recovery_kf: Arc::new(AtomicU32::new(0)),
             pipeline_gap: pipeline_gap.clone(),
             bitrate_kbps: 20_000,
-            abr_max_kbps: 0,
             resolved_bitrate_kbps: 20_000,
             negotiated_codec: crate::quic::CODEC_HEVC,
             bit_depth: 8,

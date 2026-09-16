@@ -1197,14 +1197,8 @@ pub struct Settings {
     pub width: u32,
     pub height: u32,
     pub refresh_hz: u32,
-    /// Requested encoder bitrate (kbps); 0 = host default (Automatic, ABR on).
+    /// Requested encoder bitrate (kbps); 0 = host default.
     pub bitrate_kbps: u32,
-    /// Automatic's ceiling in kbps: adapt, but never climb above this. `0` = no
-    /// limit. Read only while `bitrate_kbps` is 0, so the pair spells three modes
-    /// and an older client — which sees `bitrate_kbps` alone — still reads
-    /// Automatic rather than a rate nobody chose. `PUNKTFUNK_ABR_MAX_MBPS` wins.
-    #[serde(default)]
-    pub abr_max_kbps: u32,
     /// Host render/encode at `mode × render_scale`; presenter downscales. `> 1`
     /// supersamples; `< 1` under-renders; `1.0` = native. Clamped even, codec max.
     pub render_scale: f64,
@@ -1530,7 +1524,6 @@ impl Default for Settings {
             height: 0,
             refresh_hz: 0,
             bitrate_kbps: 0,
-            abr_max_kbps: 0,
             render_scale: 1.0,
             video_fit: default_video_fit(),
             gamepad: "auto".into(),
@@ -1805,27 +1798,6 @@ mod tests {
         assert_eq!(s.forward_pad, "");
         let round: Settings = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
         assert_eq!(round.forward_pad, "");
-    }
-
-    /// The three bitrate modes round-trip, and a store written before the limit
-    /// existed reads as Automatic — the degrade an older client also performs,
-    /// since it sees `bitrate_kbps` alone.
-    #[test]
-    fn settings_carry_the_three_bitrate_modes() {
-        let old = r#"{"width":1280,"height":720,"refresh_hz":60,"bitrate_kbps":0}"#;
-        let s: Settings = serde_json::from_str(old).unwrap();
-        assert_eq!((s.bitrate_kbps, s.abr_max_kbps), (0, 0), "Automatic");
-
-        for (fixed, max) in [(0u32, 0u32), (0, 15_000), (50_000, 0)] {
-            let s = Settings {
-                bitrate_kbps: fixed,
-                abr_max_kbps: max,
-                ..Default::default()
-            };
-            let round: Settings =
-                serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
-            assert_eq!((round.bitrate_kbps, round.abr_max_kbps), (fixed, max));
-        }
     }
 
     /// Older WinUI shell files still load: `show_hud` aliases onto `show_stats`,

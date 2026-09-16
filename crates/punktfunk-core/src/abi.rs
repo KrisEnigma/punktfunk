@@ -1925,7 +1925,6 @@ pub unsafe extern "C" fn punktfunk_connect_ex7(
             0,
             0,
             0,
-            0, // no ABR limit
             timeout_ms,
             std::ptr::null_mut(),
         )
@@ -1987,7 +1986,6 @@ pub unsafe extern "C" fn punktfunk_connect_ex8(
             0,
             0,
             0,
-            0, // no ABR limit
             timeout_ms,
             status_out,
         )
@@ -2050,7 +2048,6 @@ pub unsafe extern "C" fn punktfunk_connect_ex9(
             0,
             0,
             0,
-            0, // no ABR limit
             timeout_ms,
             status_out,
         )
@@ -2115,7 +2112,6 @@ pub unsafe extern "C" fn punktfunk_connect_ex10(
             0,
             0,
             0,
-            0, // no ABR limit
             timeout_ms,
             status_out,
         )
@@ -2187,7 +2183,6 @@ pub unsafe extern "C" fn punktfunk_connect_ex11(
             audio_rate_hz,
             audio_bits,
             0,
-            0, // no ABR limit
             timeout_ms,
             status_out,
         )
@@ -2254,7 +2249,6 @@ pub unsafe extern "C" fn punktfunk_connect_ex12(
             audio_rate_hz,
             audio_bits,
             video_fit,
-            0, // no ABR limit
             timeout_ms,
             status_out,
         )
@@ -2362,10 +2356,8 @@ pub struct PunktfunkConnectOpts {
     pub preferred_codec: u8,
     /// `PUNKTFUNK_CLIENT_CAP_*` bits ([`punktfunk_connect_ex9`]).
     pub client_caps: u8,
-    /// ABR limit in kbps: adapt, but never climb above this. `0` = no limit, and
-    /// it is read only while `bitrate_kbps` is `0` (Automatic). The cap binds the
-    /// negotiated start too, so a capped session never emits a faster first second.
-    pub abr_max_kbps: u32,
+    /// Always `0`, ignored. Held so the struct keeps its v35 size.
+    pub reserved1: u32,
     /// Always `0`. Fills what would otherwise be tail padding: C leaves padding
     /// unspecified even under `= {0}`, so the next appended field would read a
     /// caller's garbage. Spend this before growing the struct again.
@@ -2461,7 +2453,6 @@ pub unsafe extern "C" fn punktfunk_connect_opts(
             o.audio_rate_hz,
             o.audio_bits,
             0,
-            o.abr_max_kbps,
             o.timeout_ms,
             status_out,
         )
@@ -2495,7 +2486,6 @@ unsafe fn connect_ex_impl(
     audio_rate_hz: u32,
     audio_bits: u8,
     video_fit: u8,
-    abr_max_kbps: u32,
     timeout_ms: u32,
     status_out: *mut i32,
 ) -> *mut PunktfunkConnection {
@@ -2570,7 +2560,6 @@ unsafe fn connect_ex_impl(
             pref,
             gamepad,
             bitrate_kbps,
-            abr_max_kbps,
             video_caps,
             crate::audio::normalize_channels(audio_channels),
             // Unvalidated on purpose: a bad rate is the host's to decline, not a failed connect.

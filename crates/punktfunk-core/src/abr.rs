@@ -166,19 +166,6 @@ fn ceiling_cap_from_env() -> Option<u32> {
         .map(|m| m.saturating_mul(1_000))
 }
 
-/// The cap in force: the env var beats the user's "adapt, but never above N"
-/// setting (`0` = none), so a script or a CI run can still pin a fleet whose
-/// settings file it does not own. One funnel — the controller and the startup
-/// probe must agree on whether a ceiling is already known.
-pub(crate) fn ceiling_cap_kbps(setting_kbps: u32) -> Option<u32> {
-    resolve_ceiling_cap(ceiling_cap_from_env(), setting_kbps)
-}
-
-/// The precedence rule, with the env value injected so tests never touch the process env.
-fn resolve_ceiling_cap(env_kbps: Option<u32>, setting_kbps: u32) -> Option<u32> {
-    env_kbps.or(Some(setting_kbps).filter(|&k| k > 0))
-}
-
 /// Upper bound on bitrate this stream's shape could use, in kbps.
 ///
 /// The probe-measured ceiling is pure link capacity (`delivered × 0.7`) with
@@ -319,8 +306,8 @@ pub(crate) struct BitrateController {
     /// Climb ceiling: negotiated start until [`set_ceiling`](Self::set_ceiling)
     /// raises it from the startup probe.
     ceiling_kbps: u32,
-    /// The user's bitrate limit (or `PUNKTFUNK_ABR_MAX_MBPS`) in kbps, injected
-    /// so tests never touch the env. `None` = no cap.
+    /// `PUNKTFUNK_ABR_MAX_MBPS` in kbps, injected so tests never touch the env.
+    /// `None` = no cap.
     ceiling_cap_kbps: Option<u32>,
     /// [`stream_ceiling_kbps`] for this mode/codec. Bounds only what
     /// [`set_ceiling`](Self::set_ceiling) learns; the negotiated start stands.
@@ -410,19 +397,18 @@ pub(crate) struct BitrateController {
 impl BitrateController {
     /// `start_kbps` is the Welcome-resolved Automatic rate, or `0` for a
     /// permanently-disabled controller (explicit bitrate / old host).
-    /// `cap_kbps` is the user's "adapt, but never above N"; `0` = no cap.
-    pub(crate) fn new(start_kbps: u32, cap_kbps: u32) -> Self {
-        Self::with_ceiling_cap(start_kbps, ceiling_cap_kbps(cap_kbps))
+    pub(crate) fn new(start_kbps: u32) -> Self {
+        Self::with_ceiling_cap(start_kbps, ceiling_cap_from_env())
     }
 
-    /// [`new`](Self::new) with the cap injected so tests never touch the process env.
+    /// [`new`](Self::new) with the env cap injected so tests never touch the process env.
     fn with_ceiling_cap(start_kbps: u32, ceiling_cap_kbps: Option<u32>) -> Self {
         BitrateController {
             enabled: start_kbps > 0,
             current_kbps: start_kbps,
-            // The cap binds the negotiated start too. Automatic has no explicit
-            // bitrate, so a start above the cap must come down — see the
-            // clamp-down step in [`on_window`](Self::on_window).
+            // The env cap binds the negotiated start too. Automatic has no
+            // explicit bitrate, so a start above the cap must come down — see
+            // the clamp-down step in [`on_window`](Self::on_window).
             ceiling_kbps: start_kbps.min(ceiling_cap_kbps.unwrap_or(u32::MAX)),
             ceiling_cap_kbps,
             stream_cap_kbps: None,
@@ -472,8 +458,8 @@ impl BitrateController {
 
     /// Raise the climb ceiling to a measured link capacity (caller already
     /// subtracted headroom). Never lowers: a congested-moment measurement must
-    /// not shrink authority below what was negotiated. The user's cap clamps
-    /// here — the one funnel every learned ceiling passes through.
+    /// not shrink authority below what was negotiated. The env cap clamps here
+    /// — the one funnel every learned ceiling passes through.
     pub(crate) fn set_ceiling(&mut self, kbps: u32) {
         let measured = kbps;
         let kbps = kbps
@@ -1274,7 +1260,7 @@ mod tests {
     #[test]
     fn disabled_when_not_automatic_or_old_host() {
         // start 0 = explicit bitrate or a host that didn't echo one.
-        let mut c = BitrateController::new(0, 0);
+        let mut c = BitrateController::new(0);
         let now = Instant::now();
         assert_eq!(
             c.on_window(
@@ -1295,7 +1281,7 @@ mod tests {
 
     #[test]
     fn two_ordinary_bad_windows_step_down_multiplicatively() {
-        let mut c = BitrateController::new(20_000, 0);
+        let mut c = BitrateController::new(20_000);
         let start = Instant::now();
         // 2–6 % loss is ordinary: one window is a blip.
         assert_eq!(
@@ -1366,7 +1352,7 @@ mod tests {
     #[test]
     fn severe_window_backs_off_immediately() {
         // Unrecoverable frame skips the two-window wait…
-        let mut c = BitrateController::new(20_000, 0);
+        let mut c = BitrateController::new(20_000);
         let start = Instant::now();
         assert_eq!(
             c.on_window(
@@ -1384,7 +1370,7 @@ mod tests {
             Some(14_000)
         );
         // …and so does a jump-to-live flush.
-        let mut c = BitrateController::new(20_000, 0);
+        let mut c = BitrateController::new(20_000);
         assert_eq!(
             c.on_window(
                 ticks(start, 0),
@@ -1401,7 +1387,7 @@ mod tests {
             Some(14_000)
         );
         // …and ≥6 % window loss.
-        let mut c = BitrateController::new(20_000, 0);
+        let mut c = BitrateController::new(20_000);
         assert_eq!(
             c.on_window(
                 ticks(start, 0),
@@ -1421,7 +1407,7 @@ mod tests {
 
     #[test]
     fn cooldown_blocks_back_to_back_steps() {
-        let mut c = BitrateController::new(20_000, 0);
+        let mut c = BitrateController::new(20_000);
         let start = Instant::now();
         assert_eq!(
             c.on_window(
@@ -1474,7 +1460,7 @@ mod tests {
 
     #[test]
     fn floor_is_never_crossed() {
-        let mut c = BitrateController::new(2_500, 0);
+        let mut c = BitrateController::new(2_500);
         let start = Instant::now();
         // ×0.7 of 2500 = 1750 < floor → 2000.
         assert_eq!(
@@ -1528,7 +1514,7 @@ mod tests {
 
     #[test]
     fn sustained_clean_recovers_toward_ceiling_only() {
-        let mut c = BitrateController::new(20_000, 0);
+        let mut c = BitrateController::new(20_000);
         let start = Instant::now();
         assert_eq!(
             c.on_window(
@@ -1557,7 +1543,7 @@ mod tests {
 
     #[test]
     fn slow_start_doubles_to_a_probed_ceiling_then_stops() {
-        let mut c = BitrateController::new(20_000, 0);
+        let mut c = BitrateController::new(20_000);
         // Probe measured ~430 Mbps delivered → ×0.7 ceiling.
         c.set_ceiling(300_000);
         let start = Instant::now();
@@ -1585,7 +1571,7 @@ mod tests {
 
     #[test]
     fn first_congestion_ends_slow_start_for_good() {
-        let mut c = BitrateController::new(20_000, 0);
+        let mut c = BitrateController::new(20_000);
         c.set_ceiling(300_000);
         let start = Instant::now();
         assert_eq!(
@@ -1646,7 +1632,7 @@ mod tests {
 
     #[test]
     fn set_ceiling_is_ignored_when_disabled_and_never_lowers() {
-        let mut c = BitrateController::new(0, 0);
+        let mut c = BitrateController::new(0);
         c.set_ceiling(1_000_000);
         assert_eq!(
             c.on_window(
@@ -1663,7 +1649,7 @@ mod tests {
             ),
             None
         );
-        let mut c = BitrateController::new(20_000, 0);
+        let mut c = BitrateController::new(20_000);
         c.set_ceiling(10_000); // below the negotiated start → ignored
         assert_eq!(c.ceiling_kbps, 20_000);
     }
@@ -1714,18 +1700,18 @@ mod tests {
     /// Stream bound clamps learned ceilings only; a host-resolved start stands.
     #[test]
     fn the_stream_bound_clamps_a_learned_ceiling_only() {
-        let mut c = BitrateController::new(20_000, 0);
+        let mut c = BitrateController::new(20_000);
         c.set_stream_cap(100_000);
         c.set_ceiling(657_000);
         assert_eq!(c.ceiling_kbps, 100_000, "a learned ceiling is bounded");
 
         // Never set: no stream bound.
-        let mut c = BitrateController::new(20_000, 0);
+        let mut c = BitrateController::new(20_000);
         c.set_ceiling(657_000);
         assert_eq!(c.ceiling_kbps, 657_000);
 
         // Negotiated start above the bound stands.
-        let mut c = BitrateController::new(300_000, 0);
+        let mut c = BitrateController::new(300_000);
         c.set_stream_cap(100_000);
         assert_eq!(c.ceiling_kbps, 300_000);
         c.set_ceiling(657_000);
@@ -1744,55 +1730,12 @@ mod tests {
         );
     }
 
-    /// The user's bitrate limit is the same clamp `PUNKTFUNK_ABR_MAX_MBPS` was:
-    /// it binds the negotiated start, so a 12 Mbps link never sees a 20 Mbps
-    /// first second, and it clamps whatever the startup probe measured.
-    #[test]
-    fn a_bitrate_limit_binds_the_start_and_clamps_the_probe() {
-        let mut c = BitrateController::with_ceiling_cap(20_000, Some(12_000));
-        assert_eq!(
-            c.ceiling_kbps, 12_000,
-            "the limit binds the host-negotiated start"
-        );
-        c.set_ceiling(657_000);
-        assert_eq!(c.ceiling_kbps, 12_000, "and clamps a measured ceiling");
-
-        // Below the limit the start stands: a limit is a ceiling, not a target.
-        let c = BitrateController::with_ceiling_cap(8_000, Some(12_000));
-        assert_eq!(c.ceiling_kbps, 8_000);
-
-        // No limit is the old behaviour, unchanged.
-        let c = BitrateController::with_ceiling_cap(20_000, None);
-        assert_eq!(c.ceiling_kbps, 20_000);
-    }
-
-    /// The one funnel the controller and the startup probe both read. `0` means
-    /// no limit; `PUNKTFUNK_ABR_MAX_MBPS` beats the setting so a script can still
-    /// pin a fleet whose settings file it does not own.
-    #[test]
-    fn the_env_override_beats_the_stored_bitrate_limit() {
-        assert_eq!(resolve_ceiling_cap(None, 0), None);
-        assert_eq!(resolve_ceiling_cap(None, 12_000), Some(12_000));
-        assert_eq!(
-            resolve_ceiling_cap(Some(25_000), 12_000),
-            Some(25_000),
-            "the env var wins"
-        );
-        assert_eq!(
-            resolve_ceiling_cap(Some(25_000), 0),
-            Some(25_000),
-            "even with no setting"
-        );
-        // The process env is the only thing between the two: an unset var is `None`.
-        assert_eq!(ceiling_cap_kbps(12_000), Some(12_000));
-    }
-
     /// Mode switch re-teaches the stream cap both ways: upswitch opens room,
     /// downswitch rebinds because [`BitrateController::set_ceiling`] never lowers.
     #[test]
     fn a_mode_switch_reteaches_the_stream_cap_both_ways() {
         // 1080p on a fat link: ceiling bound at the 1080p shape.
-        let mut c = BitrateController::new(20_000, 0);
+        let mut c = BitrateController::new(20_000);
         c.set_stream_cap(100_000);
         c.set_ceiling(657_000);
         assert_eq!(c.ceiling_kbps, 100_000);
@@ -1819,7 +1762,7 @@ mod tests {
         );
 
         // Disabled controller (explicit bitrate) is untouched.
-        let mut d = BitrateController::new(0, 0);
+        let mut d = BitrateController::new(0);
         d.set_stream_cap(100_000);
         d.set_stream_cap(42_000);
         assert_eq!(d.ceiling_kbps, 0);
@@ -1827,7 +1770,7 @@ mod tests {
 
     #[test]
     fn owd_rise_alone_is_a_congestion_signal() {
-        let mut c = BitrateController::new(20_000, 0);
+        let mut c = BitrateController::new(20_000);
         let start = Instant::now();
         // ~10 ms OWD baseline.
         for i in 0..4 {
@@ -1883,7 +1826,7 @@ mod tests {
     #[test]
     fn decode_latency_rise_alone_is_a_congestion_signal() {
         // Pristine link; only decode latency is rising.
-        let mut c = BitrateController::new(20_000, 0);
+        let mut c = BitrateController::new(20_000);
         let start = Instant::now();
         // ~8 ms decode baseline.
         for i in 0..4 {
@@ -1939,7 +1882,7 @@ mod tests {
     #[test]
     fn keyframe_ask_storm_alone_is_a_congestion_signal() {
         // Pristine link, no latency signal, two kf asks per window: ordinary-bad.
-        let mut c = BitrateController::new(20_000, 0);
+        let mut c = BitrateController::new(20_000);
         let start = Instant::now();
         assert_eq!(
             c.on_window(
@@ -1976,7 +1919,7 @@ mod tests {
     #[test]
     fn keyframe_ask_saturation_is_severe() {
         // Emitters throttle at 100 ms: 4+ asks in 750 ms is severe.
-        let mut c = BitrateController::new(20_000, 0);
+        let mut c = BitrateController::new(20_000);
         let start = Instant::now();
         assert_eq!(
             c.on_window(
@@ -1998,7 +1941,7 @@ mod tests {
     #[test]
     fn a_single_keyframe_ask_is_not_congestion() {
         // One kf ask is not congestion, even in a row.
-        let mut c = BitrateController::new(20_000, 0);
+        let mut c = BitrateController::new(20_000);
         let start = Instant::now();
         for i in 0..4 {
             assert_eq!(
@@ -2022,7 +1965,7 @@ mod tests {
     #[test]
     fn decode_latency_caps_the_slow_start_climb() {
         // Fat link, decoder saturates below it.
-        let mut c = BitrateController::new(20_000, 0);
+        let mut c = BitrateController::new(20_000);
         c.set_ceiling(300_000);
         let start = Instant::now();
         // First [`BASELINE_MIN_WINDOWS`] teach the decode baseline.
@@ -2082,7 +2025,7 @@ mod tests {
     #[test]
     fn one_calm_window_is_not_a_baseline() {
         // Our own decrease clears the encode baseline. One sample must not arm.
-        let mut c = BitrateController::new(100_000, 0);
+        let mut c = BitrateController::new(100_000);
         let start = Instant::now();
         // One 3 ms seed, then 12 ms: past [`ENCODE_RISE_US`], but no baseline yet.
         for i in 0..BASELINE_MIN_WINDOWS as u32 {
@@ -2125,7 +2068,7 @@ mod tests {
     #[test]
     fn unloaded_clean_windows_never_authorize_a_climb() {
         // Calm, under-target delivery: no climb credit.
-        let mut c = BitrateController::new(20_000, 0);
+        let mut c = BitrateController::new(20_000);
         c.set_ceiling(300_000);
         let start = Instant::now();
         for i in 0..12 {
@@ -2162,7 +2105,7 @@ mod tests {
             Some(27_000)
         );
         // Zero active frames never authorizes a climb, whatever delivered claims.
-        let mut c = BitrateController::new(20_000, 0);
+        let mut c = BitrateController::new(20_000);
         c.set_ceiling(300_000);
         c.set_frame_budget(60);
         for i in 0..12 {
@@ -2189,7 +2132,7 @@ mod tests {
     /// so a 35 fps source on 90 Hz is not stuck in a wall-clock dead band.
     #[test]
     fn a_frame_driven_source_climbs_at_its_own_fps() {
-        let mut c = BitrateController::new(20_000, 0);
+        let mut c = BitrateController::new(20_000);
         c.set_stream_cap(100_000);
         c.set_ceiling(60_000);
         c.set_frame_budget(90); // 11 111 µs budget → 67 expected frames / window
@@ -2212,7 +2155,7 @@ mod tests {
             Some(30_923)
         );
         // Under [`MIN_ACTIVE_FRAMES_TO_CLIMB`]: not utilized.
-        let mut d = BitrateController::new(20_000, 0);
+        let mut d = BitrateController::new(20_000);
         d.set_stream_cap(100_000);
         d.set_ceiling(60_000);
         d.set_frame_budget(90);
@@ -2240,7 +2183,7 @@ mod tests {
     fn idle_windows_train_no_baselines() {
         let start = Instant::now();
         let run = |marking: bool| -> Option<u32> {
-            let mut c = BitrateController::new(20_000, 0);
+            let mut c = BitrateController::new(20_000);
             c.set_ceiling(300_000);
             c.set_frame_budget(60);
             let mut decision = None;
@@ -2305,7 +2248,7 @@ mod tests {
     /// ×1.5 over the windowed proven mark.
     #[test]
     fn motion_onset_rearms_slow_start_bounded_by_the_windowed_proven() {
-        let mut c = BitrateController::new(20_000, 0);
+        let mut c = BitrateController::new(20_000);
         c.set_stream_cap(100_000);
         c.set_ceiling(60_000);
         c.set_frame_budget(60);
@@ -2384,7 +2327,7 @@ mod tests {
     /// Empty were credited as clean (the older-host `None` path).
     #[test]
     fn empty_windows_do_not_rearm_abr_slow_start() {
-        let mut c = BitrateController::new(20_000, 0);
+        let mut c = BitrateController::new(20_000);
         c.set_stream_cap(100_000);
         c.set_ceiling(60_000);
         c.set_frame_budget(60);
@@ -2443,7 +2386,7 @@ mod tests {
     /// Empty is neutral on the idle counter: it neither fills nor clears it.
     #[test]
     fn empty_windows_do_not_count_toward_idle_rearm() {
-        let mut c = BitrateController::new(20_000, 0);
+        let mut c = BitrateController::new(20_000);
         c.set_stream_cap(100_000);
         c.set_ceiling(60_000);
         c.set_frame_budget(60);
@@ -2534,7 +2477,7 @@ mod tests {
     /// just delivered, not the stale pre-idle mark.
     #[test]
     fn the_proven_mark_decays_with_its_buckets() {
-        let mut c = BitrateController::new(20_000, 0);
+        let mut c = BitrateController::new(20_000);
         c.set_stream_cap(100_000);
         c.set_ceiling(60_000);
         c.set_frame_budget(60);
@@ -2626,7 +2569,7 @@ mod tests {
     /// One-shot warning on first descent below the old 5 Mbps floor.
     #[test]
     fn the_low_rate_warning_fires_once_below_the_old_floor() {
-        let mut c = BitrateController::new(6_000, 0);
+        let mut c = BitrateController::new(6_000);
         let start = Instant::now();
         assert!(!c.low_rate_warned);
         // 6000 × 0.7 = 4200: under the old floor, over the new one.
@@ -2668,7 +2611,7 @@ mod tests {
     #[test]
     fn slow_start_steps_stay_within_proven_headroom() {
         // Each slow-start step is ×1.5 over delivered, not a blind 2×.
-        let mut c = BitrateController::new(20_000, 0);
+        let mut c = BitrateController::new(20_000);
         c.set_ceiling(300_000);
         let start = Instant::now();
         // Full-target delivery: proven 20 000 → cap 30 000.
@@ -2709,7 +2652,7 @@ mod tests {
     #[test]
     fn calm_period_keeps_the_validated_target() {
         // Validated target is not surrendered when the scene goes calm.
-        let mut c = BitrateController::new(20_000, 0);
+        let mut c = BitrateController::new(20_000);
         c.set_ceiling(300_000);
         let start = Instant::now();
         assert_eq!(
@@ -2751,7 +2694,7 @@ mod tests {
     #[test]
     fn deep_decode_excursion_is_severe() {
         // Decode rise >45 ms is already overload: one window.
-        let mut c = BitrateController::new(20_000, 0);
+        let mut c = BitrateController::new(20_000);
         let start = Instant::now();
         for i in 0..4 {
             assert_eq!(
@@ -2791,7 +2734,7 @@ mod tests {
     #[test]
     fn two_identical_short_acks_latch_the_host_cap() {
         // Two identical short acks latch the host cap; climbs stop poking it.
-        let mut c = BitrateController::new(400_000, 0);
+        let mut c = BitrateController::new(400_000);
         c.set_ceiling(1_400_000);
         let start = Instant::now();
         assert_eq!(run_clean(&mut c, start, 0, 1), Some(800_000));
@@ -2809,7 +2752,7 @@ mod tests {
     #[test]
     fn one_short_ack_is_a_transient_not_a_cap() {
         // One short ack (failed rebuild) must not latch.
-        let mut c = BitrateController::new(400_000, 0);
+        let mut c = BitrateController::new(400_000);
         c.set_ceiling(1_400_000);
         let start = Instant::now();
         assert_eq!(run_clean(&mut c, start, 0, 1), Some(800_000));
@@ -2823,7 +2766,7 @@ mod tests {
 
     #[test]
     fn mode_switch_clears_the_learned_cap() {
-        let mut c = BitrateController::new(400_000, 0);
+        let mut c = BitrateController::new(400_000);
         c.set_ceiling(1_400_000);
         let start = Instant::now();
         assert_eq!(run_clean(&mut c, start, 0, 1), Some(800_000));
@@ -2840,7 +2783,7 @@ mod tests {
     #[test]
     fn learned_cap_reprobes_after_a_sustained_clean_run() {
         // After a clean run parked at the cap, lift one step.
-        let mut c = BitrateController::new(400_000, 0);
+        let mut c = BitrateController::new(400_000);
         c.set_ceiling(1_400_000);
         let start = Instant::now();
         assert_eq!(run_clean(&mut c, start, 0, 1), Some(800_000));
@@ -2870,7 +2813,7 @@ mod tests {
     #[test]
     fn a_transient_refusal_does_not_pin_the_session() {
         // Transient cadence refusal at the start rate must not pin the session.
-        let mut c = BitrateController::new(20_000, 0);
+        let mut c = BitrateController::new(20_000);
         c.set_ceiling(300_000);
         let start = Instant::now();
         let mut tick = 0u32;
@@ -2920,7 +2863,7 @@ mod tests {
     #[test]
     fn a_host_retarget_above_the_ceiling_raises_it() {
         // Unsolicited host re-target above the negotiated rate must raise the ceiling.
-        let mut c = BitrateController::new(20_000, 0);
+        let mut c = BitrateController::new(20_000);
         assert_eq!(c.ceiling_kbps, 20_000);
         c.on_ack(60_000); // unsolicited, no request outstanding
         assert_eq!(c.current_kbps, 60_000);
@@ -2938,7 +2881,7 @@ mod tests {
     #[test]
     fn a_standing_cap_backs_its_reprobe_clock_off() {
         // Standing encoder ceiling: each re-learn doubles the re-probe interval.
-        let mut c = BitrateController::new(400_000, 0);
+        let mut c = BitrateController::new(400_000);
         c.set_ceiling(1_400_000);
         let start = Instant::now();
         assert_eq!(run_clean(&mut c, start, 0, 1), Some(800_000));
@@ -2981,7 +2924,7 @@ mod tests {
     #[test]
     fn host_encode_latency_rise_backs_off() {
         // Only host encode time moves: two risen windows → ×0.7.
-        let mut c = BitrateController::new(20_000, 0);
+        let mut c = BitrateController::new(20_000);
         let start = Instant::now();
         for i in 0..4 {
             assert_eq!(
@@ -3035,7 +2978,7 @@ mod tests {
     #[test]
     fn deep_encode_excursion_is_severe() {
         // ≈1.5 frame budgets over baseline: severe, one window.
-        let mut c = BitrateController::new(20_000, 0);
+        let mut c = BitrateController::new(20_000);
         let start = Instant::now();
         for i in 0..4 {
             assert_eq!(
@@ -3074,7 +3017,7 @@ mod tests {
     #[test]
     fn rate_decrease_rebases_the_encode_baseline() {
         // Our own decrease must rebase encode; old baseline would train-fire.
-        let mut c = BitrateController::new(20_000, 0);
+        let mut c = BitrateController::new(20_000);
         let start = Instant::now();
         for i in 0..4 {
             let _ = c.on_window(
@@ -3215,7 +3158,7 @@ mod tests {
     #[test]
     fn a_stood_down_encode_signal_re_arms_after_a_clean_run() {
         // Stand-down is evidence: a clean run must re-arm the encode signal.
-        let mut c = BitrateController::new(20_000, 0);
+        let mut c = BitrateController::new(20_000);
         let start = Instant::now();
         let mut tick = 0;
         disarm_encode(&mut c, start, &mut tick);
@@ -3235,7 +3178,7 @@ mod tests {
     fn a_standing_contention_backs_the_re_arm_clock_off() {
         // Re-silenced after re-arm: standing, so the clock doubles. Start
         // high enough that two ratchets stay above [`FLOOR_KBPS`].
-        let mut c = BitrateController::new(200_000, 0);
+        let mut c = BitrateController::new(200_000);
         let start = Instant::now();
         let mut tick = 0;
         disarm_encode(&mut c, start, &mut tick);
@@ -3249,7 +3192,7 @@ mod tests {
     #[test]
     fn a_bad_window_restarts_the_re_arm_run() {
         // A spoiled window says nothing about the encoder; restart the run.
-        let mut c = BitrateController::new(20_000, 0);
+        let mut c = BitrateController::new(20_000);
         let start = Instant::now();
         let mut tick = 0;
         disarm_encode(&mut c, start, &mut tick);
@@ -3271,7 +3214,7 @@ mod tests {
         // Same physical hiccup: severe at 120 Hz, ordinary at 60 Hz when
         // thresholds follow the session frame budget.
         let excursion = 23_700; // 7 ms baseline + ~one 60 Hz frame
-        let mut hz120 = BitrateController::new(20_000, 0);
+        let mut hz120 = BitrateController::new(20_000);
         hz120.set_frame_budget(120);
         let mut tick = 0;
         let start = Instant::now();
@@ -3281,7 +3224,7 @@ mod tests {
             "at 120 Hz that is ~2.8 frame budgets over baseline — severe, one window"
         );
 
-        let mut hz60 = BitrateController::new(20_000, 0);
+        let mut hz60 = BitrateController::new(20_000);
         hz60.set_frame_budget(60);
         let mut tick = 0;
         assert_eq!(
@@ -3312,7 +3255,7 @@ mod tests {
     fn unactuatable_encode_rises_disarm_the_down_driver() {
         // GPU contention holds encode time up; `on_ack` re-seeds the baseline,
         // so only the firing level notices the backoffs are no-ops.
-        let mut c = BitrateController::new(20_000, 0);
+        let mut c = BitrateController::new(20_000);
         let start = Instant::now();
         let mut tick = 0;
 
@@ -3342,7 +3285,7 @@ mod tests {
     #[test]
     fn an_encode_backoff_that_helps_keeps_the_down_driver_armed() {
         // ×0.7 that actually drops encode time must not disarm.
-        let mut c = BitrateController::new(20_000, 0);
+        let mut c = BitrateController::new(20_000);
         let start = Instant::now();
         let mut tick = 0;
         assert_eq!(encode_choke(&mut c, start, &mut tick, 40_000), Some(14_000));
@@ -3356,7 +3299,7 @@ mod tests {
     #[test]
     fn a_network_driven_backoff_breaks_the_encode_streak() {
         // Network distress with elevated encode time must not count toward disarm.
-        let mut c = BitrateController::new(20_000, 0);
+        let mut c = BitrateController::new(20_000);
         let start = Instant::now();
         let mut tick = 0;
         assert_eq!(encode_choke(&mut c, start, &mut tick, 20_000), Some(14_000));
@@ -3546,7 +3489,7 @@ mod tests {
     #[test]
     fn capture_stall_windows_never_latch_a_decode_cap() {
         // Repeated stall-shaped backoffs at the same rate must not latch a knee.
-        let mut c = BitrateController::new(240_000, 0);
+        let mut c = BitrateController::new(240_000);
         c.set_ceiling(900_000);
         let start = Instant::now();
         let mut t = 0;
@@ -3578,7 +3521,7 @@ mod tests {
     #[test]
     fn starved_window_preserves_the_knee_reference() {
         // Real knee, then stall, then re-climb choke: stall neither latches nor erases.
-        let mut c = BitrateController::new(500_000, 0);
+        let mut c = BitrateController::new(500_000);
         c.set_ceiling(900_000);
         let start = Instant::now();
         let mut t = 0;
@@ -3616,7 +3559,7 @@ mod tests {
     /// backs off.
     #[test]
     fn a_starved_window_cannot_back_off_on_host_encode_time_alone() {
-        let mut c = BitrateController::new(20_000, 0);
+        let mut c = BitrateController::new(20_000);
         c.set_ceiling(657_000);
         let start = Instant::now();
         let mut t = 0;
@@ -3689,7 +3632,7 @@ mod tests {
     #[test]
     fn decode_cap_latches_when_the_reclimb_chokes_at_the_same_knee() {
         // Choke, recover, re-climb, choke inside the band: latch.
-        let mut c = BitrateController::new(500_000, 0);
+        let mut c = BitrateController::new(500_000);
         c.set_ceiling(900_000);
         let start = Instant::now();
         let mut t = 0;
@@ -3729,7 +3672,7 @@ mod tests {
     #[test]
     fn a_single_flush_or_dissimilar_backoffs_never_latch_a_decode_cap() {
         // Lone flush at a climbed-to rate backs off but teaches nothing…
-        let mut c = BitrateController::new(500_000, 0);
+        let mut c = BitrateController::new(500_000);
         c.set_ceiling(900_000);
         let start = Instant::now();
         let mut t = 0;
@@ -3818,7 +3761,7 @@ mod tests {
     #[test]
     fn decode_cap_reprobes_after_a_sustained_clean_run() {
         // After a clean run parked at the cap, lift +12.5 %.
-        let mut c = BitrateController::new(500_000, 0);
+        let mut c = BitrateController::new(500_000);
         c.set_ceiling(900_000);
         let start = Instant::now();
         let mut t = 0;
@@ -3846,7 +3789,7 @@ mod tests {
     #[test]
     fn mode_switch_clears_the_decode_cap() {
         // Decode cap is mode-scoped; probe-measured link ceiling survives.
-        let mut c = BitrateController::new(500_000, 0);
+        let mut c = BitrateController::new(500_000);
         c.set_ceiling(900_000);
         let start = Instant::now();
         let mut t = 0;
@@ -3859,7 +3802,7 @@ mod tests {
     #[test]
     fn ordinary_decode_bad_window_pairs_latch_the_knee_field_trace() {
         // Ordinary two-window decode rise (15–45 ms) must latch, not reset the streak.
-        let mut c = BitrateController::new(20_000, 0);
+        let mut c = BitrateController::new(20_000);
         c.set_ceiling(657_788);
         let start = Instant::now();
         let mut t = 0;
@@ -3950,7 +3893,7 @@ mod tests {
     fn cascade_backoffs_neither_sample_nor_erase_the_knee_reference() {
         // Drain backoff at the already-reduced rate must neither latch nor
         // erase; the re-climb choke latches against the original sample.
-        let mut c = BitrateController::new(500_000, 0);
+        let mut c = BitrateController::new(500_000);
         c.set_ceiling(900_000);
         let start = Instant::now();
         let mut t = 0;
@@ -3995,7 +3938,7 @@ mod tests {
     #[test]
     fn keyframe_storms_on_a_clean_link_latch_the_knee() {
         // Kf-storm on a clean link (no decode latency) is decode evidence.
-        let mut c = BitrateController::new(300_000, 0);
+        let mut c = BitrateController::new(300_000);
         c.set_ceiling(900_000);
         let start = Instant::now();
         let mut t = 0;
@@ -4044,7 +3987,7 @@ mod tests {
     #[test]
     fn keyframe_storms_with_real_loss_teach_no_knee() {
         // Same storm with heavy loss is network-attributed: reset, no latch.
-        let mut c = BitrateController::new(300_000, 0);
+        let mut c = BitrateController::new(300_000);
         c.set_ceiling(900_000);
         let start = Instant::now();
         let mut t = 0;
@@ -4096,7 +4039,7 @@ mod tests {
     #[test]
     fn a_mixed_streak_without_decode_attribution_is_no_knee_evidence() {
         // Mixed streak (one OWD, one decode): not a knee sample.
-        let mut c = BitrateController::new(500_000, 0);
+        let mut c = BitrateController::new(500_000);
         c.set_ceiling(900_000);
         let start = Instant::now();
         let mut t = 0;
@@ -4146,7 +4089,7 @@ mod tests {
 
     #[test]
     fn ack_silence_disables_the_controller() {
-        let mut c = BitrateController::new(20_000, 0);
+        let mut c = BitrateController::new(20_000);
         let start = Instant::now();
         let mut sent = 0;
         let mut i = 0;
@@ -4190,7 +4133,7 @@ mod tests {
 
     /// A 120 Hz controller with room to climb and seeded baselines.
     fn seeded_120(start_kbps: u32) -> (BitrateController, Instant, u32) {
-        let mut c = BitrateController::new(start_kbps, 0);
+        let mut c = BitrateController::new(start_kbps);
         c.set_ceiling(400_000);
         c.set_frame_budget(120);
         let start = Instant::now();
@@ -4307,9 +4250,9 @@ mod tests {
     fn decode_thresholds_follow_the_frame_budget() {
         // +6 000 µs over the baseline: half a 120 Hz budget (4 166) is a rise,
         // the 15 ms no-budget default is not.
-        let mut hz120 = BitrateController::new(100_000, 0);
+        let mut hz120 = BitrateController::new(100_000);
         hz120.set_frame_budget(120);
-        let mut plain = BitrateController::new(100_000, 0);
+        let mut plain = BitrateController::new(100_000);
         let start = Instant::now();
         for i in 0..5 {
             assert_eq!(loaded(&mut hz120, ticks(start, i), 3_000), None);

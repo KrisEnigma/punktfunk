@@ -46,7 +46,6 @@ pub(super) async fn run_pump(args: WorkerArgs) {
     } = hs;
     let WorkerArgs {
         bitrate_kbps,
-        abr_max_kbps,
         frames,
         audio_tx,
         rumble_tx,
@@ -310,7 +309,6 @@ pub(super) async fn run_pump(args: WorkerArgs) {
         recovery_kf,
         pipeline_gap,
         bitrate_kbps,
-        abr_max_kbps,
         resolved_bitrate_kbps,
         negotiated_codec,
         bit_depth,

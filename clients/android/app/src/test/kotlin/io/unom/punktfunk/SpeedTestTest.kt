@@ -64,7 +64,7 @@ class SpeedTestTest {
     }
 
     @Test
-    fun applyingWritesOnlyTheBitrateLimit_andOnlyToTheChosenLayer() {
+    fun applyingWritesOnlyTheBitrate_andOnlyToTheChosenLayer() {
         val s = store
         val game = newPreset("Game").copy(
             overrides = SettingsOverlay(bitrateKbps = 50_000, width = 3840, height = 2160),
@@ -84,10 +84,7 @@ class SpeedTestTest {
         assertEquals("“Game”", where)
         assertNull("the global must not move when a preset was the target", savedGlobals)
         val after = s.byId(game.id)!!.overrides
-        // As Automatic's LIMIT: a measurement is what the link carried once, and pinning the
-        // encoder to it trades every later adaptation for a number that stops being true.
-        assertEquals(0, after.bitrateKbps)
-        assertEquals(84_000, after.abrMaxKbps)
+        assertEquals(84_000, after.bitrateKbps)
         // Nothing else in the overlay is a speed test's business.
         assertEquals(3840, after.width)
         assertEquals(2160, after.height)
@@ -106,9 +103,8 @@ class SpeedTestTest {
             42_000, SpeedTestTarget.Ask(work), toPreset = false, presets = s,
             settings = globals, onGlobalChange = { savedGlobals = it },
         )
-        assertEquals("the default bitrate limit", whereGlobal)
-        assertEquals(0, savedGlobals!!.bitrateKbps)
-        assertEquals(42_000, savedGlobals!!.abrMaxKbps)
+        assertEquals("the default bitrate", whereGlobal)
+        assertEquals(42_000, savedGlobals!!.bitrateKbps)
         assertNull(s.byId(work.id)!!.overrides.bitrateKbps)
 
         // "Set in Work" records the override instead — and now that preset stops inheriting.
@@ -119,7 +115,7 @@ class SpeedTestTest {
         )
         assertEquals("“Work”", wherePreset)
         assertNull(savedGlobals)
-        assertEquals(42_000, s.byId(work.id)!!.overrides.abrMaxKbps)
+        assertEquals(42_000, s.byId(work.id)!!.overrides.bitrateKbps)
     }
 
     @Test
