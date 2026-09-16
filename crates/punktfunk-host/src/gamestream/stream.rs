@@ -1909,18 +1909,14 @@ mod tests {
         }
         assert_eq!(got, 3 * PER_FRAME);
         assert!(running.load(Ordering::SeqCst), "no spurious client-gone");
-        let mut recycled = 0;
-        while pool_rx.try_recv().is_ok() {
-            recycled += 1;
+        // The sender records spread and recycles after its last send returns, so the final
+        // datagram can land first. Recycling follows the spread push in the same iteration.
+        for _ in 0..3 {
+            pool_rx
+                .recv_timeout(Duration::from_secs(10))
+                .expect("sender must return spent batches to the pool");
         }
-        assert!(
-            recycled >= 1,
-            "sender must return spent batches to the pool"
-        );
-        assert!(
-            spread.lock().unwrap().len() >= 3,
-            "per-frame spread recorded"
-        );
+        assert_eq!(spread.lock().unwrap().len(), 3, "per-frame spread recorded");
     }
 
     /// Framing (32 B per 1376 B payload) and FEC parity fit inside the configured wire budget.
