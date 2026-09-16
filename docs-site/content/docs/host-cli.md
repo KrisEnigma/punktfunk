@@ -239,7 +239,7 @@ punktfunk-host service start | stop | restart | status
 | Subcommand | What it does |
 |---|---|
 | `install` | Registers the auto-start `PunktfunkHost` service, adds the firewall rules, and writes a default `%ProgramData%\punktfunk\host.env` if there isn't one. Safe to re-run: it's also how you change the options below. |
-| `--gamestream=on\|off` | Sets `PUNKTFUNK_HOST_CMD` in `host.env` — `on` adds the GameStream/Moonlight planes, `off` goes back to the native-only host. A command line you edited by hand is left alone. |
+| `--gamestream=on\|off` | Sets the GameStream setting, the same toggle as **Host → Settings** in the web console. A `host.env` that still runs `serve --gamestream` is moved to `serve` with GameStream kept on, so the console can change it. A command line you edited by hand is left alone. |
 | `--allow-public-network` | Also opens the ports on networks Windows classifies **Public**. By default only Private and Domain are opened. |
 | `--mgmt-bind=IP:PORT` | Sets `PUNKTFUNK_MGMT_BIND` in `host.env` and opens the firewall for that port. The installer passes `0.0.0.0:47991` when Sunshine, Apollo or Vibeshine holds 47990. |
 | `--web-bind=ADDR` | Sets `PUNKTFUNK_UI_BIND` in `host.env` — where the web console listens (`127.0.0.1`, `0.0.0.0`, or one address). The installer passes the answer from its Configure page; absent, `host.env` keeps what it says. |
