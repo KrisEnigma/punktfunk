@@ -3550,6 +3550,7 @@ async fn library_stats_ride_on_the_entry() {
         icon: None,
         detect: None,
         on_window: None,
+        audio: None,
         meta: Default::default(),
     })
     .expect("seed one custom title");
@@ -4031,6 +4032,7 @@ async fn custom_entry_hints_round_trip_and_survive_an_update() {
             ..Default::default()
         }),
         on_window: None,
+        audio: None,
         meta: Default::default(),
     })
     .expect("seed one custom title");

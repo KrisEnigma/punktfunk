@@ -5888,6 +5888,25 @@
           }
         }
       },
+      "AudioPolicy": {
+        "type": "object",
+        "description": "Audio while this title runs: which of the sessions on its display hear it.\n`all` is the same as no policy and is stored as none.",
+        "properties": {
+          "sessions": {
+            "$ref": "#/components/schemas/AudioSessions"
+          }
+        }
+      },
+      "AudioSessions": {
+        "type": "string",
+        "description": "Which sessions hear a title's audio (`audio.sessions` on a custom entry).",
+        "enum": [
+          "all",
+          "owner",
+          "joined",
+          "launcher"
+        ]
+      },
       "AudioWiring": {
         "type": "object",
         "description": "Windows audio wiring: which endpoint carries each role. Names are the Sound-settings friendly names.",
@@ -6622,6 +6641,17 @@
               "art": {
                 "$ref": "#/components/schemas/Artwork"
               },
+              "audio": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/AudioPolicy",
+                    "description": "Which sessions hear this title. Absent = every session."
+                  }
+                ]
+              },
               "detect": {
                 "$ref": "#/components/schemas/DetectHint",
                 "description": "How to find this title after a command that hands off and exits. Without it the\nhost tracks only the child it spawned."
@@ -6704,6 +6734,17 @@
             "properties": {
               "art": {
                 "$ref": "#/components/schemas/Artwork"
+              },
+              "audio": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/AudioPolicy",
+                    "description": "Absent on an update keeps the stored policy; `{\"sessions\":\"all\"}` clears it."
+                  }
+                ]
               },
               "detect": {
                 "oneOf": [
@@ -9716,6 +9757,16 @@
             "properties": {
               "art": {
                 "$ref": "#/components/schemas/Artwork"
+              },
+              "audio": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/AudioPolicy"
+                  }
+                ]
               },
               "detect": {
                 "$ref": "#/components/schemas/DetectHint",
