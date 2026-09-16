@@ -184,17 +184,24 @@ use encode::Codec;
 use spike::{Options, Source};
 use std::path::PathBuf;
 
+/// Console filter when `RUST_LOG` is unset. `zbus::proxy` warns once per portal
+/// Request/Session proxy whose server answers no `org.freedesktop.DBus.Properties`
+/// — four per stream under xdg-desktop-portal-hyprland/-wlr, and nothing in the
+/// portal flow reads a property off those two transient objects. It is the module's
+/// only `warn!`, so `error` there costs nothing else. The ring keeps them regardless.
+const DEFAULT_LOG_FILTER: &str = "info,zbus::proxy=error";
+
 fn main() {
     // Before any `ureq` agent (cover-art, webhooks, catalog, updates).
     punktfunk_core::tls::install_default_provider();
-    let filter =
-        tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| DEFAULT_LOG_FILTER.into());
     // SCM `service run` has no console; log to a file, not stderr.
     if windows::entry::service_run_requested() {
         windows::entry::init_file_logging(filter);
     } else {
         // stderr so stdout stays machine-readable (`openapi > spec.json`). The ring tees DEBUG+
-        // ungated by RUST_LOG so the console Logs tab works without a restart.
+        // past this filter, so the Logs tab keeps every line stderr drops.
         use tracing_subscriber::layer::SubscriberExt;
         use tracing_subscriber::Layer;
         log_capture::install_global(
