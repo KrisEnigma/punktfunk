@@ -48,7 +48,7 @@ fn plugin_sandbox() -> HostCheck {
         return HostCheck::problem(
             id,
             CheckStatus::Warn,
-            Severity::Important,
+            Severity::Critical,
             "Plugin sandboxing is turned off",
             "Every installed plugin runs with your account's access: your files, your session, \
              and the host's own credentials."
