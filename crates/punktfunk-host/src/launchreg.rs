@@ -272,6 +272,17 @@ pub fn ending(procs: &LiveProcs) {
     }
 }
 
+/// The launch died on the spot ([`crate::gamelease`]): un-launch the record so
+/// the next claim starts the title instead of adopting a corpse. Not a removal
+/// — an open [`Claim`] still has to find the record its [`Drop`] decrements.
+pub fn unlaunched(procs: &LiveProcs) {
+    let mut recs = reg().records.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(r) = recs.iter_mut().find(|r| Arc::ptr_eq(&r.procs, procs)) {
+        r.launched = false;
+        r.ending = false;
+    }
+}
+
 /// The ladder is through: drop the record so the next claim starts the
 /// title. Same identity as [`ending`], so a record a newer session took
 /// over meanwhile stays that session's.
@@ -783,5 +794,33 @@ mod tests {
         let next = claim(fp, app, false, Some(900.0));
         assert!(next.must_spawn());
         next.abandon();
+    }
+
+    /// A launch that died on the spot must not be adopted by the retry that
+    /// follows it seconds later — that is the whole in-flight window, and the
+    /// reason the player used to need a host restart.
+    #[test]
+    fn a_launch_that_died_on_the_spot_is_started_again_not_adopted() {
+        let (fp, app) = (Some("fp-early"), Some("custom:early"));
+        let first = claim(fp, app, false, Some(100.0));
+        assert!(first.must_spawn());
+        first.launched();
+        let procs = first.procs().expect("recorded");
+
+        // Control: inside the window this launch still covers.
+        let adopting = claim(fp, app, false, Some(200.0));
+        assert!(!adopting.must_spawn());
+        drop(adopting);
+
+        unlaunched(&procs);
+        let retry = claim(fp, app, false, Some(900.0));
+        assert!(
+            retry.must_spawn(),
+            "the next attempt must start the title, not adopt the launch that died"
+        );
+        assert_eq!(retry.stamp(), Some(900.0));
+        // The record survived, so the first session's hold still has one to release.
+        retry.abandon();
+        drop(first);
     }
 }
