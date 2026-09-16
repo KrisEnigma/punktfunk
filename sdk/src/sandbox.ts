@@ -60,47 +60,66 @@ export interface SandboxPaths {
  * paths its manifest declares as `writes`, and `/tmp` (VirtualHere's client IPC is a FIFO pair
  * there, which is why the unit keeps the real `/tmp` rather than a private one).
  */
+/**
+ * The namespaces and the minimal root every sandbox gets, shared with {@link sandboxProbe} so a
+ * box is never called capable on flags the real sandbox does not use — and so a flag added here
+ * is a flag the probe actually exercises.
+ *
+ * The `/lib` + `/lib64` symlinks are not cosmetic: with only `/usr` bound, the dynamic loader is
+ * absent and every exec fails as ENOENT, which reads exactly like a refused namespace.
+ */
+const BASE_ARGV: readonly string[] = [
+	"--unshare-all",
+	// `--unshare-all` only asks for a user namespace (`--unshare-user-try`), and
+	// `--disable-userns` refuses to run without a real one. Demand it explicitly.
+	"--unshare-user",
+	// A plugin cannot re-enter this and build itself a wider one.
+	"--disable-userns",
+	"--die-with-parent",
+	"--new-session",
+	"--clearenv",
+	// `--unshare-pid` is what makes the rest hold: a fresh /proc has no host process in it.
+	"--proc",
+	"/proc",
+	"--dev",
+	"/dev",
+	"--tmpfs",
+	"/tmp",
+	"--ro-bind",
+	"/usr",
+	"/usr",
+	"--ro-bind-try",
+	"/etc/ssl",
+	"/etc/ssl",
+	"--ro-bind-try",
+	"/etc/resolv.conf",
+	"/etc/resolv.conf",
+	"--symlink",
+	"usr/lib",
+	"/lib",
+	"--symlink",
+	"usr/lib64",
+	"/lib64",
+	"--symlink",
+	"usr/bin",
+	"/bin",
+	"--symlink",
+	"usr/sbin",
+	"/sbin",
+];
+
 export const bwrapArgv = (
 	manifest: PluginManifest,
 	paths: SandboxPaths,
 	grants: readonly string[] = [],
 ): string[] => {
-	const argv = [
-		"--unshare-all",
-		// A plugin cannot re-enter this and build itself a wider one.
-		"--disable-userns",
-		"--die-with-parent",
-		"--new-session",
-		"--clearenv",
-		// `--unshare-pid` is what makes the rest hold: a fresh /proc has no host process in it.
-		"--proc",
-		"/proc",
-		"--dev",
-		"/dev",
-		"--tmpfs",
-		"/tmp",
-		"--ro-bind",
-		"/usr",
-		"/usr",
-		"--ro-bind-try",
-		"/etc/ssl",
-		"/etc/ssl",
-		"--ro-bind-try",
-		"/etc/resolv.conf",
-		"/etc/resolv.conf",
-		"--symlink",
-		"usr/lib",
-		"/lib",
-		"--symlink",
-		"usr/lib64",
-		"/lib64",
-		"--symlink",
-		"usr/bin",
-		"/bin",
-		"--symlink",
-		"usr/sbin",
-		"/sbin",
-	];
+	const argv = [...BASE_ARGV];
+	// `--clearenv` empties the environment the child sees, so the spawn env never reaches it:
+	// every value has to be re-stated here. Without this a plugin has no HOME, cannot resolve
+	// its state dir, and cannot find the socket it reaches the host on.
+	for (const [k, v] of Object.entries(sandboxEnv(paths.home))) {
+		argv.push("--setenv", k, v);
+	}
 	if (manifest.network) argv.push("--share-net");
 	// Its own code, its own state, its own token, and the way to the host.
 	argv.push("--ro-bind", paths.pluginsDir, paths.pluginsDir);
@@ -123,8 +142,14 @@ export const bwrapArgv = (
 };
 
 /** The environment inside: no inherited values, and nothing that is not needed there. */
-export const sandboxEnv = (extra: Record<string, string> = {}): Record<string, string> => ({
-	HOME: "/run/punktfunk/plugin-state",
+export const sandboxEnv = (
+	home: string,
+	extra: Record<string, string> = {},
+): Record<string, string> => ({
+	// The REAL home, which is where a `~/...` read is bound. A plugin finds its declared paths
+	// with os.homedir(); pointing this at the state dir sends every scanner somewhere empty.
+	// Writable state is PUNKTFUNK_CONFIG_DIR's job, not this one's.
+	HOME: home,
 	PATH: "/usr/bin:/bin:/usr/local/bin",
 	PUNKTFUNK_CONFIG_DIR: "/run/punktfunk",
 	// Reached through the supervisor's socket, so plain HTTP with no credential of its own.
@@ -154,7 +179,11 @@ export const sandboxProbe = (
 	if (platform !== "linux") {
 		return { ok: false, reason: "sandboxing is Linux-only here" };
 	}
-	const probe = run("bwrap", ["--unshare-all", "--ro-bind", "/usr", "/usr", "/bin/true"]);
+	// The namespace flags `bwrapArgv` actually uses. Probing a weaker set reports a box as
+	// sandbox-capable that then refuses every plugin.
+	// Exactly what a real sandbox asks for, plus a trivial exec. Probing a weaker set reports a
+	// box as capable that then refuses every plugin.
+	const probe = run("bwrap", [...BASE_ARGV, "/bin/true"]);
 	if (probe.status === 0) return { ok: true };
 	if (probe.status === null) {
 		return {

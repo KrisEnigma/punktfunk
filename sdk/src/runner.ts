@@ -496,7 +496,7 @@ const runSandboxed = (
 			unit.name,
 		];
 		const child = spawn("bwrap", argv, {
-			env: sandboxEnv(),
+			env: sandboxEnv(os.homedir()),
 			stdio: ["ignore", "inherit", "inherit"],
 		});
 		child.on("error", (e) => {
