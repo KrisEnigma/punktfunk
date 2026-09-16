@@ -295,7 +295,6 @@ mod tests {
             preset_id: None,
             pinned_presets: vec![],
             game_presets: Default::default(),
-            abr_marks: Default::default(),
             id: None,
             prev_addrs: vec![],
         }
