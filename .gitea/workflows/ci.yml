@@ -212,11 +212,13 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: target
-          # The prefix carries the version: bump it, never a suffix, to drop a bad cache, because
-          # restore-keys falls back to the old prefix. `-debug-` keeps this apart from deb.yml's
-          # release tree; an exact key is first-saver-wins, so sharing one starves the slower job.
+          # `-debug-` keeps this apart from deb.yml's release tree: a job that hits a shared key
+          # exactly never saves its own. A corrupt entry needs no prefix bump: the next step drops
+          # its debris and a push replaces it.
           key: cargo-target-debug-v4-${{ env.rustc }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: cargo-target-debug-v4-${{ env.rustc }}-
+      - name: Drop a partial target restore
+        run: sh scripts/ci/drop-partial-target.sh "${{ steps.target.outputs.cache-hit }}" "cargo-target-debug-v4-${{ env.rustc }}-${{ hashFiles('Cargo.lock') }}"
 
       - name: Format
         run: cargo fmt --all --check
@@ -247,6 +249,7 @@ jobs:
             echo "native-only build still depends on rsa"; exit 1; fi
 
       - name: Build
+        id: build
         run: cargo build --workspace --locked
 
       - name: Test (unit + loopback + proptest + C ABI harness)
@@ -365,8 +368,10 @@ jobs:
             /usr/local/cargo/registry
             /usr/local/cargo/git
           key: cargo-home-ci-${{ hashFiles('Cargo.lock') }}
+      # Saves once Build passed, even when a later step failed, so a corrupt or missing entry is
+      # replaced by the first push that compiles. A cancelled job saves nothing.
       - name: Save target
-        if: github.event_name == 'push' && steps.target.outputs.cache-hit != 'true'
+        if: ${{ !cancelled() && github.event_name == 'push' && steps.build.outcome == 'success' && steps.target.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: target
@@ -423,9 +428,12 @@ jobs:
         with:
           path: target
           # Own prefix: aarch64 artifacts never share the amd64 target cache. `-debug-` keeps it
-          # apart from deb.yml's arm64 release tree, since an exact key is first-saver-wins.
+          # apart from deb.yml's arm64 release tree: a job that hits a shared key exactly never
+          # saves its own.
           key: cargo-target-arm64-debug-v1-${{ env.rustc }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: cargo-target-arm64-debug-v1-${{ env.rustc }}-
+      - name: Drop a partial target restore
+        run: sh scripts/ci/drop-partial-target.sh "${{ steps.target.outputs.cache-hit }}" "cargo-target-arm64-debug-v1-${{ env.rustc }}-${{ hashFiles('Cargo.lock') }}"
 
       - name: Clippy for aarch64 (deny warnings)
         run: |

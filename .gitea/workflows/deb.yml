@@ -120,6 +120,7 @@ on:
       - 'scripts/alsa-ucm2/**'
       - 'scripts/ci/assert-cap-matrix.sh'
       - 'scripts/ci/deb-install-smoke.sh'
+      - 'scripts/ci/drop-partial-target.sh'
       - 'scripts/ci/ensure-sccache.sh'
       - 'scripts/ci/gitea-release.sh'
       - 'scripts/ci/pf-version.sh'
@@ -216,23 +217,17 @@ jobs:
             /usr/local/cargo/git
           key: cargo-home-${{ hashFiles('Cargo.lock') }}
           restore-keys: cargo-home-
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - id: target
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: target
-          # -v3-: bypass a target cache poisoned by a disk-full build (see ci.yml).
-          #
-          # `-release-`, and NOT ci.yml's key. This step used to read
-          # `cargo-target-v3-<rustc>-<lock>` — byte-identical to ci.yml's — under a comment saying
-          # the release build "reuses its clean artifacts". It never did, and could not: ci.yml
-          # builds DEBUG, this job builds RELEASE, and actions/cache is first-saver-wins on an
-          # exact key. ci.yml's `rust` job finishes in ~6 min against this job's ~7-8, so ci.yml
-          # always won the save, this job always restored a target/ with an empty target/release,
-          # and — the expensive half — its own release artifacts were then never persisted,
-          # because the key it would have saved under was already taken. Every canary .deb has
-          # therefore been a from-scratch release build (sccache-assisted, but every link and
-          # every build script re-run) for as long as both keys have existed.
+          # `-release-`, never ci.yml's debug key: a job that hits a shared key exactly skips its
+          # save, so this release tree would never be stored.
           key: cargo-target-release-v3-${{ env.rustc }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: cargo-target-release-v3-${{ env.rustc }}-
+      # The post-step save still runs after a failed restore, once the whole job passes.
+      - name: Drop a partial target restore
+        run: sh scripts/ci/drop-partial-target.sh "${{ steps.target.outputs.cache-hit }}" "cargo-target-release-v3-${{ env.rustc }}-${{ hashFiles('Cargo.lock') }}"
 
       - name: Build release clients
         env:
@@ -441,7 +436,8 @@ jobs:
             /usr/local/cargo/git
           key: cargo-home-${{ hashFiles('Cargo.lock') }}
           restore-keys: cargo-home-
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - id: target
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: target
           # Own key: this target dir is built against 24.04's glibc/toolchain and must NOT share
@@ -451,6 +447,8 @@ jobs:
           # file reads consistently and nobody "unifies" it back into a shared key later.
           key: cargo-target-noble-release-v1-${{ env.rustc }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: cargo-target-noble-release-v1-${{ env.rustc }}-
+      - name: Drop a partial target restore
+        run: sh scripts/ci/drop-partial-target.sh "${{ steps.target.outputs.cache-hit }}" "cargo-target-noble-release-v1-${{ env.rustc }}-${{ hashFiles('Cargo.lock') }}"
 
       - name: Build release host
         env:
@@ -686,18 +684,16 @@ jobs:
             /usr/local/cargo/git
           key: cargo-home-${{ hashFiles('Cargo.lock') }}
           restore-keys: cargo-home-
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - id: target
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: target
-          # Its OWN key — these are aarch64 artifacts under target/aarch64-unknown-linux-gnu/
-          # and must never share the amd64 jobs' target cache.
-          #
-          # `-release-`: this key was previously identical to ci.yml's `rust-arm64` key, which
-          # builds DEBUG (clippy) and finishes in ~1.5 min against this job's ~5. Exactly the
-          # amd64 collision described on the release key above — ci.yml won every save, this job
-          # restored a tree with no release artifacts and could never persist its own.
+          # Its OWN key: aarch64 artifacts never share the amd64 target cache, and `-release-`
+          # keeps them apart from ci.yml's `rust-arm64` debug tree for the reason above.
           key: cargo-target-arm64-release-v1-${{ env.rustc }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: cargo-target-arm64-release-v1-${{ env.rustc }}-
+      - name: Drop a partial target restore
+        run: sh scripts/ci/drop-partial-target.sh "${{ steps.target.outputs.cache-hit }}" "cargo-target-arm64-release-v1-${{ env.rustc }}-${{ hashFiles('Cargo.lock') }}"
 
       - name: Build the arm64 client .deb
         env:
