@@ -20,7 +20,9 @@
 //! threads that outlive it.
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{
+    AtomicBool, AtomicI64, AtomicU16, AtomicU32, AtomicU64, AtomicU8, Ordering,
+};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::encode::{ChromaFormat, Codec};
@@ -114,7 +116,25 @@ pub struct SessionControls {
     /// Latched per session: the injector's slot is one per process, and a second
     /// session's bring-up would otherwise re-point this one at its head.
     pub head: Arc<Mutex<Option<StreamedHead>>>,
+    /// OS pad slots this session holds, one bit each — the player numbers a local
+    /// co-op game reads. Published by the input thread.
+    pub pad_slots: Arc<AtomicU16>,
+    /// Full cert fingerprint, when this session has one. The stable device key —
+    /// `client` is only its 12-hex prefix, and an address is not an identity.
+    pub fingerprint: Option<String>,
+    /// This device's key in [`crate::inject::pad_pool`]. A reservation and a
+    /// reconnect are keyed by it, so both follow the pairing, never the address.
+    pub pad_owner: u64,
+    /// Player slot the operator picked, 0-based; [`NO_PAD_SLOT`] = lazy claim.
+    pub preferred_pad_slot: Arc<AtomicU8>,
+    /// Live pad tap this session's input thread publishes to. Idle until a console
+    /// opens `GET /session/{id}/pads` ([`crate::pad_feed`]).
+    pub pads: Arc<crate::pad_feed::PadFeed>,
 }
+
+/// `preferred_pad_slot` for a session the operator has not placed. Not a valid
+/// slot: `MAX_PADS` is 16.
+pub const NO_PAD_SLOT: u8 = u8::MAX;
 
 /// The compositor head one session streams — what its window list names.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -136,7 +156,46 @@ impl SessionControls {
             access_tx: None,
             audio_tx: None,
             head: Arc::new(Mutex::new(None)),
+            pad_slots: Arc::new(AtomicU16::new(0)),
+            fingerprint: None,
+            pad_owner: crate::inject::pad_pool::owner_key(None),
+            preferred_pad_slot: Arc::new(AtomicU8::new(NO_PAD_SLOT)),
+            pads: Arc::new(crate::pad_feed::PadFeed::new()),
         }
+    }
+
+    /// The player slot the operator picked for this session, 0-based.
+    pub fn player(&self) -> Option<u8> {
+        match self.preferred_pad_slot.load(Ordering::Relaxed) {
+            NO_PAD_SLOT => None,
+            slot => Some(slot),
+        }
+    }
+
+    /// Place this session's pads on `slot`, or hand it back to the lazy claim with
+    /// `None`. The pool reservation is a hint the next pad to plug reads, so a pad
+    /// already built keeps the slot it was created under until it re-plugs.
+    ///
+    /// `false` = another live session asked for that slot first and keeps it.
+    pub fn set_player(&self, slot: Option<u8>) -> bool {
+        let Some(slot) = slot else {
+            self.preferred_pad_slot
+                .store(NO_PAD_SLOT, Ordering::Relaxed);
+            return true;
+        };
+        if !crate::inject::pad_pool::global().reserve(slot, self.pad_owner) {
+            return false;
+        }
+        self.preferred_pad_slot.store(slot, Ordering::Relaxed);
+        true
+    }
+
+    /// OS pad slots this session holds right now, lowest first.
+    pub fn pads(&self) -> Vec<u8> {
+        let mask = self.pad_slots.load(Ordering::Relaxed);
+        (0..punktfunk_core::input::MAX_PADS as u8)
+            .filter(|n| mask & (1 << n) != 0)
+            .collect()
     }
 
     /// Latch the head this session streams, once the capture pipeline names it.
@@ -211,6 +270,11 @@ pub struct SessionCounters {
     bitrate_max_kbps: AtomicU32,
     bitrate_sum_kbps: AtomicU64,
     bitrate_notes: AtomicU32,
+    /// Last rate noted, so a rebuild at the same number is not a move.
+    bitrate_last_kbps: AtomicU32,
+    /// Per-minute link health ([`crate::link_health`]). Drained by the control task, not by
+    /// the summary: these are window deltas, the rest of this block is session totals.
+    pub link: crate::link_health::LinkCounters,
 }
 
 impl SessionCounters {
@@ -252,6 +316,9 @@ impl SessionCounters {
         if kbps == 0 {
             return;
         }
+        if self.bitrate_last_kbps.swap(kbps, Ordering::Relaxed) != kbps {
+            self.link.note_retarget();
+        }
         self.bitrate_min_kbps
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |m| {
                 Some(if m == 0 { kbps } else { m.min(kbps) })
@@ -261,6 +328,86 @@ impl SessionCounters {
         self.bitrate_sum_kbps
             .fetch_add(u64::from(kbps), Ordering::Relaxed);
         self.bitrate_notes.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// Which sessions hear a title's audio (`audio.sessions` on a custom entry).
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+    utoipa::ToSchema,
+)]
+#[serde(rename_all = "lowercase")]
+pub enum AudioSessions {
+    #[default]
+    All,
+    /// The session that owns the display; joiners are silent.
+    Owner,
+    /// The sessions that joined the display; the owner is silent.
+    Joined,
+    /// Only the session that launched the title.
+    Launcher,
+}
+
+/// Whether `policy` silences a session. `launcher` is the launching session's
+/// client label, matched the way [`stop_by_fingerprint`] matches.
+fn policy_mutes(policy: AudioSessions, launcher: &str, client: &str, join: bool) -> bool {
+    match policy {
+        AudioSessions::All => false,
+        AudioSessions::Owner => join,
+        AudioSessions::Joined => !join,
+        AudioSessions::Launcher => client != launcher,
+    }
+}
+
+struct AudioPolicy {
+    sessions: AudioSessions,
+    launcher: String,
+    /// Sessions this policy muted, so its end unmutes exactly those.
+    muted: Vec<u64>,
+}
+
+/// The live title policy, applied to sessions that register while it stands.
+/// One at a time: a second lease replaces it, and the first to end lifts both.
+static AUDIO_POLICY: Mutex<Option<AudioPolicy>> = Mutex::new(None);
+
+/// Apply a title's `audio.sessions` through the same mute the operator uses, so
+/// the client is told and the operator can unmute live. Drop unmutes what it muted.
+pub fn apply_audio_policy(sessions: AudioSessions, launcher: &str) -> AudioPolicyGuard {
+    let mut muted = Vec::new();
+    for s in registry().lock().unwrap().iter() {
+        if policy_mutes(sessions, launcher, &s.client, s.join) {
+            s.controls.set_muted(true);
+            muted.push(s.id);
+        }
+    }
+    *AUDIO_POLICY.lock().unwrap() = Some(AudioPolicy {
+        sessions,
+        launcher: launcher.to_owned(),
+        muted,
+    });
+    tracing::info!(policy = ?sessions, launcher, "title audio policy applied");
+    AudioPolicyGuard(())
+}
+
+pub struct AudioPolicyGuard(());
+
+impl Drop for AudioPolicyGuard {
+    fn drop(&mut self) {
+        let Some(policy) = AUDIO_POLICY.lock().unwrap().take() else {
+            return;
+        };
+        for s in registry().lock().unwrap().iter() {
+            if policy.muted.contains(&s.id) {
+                s.controls.set_muted(false);
+            }
+        }
     }
 }
 
@@ -291,6 +438,13 @@ pub struct SessionSnapshot {
     pub time_to_first_frame_ms: u32,
     /// Last mid-stream resize total, ms. 0 = no resize this session.
     pub last_resize_ms: u32,
+    /// OS pad slots this session holds, lowest first. Slot `n` is player `n + 1`.
+    pub pads: Vec<u8>,
+    /// Player slot the operator picked, 0-based. `None` = lazy claim.
+    pub preferred_pad_slot: Option<u8>,
+    /// Last closed link-health minute ([`crate::link_health`]). `None` in a session's first
+    /// minute, before one has closed.
+    pub link: Option<crate::link_health::LinkMinute>,
 }
 
 fn registry() -> &'static Mutex<Vec<LiveSession>> {
@@ -454,6 +608,13 @@ pub fn register(reg: Registration) -> LiveSessionGuard {
         counters,
     } = reg;
     let id = next_id();
+    // A standing title policy reaches a session that arrives under it.
+    if let Some(p) = AUDIO_POLICY.lock().unwrap().as_mut() {
+        if policy_mutes(p.sessions, &p.launcher, &client, join) {
+            controls.set_muted(true);
+            p.muted.push(id);
+        }
+    }
     let session = LiveSession {
         id,
         mode,
@@ -484,6 +645,8 @@ pub fn register(reg: Registration) -> LiveSessionGuard {
     session
         .counters
         .note_bitrate(session.bitrate_kbps.load(Ordering::Relaxed));
+    // The link-health lines carry this id, so a line ties to a `/status` row.
+    session.counters.link.set_session_id(id);
     crate::events::emit(crate::events::EventKind::SessionStarted {
         session: session_ref(&session),
     });
@@ -603,6 +766,9 @@ pub fn snapshot() -> Vec<SessionSnapshot> {
                     .clone(),
                 time_to_first_frame_ms: s.ttff_ms.load(Ordering::Relaxed),
                 last_resize_ms: s.last_resize_ms.load(Ordering::Relaxed),
+                pads: s.controls.pads(),
+                preferred_pad_slot: s.controls.player(),
+                link: s.counters.link.last(),
             }
         })
         .collect()
@@ -707,6 +873,30 @@ pub fn games() -> Vec<GameSnapshot> {
                 state: "grace",
                 grace_remaining_s: Some(remaining),
             }),
+    );
+    out
+}
+
+/// Leases on games that are still on a streaming session, filtered by `app_id`
+/// (`None` = all of them). What `POST /game/end` reaches when a title is up
+/// rather than waiting out a reconnect window.
+pub fn live_games(app_id: Option<&str>) -> Vec<Arc<crate::gamelease::LeaseShared>> {
+    let mine =
+        |g: &Arc<crate::gamelease::LeaseShared>| app_id.is_none() || g.game.id.as_deref() == app_id;
+    let mut out: Vec<Arc<crate::gamelease::LeaseShared>> = registry()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .filter_map(|s| s.game.clone())
+        .filter(&mine)
+        .collect();
+    out.extend(
+        gs_game()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .filter(|g| mine(g))
+            .cloned(),
     );
     out
 }
@@ -858,6 +1048,77 @@ mod tests {
         (guard, stop, quit)
     }
 
+    fn fake_joiner(client: &str, join: bool) -> (LiveSessionGuard, SessionControls) {
+        let controls = SessionControls::open();
+        let guard = register(Registration {
+            mode: Arc::new(AtomicU64::new(0)),
+            bitrate_kbps: Arc::new(AtomicU32::new(20_000)),
+            codec: Codec::H265,
+            stop: Arc::new(AtomicBool::new(false)),
+            quit: Arc::new(AtomicBool::new(false)),
+            force_idr: Arc::new(AtomicBool::new(false)),
+            client: client.into(),
+            client_name: None,
+            hdr: false,
+            ttff_ms: Arc::new(AtomicU32::new(0)),
+            last_resize_ms: Arc::new(AtomicU32::new(0)),
+            game: None,
+            capture_health: Arc::new(Mutex::new(None)),
+            join,
+            controls: controls.clone(),
+            bit_depth: 8,
+            chroma: ChromaFormat::Yuv420,
+            end_reason: Arc::new(AtomicU8::new(0)),
+            counters: Arc::new(SessionCounters::default()),
+        });
+        (guard, controls)
+    }
+
+    #[test]
+    fn policy_picks_the_sessions_it_names() {
+        use AudioSessions::*;
+        // (policy, client, join) → muted
+        for (policy, client, join, want) in [
+            (All, "aaaaaaaaaaaa", true, false),
+            (Owner, "aaaaaaaaaaaa", false, false),
+            (Owner, "bbbbbbbbbbbb", true, true),
+            (Joined, "aaaaaaaaaaaa", false, true),
+            (Joined, "bbbbbbbbbbbb", true, false),
+            (Launcher, "aaaaaaaaaaaa", false, false),
+            (Launcher, "bbbbbbbbbbbb", true, true),
+        ] {
+            assert_eq!(
+                policy_mutes(policy, "aaaaaaaaaaaa", client, join),
+                want,
+                "{policy:?} {client} join={join}"
+            );
+        }
+    }
+
+    /// A policy mutes by role, reaches a joiner that registers later, and its end
+    /// unmutes only what it muted: an operator's own mute stays.
+    #[test]
+    fn policy_mute_reaches_late_joiners_and_lifts_at_the_end() {
+        let (_owner, owner) = fake_joiner("cccccccccccc", false);
+        let guard = apply_audio_policy(AudioSessions::Owner, "cccccccccccc");
+        let (_joiner, joiner) = fake_joiner("dddddddddddd", true);
+        assert!(!owner.muted.load(Ordering::SeqCst));
+        assert!(
+            joiner.muted.load(Ordering::SeqCst),
+            "a joiner registered under the policy is muted"
+        );
+        owner.set_muted(true);
+        drop(guard);
+        assert!(
+            !joiner.muted.load(Ordering::SeqCst),
+            "the lease ending lifts the policy mute"
+        );
+        assert!(
+            owner.muted.load(Ordering::SeqCst),
+            "the operator's mute outlives the policy"
+        );
+    }
+
     /// Unpair revokes a live session by the 12-hex fingerprint prefix
     /// (`quit` + `stop`). Other clients and IP-labelled sessions stay up.
     #[test]
@@ -871,6 +1132,22 @@ mod tests {
         assert!(stop1.load(Ordering::SeqCst) && quit1.load(Ordering::SeqCst));
         assert!(!stop2.load(Ordering::SeqCst));
         assert!(!stop3.load(Ordering::SeqCst));
+    }
+
+    /// Each registered session carries its own pad feed, so a Controllers stream
+    /// opened on one id can never draw another session's input.
+    #[tokio::test]
+    async fn each_session_holds_its_own_pad_feed() {
+        let (a, _s, _q) = fake_session("aaaaaaaaaaaa");
+        let (b, _s2, _q2) = fake_session("bbbbbbbbbbbb");
+        let feed_a = controls(a.id).expect("A is live").pads;
+        let feed_b = controls(b.id).expect("B is live").pads;
+        assert!(!Arc::ptr_eq(&feed_a, &feed_b));
+
+        let mut rx = feed_a.subscribe();
+        // B has no subscriber, so its publish is a no-op; A's must not receive it either way.
+        feed_b.publish(|| unreachable!("an unwatched feed must not build a frame"));
+        assert!(rx.try_recv().is_err(), "A's stream holds only A's pads");
     }
 
     /// A Moonlight game has no live-session entry, so it is only on `/status`
@@ -905,6 +1182,7 @@ mod tests {
                 workspace: None,
                 #[cfg(target_os = "linux")]
                 window_stage: None,
+                outcome: None,
             },
             Box::new(|| {}),
         );
@@ -923,8 +1201,16 @@ mod tests {
             // Not `grace` while the stream is up: the console keys
             // countdown / End now off that state.
             assert_ne!(row.state, "grace");
+            // The same row is what `POST /game/end` reaches with `streaming`,
+            // and only ever under its own id.
+            assert_eq!(live_games(Some(id)).len(), 1);
+            assert!(live_games(Some("steam:9999")).is_empty());
         }
         assert!(mine().is_none(), "the row goes with the stream");
+        assert!(
+            live_games(Some(id)).is_empty(),
+            "a game with no stream left is the grace registry's, not this list's"
+        );
     }
 
     fn one_summary(id: u64) -> SessionSummary {

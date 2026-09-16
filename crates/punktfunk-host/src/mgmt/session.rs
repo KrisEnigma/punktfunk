@@ -8,11 +8,15 @@
 //! `/{id}` one takes an id from `GET /status` and touches that session only. An id
 //! nothing is streaming is a 404, never another session's teardown.
 //!
+//! `GET /{id}/pads` is the read-only live view of what the host injects
+//! ([`crate::pad_feed`]).
 //! `GET /session/last` is the other side of the same registry: what a session came
 //! to, once nothing is streaming any more.
 
 use super::shared::*;
+use crate::pad_feed::PadFrame;
 use crate::vdisplay::Toplevel;
+use axum::response::sse::{Event, KeepAlive, Sse};
 use std::sync::atomic::Ordering;
 
 /// Stop the session
@@ -210,6 +214,92 @@ pub(crate) struct SessionAccess {
     level: String,
 }
 
+/// Place one session's player slot
+///
+/// Which controller this session is: slot 0 is Player 1, and a local co-op game
+/// reads that order. Without a pick the slot is whichever comes free, so the pad
+/// that moves first takes Player 1 and the order changes on every reconnect.
+///
+/// The pick is a reservation, not a seizure. A pad already built keeps the slot it
+/// was created under until it re-plugs; a slot another live session asked for first
+/// stays theirs and this call answers `reserved: false`. It is remembered against
+/// the device's pairing, so the same device reconnects as the same player — an
+/// anonymous session's pick lasts only as long as the session.
+#[utoipa::path(
+    put,
+    path = "/session/{id}/player",
+    tag = "session",
+    operation_id = "setSessionPlayer",
+    params(("id" = u64, Path, description = "Session id from `GET /status`")),
+    request_body = SessionPlayerRequest,
+    responses(
+        (status = OK, description = "The pick, and whether it took the slot", body = SessionPlayer),
+        (status = BAD_REQUEST, description = "Slot past the host's pad count", body = ApiError),
+        (status = NOT_FOUND, description = "No live session with that id", body = ApiError),
+        (status = UNAUTHORIZED, description = "Missing or invalid bearer token", body = ApiError),
+    )
+)]
+pub(crate) async fn set_session_player(
+    State(st): State<Arc<MgmtState>>,
+    Path(id): Path<u64>,
+    ApiJson(req): ApiJson<SessionPlayerRequest>,
+) -> Response {
+    if req
+        .slot
+        .is_some_and(|s| s as usize >= punktfunk_core::input::MAX_PADS)
+    {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "That player number is higher than this host has controllers for.",
+        );
+    }
+    let Some(controls) = crate::session_status::controls(id) else {
+        return no_such_session();
+    };
+    let reserved = controls.set_player(req.slot);
+    // Remember it against the pairing, so the next connect is the same player. A
+    // session with no record (anonymous) keeps the pick for this session only.
+    if let (Some(np), Some(fp)) = (st.native.as_ref(), controls.fingerprint.as_deref()) {
+        if let Err(e) = np.set_pad_slot(fp, req.slot) {
+            tracing::warn!(session = id, error = %format!("{e:#}"), "store player pick");
+        }
+    }
+    tracing::info!(
+        session = id,
+        slot = ?req.slot,
+        reserved,
+        "management API: session player slot"
+    );
+    Json(SessionPlayer {
+        slot: req.slot,
+        reserved,
+        pads: controls.pads(),
+    })
+    .into_response()
+}
+
+#[derive(Deserialize, ToSchema)]
+pub(crate) struct SessionPlayerRequest {
+    /// Player slot, 0-based: `0` is Player 1. Omit or `null` to hand the session
+    /// back to the first-free claim.
+    #[schema(value_type = u32, required = false, example = 1)]
+    #[serde(default)]
+    slot: Option<u8>,
+}
+
+#[derive(Serialize, ToSchema)]
+pub(crate) struct SessionPlayer {
+    /// The pick now stored for this session.
+    #[schema(value_type = u32, required = false)]
+    slot: Option<u8>,
+    /// `false` = another live session asked for that slot first and keeps it; this
+    /// session stays on the first-free claim.
+    reserved: bool,
+    /// OS pad slots the session holds right now. A pad already built keeps its slot
+    /// until it re-plugs, so this can still name the old player for a moment.
+    pads: Vec<u8>,
+}
+
 /// Recently finished sessions
 ///
 /// What each session came to — mode, codec, bitrate, frames, bring-up, and why it ended
@@ -378,6 +468,54 @@ fn session_windows(
     Vec::new()
 }
 
+/// Watch this session's pads (SSE)
+///
+/// One frame per pad state the host applies — what it injects, not what the client
+/// says it sent — so a controller question is answered from the host's own hand
+/// instead of an evdev dump. `data:` is a [`PadFrame`]; `event:` is `pad.state`.
+/// Attaching replays every live pad, so a button already held draws at once.
+///
+/// Console lane only, like the window routes: a paired certificate is not bound to
+/// a session id, and this is the operator's own machine watching its own input.
+///
+/// Nothing is published while nobody is attached, so a console on another page —
+/// or none at all — costs the input thread one atomic load per pad event.
+#[utoipa::path(
+    get,
+    path = "/session/{id}/pads",
+    tag = "session",
+    operation_id = "streamSessionPads",
+    params(("id" = u64, Path, description = "Session id from `GET /status`")),
+    responses(
+        (status = OK, description = "SSE stream; each frame's `data:` is one PadFrame", body = PadFrame, content_type = "text/event-stream"),
+        (status = NOT_FOUND, description = "No live session with that id", body = ApiError),
+        (status = SERVICE_UNAVAILABLE, description = "Concurrent event-stream cap reached — retry shortly", body = ApiError),
+        (status = UNAUTHORIZED, description = "Missing or invalid bearer token", body = ApiError),
+    )
+)]
+pub(crate) async fn stream_session_pads(Path(id): Path<u64>) -> Response {
+    let Some(controls) = crate::session_status::controls(id) else {
+        return no_such_session();
+    };
+    let Some(slot) = super::events::try_acquire_slot() else {
+        return super::events::stream_cap_reached();
+    };
+    // Subscribing arms the resync; the input thread answers on its next wake (≤ 4 ms).
+    let rx = controls.pads.subscribe();
+    let stream = futures_util::stream::unfold((rx, slot), |(mut rx, slot)| async move {
+        // Lagged: drop a consumer too slow for a stick sweep rather than buffer it.
+        // Closed: the session ended, and its pads went with it.
+        let frame = rx.recv().await.ok()?;
+        let ev = Event::default()
+            .event("pad.state")
+            .data(serde_json::to_string(&frame).unwrap_or_else(|_| "{}".to_string()));
+        Some((Ok::<_, std::convert::Infallible>(ev), (rx, slot)))
+    });
+    Sse::new(stream)
+        .keep_alive(KeepAlive::new().interval(super::events::KEEP_ALIVE))
+        .into_response()
+}
+
 /// One refusal for "gone" and "not yours": telling them apart would confirm a
 /// window exists on a head this session may not see.
 fn no_such_window() -> Response {
@@ -404,8 +542,10 @@ fn no_such_session() -> Response {
 
 /// End waiting games
 ///
-/// Ends games waiting out the reconnect window. Does not touch a live session
-/// (`DELETE /session` plus `game_on_session_end`).
+/// Ends games waiting out the reconnect window. With `streaming` and an
+/// `app_id`, also ends that title where it is still on a live session — the
+/// move a player has after a launch that never produced a game. The session
+/// itself stays up (`DELETE /session` plus `game_on_session_end`).
 #[utoipa::path(
     post,
     path = "/game/end",
@@ -419,7 +559,18 @@ fn no_such_session() -> Response {
     )
 )]
 pub(crate) async fn end_game(ApiJson(req): ApiJson<EndGameRequest>) -> Response {
-    let ended = crate::gamelease::end_pending(req.app_id.as_deref());
+    let mut ended = crate::gamelease::end_pending(req.app_id.as_deref());
+    // Named title only. The id-less form stays "every waiting game", which is
+    // what the console's one button has always meant.
+    if req.streaming && req.app_id.is_some() {
+        for shared in crate::session_status::live_games(req.app_id.as_deref()) {
+            if !shared.is_trackable() || shared.is_terminating() {
+                continue;
+            }
+            crate::gamelease::terminate(shared, "ended from the management API");
+            ended += 1;
+        }
+    }
     if ended == 0 {
         return api_error(StatusCode::CONFLICT, "no game is waiting to be ended");
     }
@@ -432,6 +583,11 @@ pub(crate) struct EndGameRequest {
     /// Store-qualified id (`steam:570`); omit to end every waiting game.
     #[serde(default)]
     pub app_id: Option<String>,
+    /// Also end `app_id` where it is on a live session, not only where it is
+    /// waiting out a reconnect window. Ignored without `app_id`.
+    #[serde(default)]
+    #[schema(required = false)]
+    pub streaming: bool,
 }
 
 #[derive(Serialize, ToSchema)]

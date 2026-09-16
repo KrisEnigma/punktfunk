@@ -411,6 +411,9 @@ fn run(
                     procs: launch_claim.as_ref().and_then(|c| c.procs()),
                     #[cfg(target_os = "linux")]
                     workspace: launch_workspace,
+                    // Moonlight has no control channel of ours to say it on; the
+                    // finding stays in the log, as it did before.
+                    outcome: None,
                 },
                 on_exit,
             );
