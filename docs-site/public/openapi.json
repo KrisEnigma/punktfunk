@@ -3572,6 +3572,38 @@
         }
       }
     },
+    "/api/v1/session/last": {
+      "get": {
+        "tags": [
+          "session"
+        ],
+        "summary": "Recently finished sessions",
+        "description": "What each session came to — mode, codec, bitrate, frames, bring-up, and why it ended\n— newest first, at most the last eight. This is the whole of what the host knows, so\nthe answer is what a bug report should carry.\n\nA host that has not streamed since it started answers with an empty list.",
+        "operationId": "getRecentSessions",
+        "responses": {
+          "200": {
+            "description": "Finished sessions, newest first; empty if none",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RecentSessions"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/session/settings": {
       "get": {
         "tags": [
@@ -5675,6 +5707,47 @@
           }
         }
       },
+      "AudioEgress": {
+        "type": "object",
+        "description": "Audio egress for the whole session. Absent when the session had no audio plane.",
+        "required": [
+          "sent",
+          "infilled",
+          "late",
+          "max_late_ms",
+          "reanchors"
+        ],
+        "properties": {
+          "infilled": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Frames synthesized over a capture hole. Wire continuity is not captured continuity.",
+            "minimum": 0
+          },
+          "late": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Departures a whole frame or more behind their slot.",
+            "minimum": 0
+          },
+          "max_late_ms": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "reanchors": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Times the pacer fell far enough behind to forgive its debt and re-anchor.",
+            "minimum": 0
+          },
+          "sent": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
       "AudioWiring": {
         "type": "object",
         "description": "Windows audio wiring: which endpoint carries each role. Names are the Sound-settings friendly names.",
@@ -5744,6 +5817,40 @@
           },
           "label": {
             "type": "string"
+          }
+        }
+      },
+      "BitrateSpan": {
+        "type": "object",
+        "description": "What the encoder's target did over the session. Absent when no encoder opened.",
+        "required": [
+          "min_kbps",
+          "avg_kbps",
+          "max_kbps",
+          "adaptive_steps"
+        ],
+        "properties": {
+          "adaptive_steps": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Times the target moved after the opening rate: adaptive-bitrate decisions, plus a\nrebuild re-resolving what it actually encodes.",
+            "minimum": 0
+          },
+          "avg_kbps": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Mean of the targets the session ran at, NOT weighted by how long each held.\nA rate held for a second counts as much as one held for an hour.",
+            "minimum": 0
+          },
+          "max_kbps": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "min_kbps": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
           }
         }
       },
@@ -7028,6 +7135,7 @@
             "type": "object",
             "required": [
               "session",
+              "summary",
               "kind"
             ],
             "properties": {
@@ -7039,6 +7147,10 @@
               },
               "session": {
                 "$ref": "#/components/schemas/SessionRef"
+              },
+              "summary": {
+                "$ref": "#/components/schemas/SessionSummary",
+                "description": "Every number the host has for the finished session, including why it ended."
               }
             }
           },
@@ -7837,6 +7949,27 @@
           }
         }
       },
+      "GyroCadence": {
+        "type": "object",
+        "description": "Client gyro arrival counts. Absent when no pad ever sent motion.",
+        "required": [
+          "samples",
+          "stalls"
+        ],
+        "properties": {
+          "samples": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "stalls": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Gaps of 500 ms or more — the feed stopping, not jitter.",
+            "minimum": 0
+          }
+        }
+      },
       "Health": {
         "type": "object",
         "required": [
@@ -8229,6 +8362,42 @@
           "per-client",
           "per-client-mode"
         ]
+      },
+      "InputCounts": {
+        "type": "object",
+        "description": "Client datagrams this session took, by class.\n\nCounted up to the moment the session was summarized: the reader task ends with the\nconnection, which closes after this, so a last straggler can fall outside.",
+        "required": [
+          "events",
+          "mic",
+          "rich",
+          "dropped"
+        ],
+        "properties": {
+          "dropped": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Offers the input queue refused because it was full. Not a wire loss.",
+            "minimum": 0
+          },
+          "events": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Keyboard, pointer and touch events.",
+            "minimum": 0
+          },
+          "mic": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Opus microphone frames.",
+            "minimum": 0
+          },
+          "rich": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Gamepad and stylus batches.",
+            "minimum": 0
+          }
+        }
       },
       "InstallRequest": {
         "type": "object",
@@ -9414,6 +9583,21 @@
           }
         }
       },
+      "RecentSessions": {
+        "type": "object",
+        "required": [
+          "sessions"
+        ],
+        "properties": {
+          "sessions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SessionSummary"
+            },
+            "description": "Newest first. Bounded in memory and lost on a host restart — this is the last\nfew sessions, not a history."
+          }
+        }
+      },
       "ReleaseDisplayRequest": {
         "type": "object",
         "description": "Request body for `releaseDisplay`.",
@@ -9761,6 +9945,18 @@
           }
         }
       },
+      "SessionEndReason": {
+        "type": "string",
+        "description": "Why a session ended, in the client's own words\n([`punktfunk_core::client::PunktfunkEndReason`]) so both ends name the same end the\nsame way. The bytes match that ABI where the two overlap.\n\n[`Self::StoppedByOperator`] is the one a client cannot see: the host closes it as\ncode 0, which every client reads as `host_ended`.",
+        "enum": [
+          "local",
+          "game_exited",
+          "host_ended",
+          "host_error",
+          "lost",
+          "stopped_by_operator"
+        ]
+      },
       "SessionInfo": {
         "type": "object",
         "required": [
@@ -9935,6 +10131,149 @@
           },
           "settings": {
             "$ref": "#/components/schemas/SessionSettings"
+          }
+        }
+      },
+      "SessionSummary": {
+        "type": "object",
+        "description": "Everything the host knows about one finished session.\n\nThe `session.ended` payload AND the body of `GET /api/v1/session/last`: one struct,\nso a screenshot of the console card is the API answer a bug report would have carried.\nA number the host does not accumulate per session is absent rather than zero.",
+        "required": [
+          "id",
+          "client",
+          "started_unix",
+          "duration_s",
+          "mode",
+          "hdr",
+          "join",
+          "codec",
+          "bit_depth",
+          "chroma",
+          "bitrate_kbps",
+          "input",
+          "bringup_ms",
+          "ended"
+        ],
+        "properties": {
+          "audio": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/AudioEgress",
+                "description": "Absent when the session ran no audio plane (synthetic source, or the thread never started)."
+              }
+            ]
+          },
+          "bit_depth": {
+            "type": "integer",
+            "format": "int32",
+            "description": "8 or 10. Independent of `hdr` — 10-bit SDR is a mode.",
+            "minimum": 0
+          },
+          "bitrate": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/BitrateSpan",
+                "description": "What the encoder's target did. Absent on a session that opened no encoder."
+              }
+            ]
+          },
+          "bitrate_kbps": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The encoder's target when the session ended, kbps. `bitrate` has the span.",
+            "minimum": 0
+          },
+          "bringup_ms": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Hello → first video packet, ms. `0` if no packet ever left.",
+            "minimum": 0
+          },
+          "chroma": {
+            "type": "string",
+            "description": "`4:2:0` or `4:4:4`."
+          },
+          "client": {
+            "type": "string",
+            "description": "Cert-fingerprint prefix, or peer IP for an anonymous client."
+          },
+          "client_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Display name (trust store, else the name the client sent). Absent if nameless."
+          },
+          "codec": {
+            "type": "string",
+            "description": "`h264` | `hevc` | `av1` | `pyrowave`."
+          },
+          "duration_s": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "ended": {
+            "$ref": "#/components/schemas/SessionEndReason"
+          },
+          "frames_dropped": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Frames the capturer's encode pool refused. Absent on a capturer that does not\ncount them (everything but the Windows IDD push path).",
+            "minimum": 0
+          },
+          "frames_sent": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Access units the send thread put on the wire. Absent when the video loop\nnever reached its tail — the `host_error` case.",
+            "minimum": 0
+          },
+          "gyro": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/GyroCadence",
+                "description": "Absent when no pad sent motion — most sessions."
+              }
+            ]
+          },
+          "hdr": {
+            "type": "boolean"
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Same id [`SessionRef`] and the per-session routes carry.",
+            "minimum": 0
+          },
+          "input": {
+            "$ref": "#/components/schemas/InputCounts"
+          },
+          "join": {
+            "type": "boolean",
+            "description": "Shared another session's display at ITS mode instead of owning one."
+          },
+          "mode": {
+            "type": "string",
+            "description": "`WxH@Hz` as last delivered; a mid-session mode switch moves it."
+          },
+          "path_mtu": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Path MTU the QUIC stack settled on, bytes. Absent as `frames_sent` is.",
+            "minimum": 0
+          },
+          "started_unix": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Host wall clock at stream start, unix seconds."
           }
         }
       },
