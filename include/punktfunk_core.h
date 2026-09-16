@@ -1043,6 +1043,16 @@
 // that skips an unknown id cannot tell two meanings apart.
 #define PUNKTFUNK_EXT_TAG_PADDING 1
 
+// Extension tag `2` on `Start`: what the client calls itself, UTF-8, no NUL — its build and
+// the shell that dialled (`"android 0.38.0 console/library"`). A label for the host's log, never
+// a fact it acts on: two sessions from one device are told apart here instead of by capture.
+// Bounded by [`EXT_CLIENT_MAX`]; a longer value is truncated on a char boundary by
+// [`client_label`].
+#define PUNKTFUNK_EXT_TAG_CLIENT 2
+
+// Longest [`EXT_TAG_CLIENT`] value in UTF-8 bytes. A log field, so short.
+#define PUNKTFUNK_EXT_CLIENT_MAX 96
+
 // Largest extension block on the wire, its `ext_len` header included. The block is read
 // before the peer is trusted, so this bounds what one message makes the other side hold.
 #define PUNKTFUNK_EXT_MAX_BYTES 4096

@@ -171,6 +171,9 @@ private suspend fun dial(
             // silencing it for the session. Free to ask for — an older host just ignores it.
             keepHostAudio = settings.keepHostAudio,
             videoFit = settings.videoFit,
+            // Which build, and which shell and path, opened this session — the host's
+            // `handshake complete` `client=` field.
+            dialer = "android ${appVersion(context)} $dialer",
         )
         NativeBridge.nativeConnect(request.toJson())
     }
