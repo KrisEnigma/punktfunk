@@ -76,6 +76,8 @@ struct UserData {
     defer: std::sync::Arc<DeferredRequeue>,
     /// Lazy-driver pacing; `None` when the producer keeps the tick.
     pacer: Option<std::rc::Rc<Pacer>>,
+    /// Arrivals dropped because every hold was out (the slot kept an older frame).
+    held_drops: u64,
 }
 
 impl UserData {
@@ -660,6 +662,11 @@ pub(super) fn gpu_import(
 /// Withholding past that skips frames when holds peak (host frame + up to two encoder slots).
 const HOLD_POOL_RESERVE: u32 = 2;
 
+/// Pool the raw lane asks for. The encoder keeps its frame held across ticks (a repeat re-uses
+/// it), the slot holds the next, and an arrival must still find a buffer: three holds beyond
+/// the producer's reserve. Two holds made every third arrival a drop at 60 fps.
+const RAW_LANE_POOL_MIN: i32 = 6;
+
 /// `PUNKTFUNK_ZEROCOPY_HOLD=0` restores immediate requeue (racy). Use `env_on`; a bare
 /// `== "0"` is the trap `PUNKTFUNK_FORCE_SHM` already hit.
 fn zerocopy_hold_enabled() -> bool {
@@ -940,6 +947,8 @@ fn consume_frame(
                 offset_p50_ms = r.offset_p50_ms,
                 implausible = r.implausible,
                 hdr_pts_used = ud.hdr_pts_enabled,
+                held_drops = ud.held_drops,
+                pool_depth = ud.pool.live,
                 "capture wire-pts provenance"
             );
         }
@@ -1205,6 +1214,7 @@ fn consume_frame(
                     // SAFETY: `dup` is ours and nothing else saw it.
                     unsafe { libc::close(dup) };
                     if holds_possible(zerocopy_hold_enabled(), ud.pool.live) {
+                        ud.held_drops += 1;
                         return;
                     }
                 }
@@ -1413,6 +1423,11 @@ pub fn pipewire_thread(
     } = opts;
     // Node ids and remote fds do not identify a compositor: Mutter and gamescope
     // can both use the default daemon. Keep the producer contract explicit.
+    let pool_min = if plan.nvenc_raw {
+        pool_min.max(RAW_LANE_POOL_MIN)
+    } else {
+        pool_min
+    };
     let offer_cursor_meta = !producer_is_gamescope;
     crate::pwinit::ensure_init();
 
@@ -1656,6 +1671,7 @@ pub fn pipewire_thread(
         gate_since: None,
         defer: defer.clone(),
         pacer: pacer.clone(),
+        held_drops: 0,
     };
 
     let mut props = properties! {

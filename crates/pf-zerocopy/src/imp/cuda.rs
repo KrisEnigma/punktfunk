@@ -836,6 +836,33 @@ pub fn copy_mapped_yuv444(
     v_tex.copy_mapped_plane(plane(2), dst.pitch, w, h)
 }
 
+/// Device→device copy of one pitched surface into another of the same layout: `rows` rows of
+/// `pitch` bytes. A repeat frame's slot is cloned this way instead of being converted again.
+/// Context must be current. `sync: false`: no CPU wait; both surfaces must stay valid until
+/// downstream stream work completes.
+pub fn copy_surface_to_surface(
+    src_ptr: CUdeviceptr,
+    dst_ptr: CUdeviceptr,
+    pitch: usize,
+    rows: usize,
+    sync: bool,
+) -> Result<()> {
+    let copy = CUDA_MEMCPY2D {
+        srcMemoryType: CU_MEMORYTYPE_DEVICE,
+        srcDevice: src_ptr,
+        srcPitch: pitch,
+        dstMemoryType: CU_MEMORYTYPE_DEVICE,
+        dstDevice: dst_ptr,
+        dstPitch: pitch,
+        WidthInBytes: pitch,
+        Height: rows,
+        ..Default::default()
+    };
+    // SAFETY: caller: context current; both surfaces hold `pitch × rows` bytes and outlive the
+    // copy (`sync: false` shifts that to the caller).
+    unsafe { copy_issue(&copy, "cuMemcpy2DAsync_v2(slot->slot)", sync) }
+}
+
 /// Device→device copy of a 4-byte (BGRx) [`DeviceBuffer`] into `dst_ptr`. Context must be current.
 /// `sync: false`: no CPU wait; `src` must stay valid until downstream stream work completes.
 pub fn copy_device_to_device(

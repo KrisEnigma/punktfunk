@@ -84,7 +84,9 @@ impl SlotFormat {
             _ => unreachable!("packed formats returned above"),
         }
     }
-    fn rows(self, height: u32) -> u64 {
+    /// Rows the layout holds for `height` luma rows (NV12 adds its chroma rows, YUV444 its
+    /// two extra planes).
+    pub fn rows(self, height: u32) -> u64 {
         if self.is_packed32() {
             return height as u64;
         }

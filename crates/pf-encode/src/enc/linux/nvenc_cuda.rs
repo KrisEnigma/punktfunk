@@ -745,6 +745,9 @@ pub struct NvencCudaEncoder {
     worker: Option<pf_zerocopy::Importer>,
     worker_slots: HashSet<usize>,
     worker_cursor_serial: u64,
+    /// The last raw frame converted (`pts_ns`, fd) and the ring slot holding it: a repeat is
+    /// cloned from there instead of converted again.
+    last_raw: Option<(u64, i32, usize)>,
     /// One-shot [`diagnose_failed_open`](Self::diagnose_failed_open) — a reset burst logs once.
     diagnosed: bool,
     /// Two-thread retrieve. `None` in sync mode. Lives `init_session`→`teardown`.
@@ -868,6 +871,7 @@ impl NvencCudaEncoder {
             worker: None,
             worker_slots: HashSet::new(),
             worker_cursor_serial: u64::MAX,
+            last_raw: None,
             diagnosed: false,
             inited: false,
             rfi_supported: false,
@@ -961,6 +965,7 @@ impl NvencCudaEncoder {
             w.forget_slots();
         }
         self.worker_slots.clear();
+        self.last_raw = None;
         for &bs in &self.bitstreams {
             let _ = (api().destroy_bitstream_buffer)(self.encoder, bs);
         }
@@ -1823,6 +1828,19 @@ impl NvencCudaEncoder {
             Some(r) => (r.staging[slot], r.src),
             None => (dst, (self.width, self.height)),
         };
+        // A repeat of the frame just converted (the source produced nothing new) is cloned
+        // from its slot: one copy, no second worker round trip.
+        let key = (captured.pts_ns, d.fd.as_raw_fd());
+        if let Some((pts, fd, prev)) = self.last_raw {
+            if (pts, fd) == key && prev != slot && prev < self.ring.len() {
+                let rows = fmt.rows(self.height) as usize;
+                let (src, dst_s) = (&self.ring[prev].surface, &self.ring[slot].surface);
+                cuda::copy_surface_to_surface(src.ptr(), dst_s.ptr(), dst_s.pitch(), rows, true)
+                    .context("NVENC (Linux): clone the repeat slot")?;
+                self.last_raw = Some((pts, fd, slot));
+                return Ok(());
+            }
+        }
         match self.convert_raw_inner(captured, d, fmt, target, src_size) {
             Ok(()) => pf_zerocopy::note_raw_dmabuf_import_ok(),
             Err(e) => {
@@ -1838,6 +1856,7 @@ impl NvencCudaEncoder {
                 .reframe(&target, &dst, fmt, crop, out)
                 .context("NVENC (Linux): reframe")?;
         }
+        self.last_raw = Some((key.0, key.1, slot));
         Ok(())
     }
 
