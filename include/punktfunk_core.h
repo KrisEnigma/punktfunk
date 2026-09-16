@@ -714,6 +714,12 @@
 // host-global wiring, so any live session that asked wins until it ends.
 #define PUNKTFUNK_CLIENT_CAP_KEEP_HOST_AUDIO 32
 
+// [`Hello::client_caps`]: the client parses the tagged extension block after Welcome's
+// frozen positional layout ([`EXT_TAG_PADDING`](super::EXT_TAG_PADDING)). The host
+// appends a block only toward this bit, so a client that leaves it clear still gets the
+// Welcome byte-identical to today's. `0x80` is the last free `client_caps` bit.
+#define PUNKTFUNK_CLIENT_CAP_EXT 64
+
 // [`Welcome::host_caps`]: the session is on the lossless audio plane
 // ([`AUDIO_PCM_MAGIC`](super::datagram::AUDIO_PCM_MAGIC), `0xD3`). A wire statement, not
 // an offer: the client must open from
@@ -737,6 +743,11 @@
 // `PT_TOUCH`. Without the bit a passthrough client falls back to trackpad — otherwise
 // contacts vanish with no error (`design/touch-client-overlay.md`).
 #define PUNKTFUNK_HOST_CAP2_TOUCH 2
+
+// [`Welcome::host_caps2`](crate::quic::Welcome::host_caps2): the host parses the tagged
+// extension block after `Start`'s 6 bytes. The client appends one only after seeing this
+// bit — Hello is first contact, with no host capability known yet, and stays frozen.
+#define PUNKTFUNK_HOST_CAP2_EXT 4
 
 // [`Hello::video_codecs`]: H.264 / AVC. The software encode path emits H.264, so a client
 // that wants to stream from a GPU-less host must advertise this.
@@ -1022,6 +1033,20 @@
 // [`Welcome::audio_codec`]: raw interleaved LE PCM on `0xD3` (`crate::audio::pcm`).
 // `2` because [`AUDIO_CODEC_FLAC_RESERVED`] holds `1`.
 #define PUNKTFUNK_AUDIO_CODEC_PCM 2
+
+// Extension tag `1`: no-op filler. Carries nothing, so a peer skips it like any tag it
+// does not know. Tag `0` is reserved. Every tag is allocated here with a doc line, as
+// `quic/caps.rs` does for bits, and an id is never reused for a second meaning: a peer
+// that skips an unknown id cannot tell two meanings apart.
+#define PUNKTFUNK_EXT_TAG_PADDING 1
+
+// Largest extension block on the wire, its `ext_len` header included. The block is read
+// before the peer is trusted, so this bounds what one message makes the other side hold.
+#define PUNKTFUNK_EXT_MAX_BYTES 4096
+
+// Most entries in one block. Tags are unique, so this only bounds a flood of zero-length
+// entries inside [`EXT_MAX_BYTES`].
+#define PUNKTFUNK_EXT_MAX_ENTRIES 64
 
 #define PUNKTFUNK_MSG_PAIR_REQUEST 16
 
