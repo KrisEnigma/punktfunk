@@ -127,8 +127,9 @@ pub struct PipelineGap {
 }
 
 /// `client → host` after [`Start`]: bandwidth probe. Host bursts
-/// [`crate::packet::FLAG_PROBE`] AUs at `target_kbps` for `duration_ms`,
-/// pausing video, then replies [`ProbeResult`]. Host clamps both fields.
+/// [`crate::packet::FLAG_PROBE`] AUs at `target_kbps` for `duration_ms`
+/// beside the video it is already sending, then replies [`ProbeResult`].
+/// So the reading is headroom, not an idle link. Host clamps both fields.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ProbeRequest {
     pub target_kbps: u32,
