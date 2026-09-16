@@ -59,6 +59,12 @@ Two registers, picked by who reads the line. Rules: `docs/writing.md` §4.
 Both: `Couldn't` / `can't`, never `Could not` / `cannot` / `unable to`. Append
 the cause once — ` — ` in prose, `: ` in operator lines. Never a bare code.
 
+## Client settings
+
+Do not add a player-facing setting without the maintainer's yes. First make it automatic, follow
+the OS, or fix the detection. Automatic means automatic; never override what the player picked.
+Rules and examples: `docs/settings.md`.
+
 ## Agent skills
 
 Project SKILL.md files live in `.agents/skills/`. A harness that only
