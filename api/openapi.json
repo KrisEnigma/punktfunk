@@ -8804,6 +8804,23 @@
         ],
         "description": "Linger after the last client detaches. Tagged on `mode` so the web form\nand OpenAPI stay `{\"mode\":\"off\"}` / `{\"mode\":\"duration\",\"seconds\":N}` /\n`{\"mode\":\"forever\"}`. On gamescope's bare spawn this also keeps the\nnested session and its game."
       },
+      "LaunchArg": {
+        "type": "object",
+        "description": "One `{param}` value for an `exec` template.",
+        "required": [
+          "name",
+          "value"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "The parameter's name in the template."
+          },
+          "value": {
+            "type": "string"
+          }
+        }
+      },
       "LaunchSpec": {
         "type": "object",
         "description": "How the host launches a title. Open-ended so new stores slot in:\n`steam_appid` → `steam steam://rungameid/<value>`; `command` → run `<value>`\nnested in a gamescope session.",
@@ -8812,6 +8829,16 @@
           "value"
         ],
         "properties": {
+          "args": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/LaunchArg"
+            },
+            "description": "Values for an `exec` template's parameters. Each is checked against the character class\nthe manifest declares for it, and a path must sit inside the paths that manifest names.\nA list rather than a map: a map of strings generates as an untyped object in the SDK."
+          },
           "kind": {
             "type": "string",
             "description": "`\"steam_appid\"` or `\"command\"`.",
@@ -8819,7 +8846,7 @@
           },
           "value": {
             "type": "string",
-            "description": "Appid for `steam_appid`, or the shell command for `command`."
+            "description": "Appid for `steam_appid`, the shell command for `command`, or — for `exec` — the name of a\ntemplate in the publishing plugin's manifest."
           }
         }
       },
