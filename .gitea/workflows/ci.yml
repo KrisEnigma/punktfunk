@@ -132,6 +132,8 @@ jobs:
       # Line tables keep file:line in panics and shrink target/ and every link. The value is
       # part of each sccache key, so changing it means bumping the target key's -vN- too.
       CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      # Prebuilt Skia from disk, never github.com; see ci/skia-binaries.sh.
+      SKIA_BINARIES_URL: file:///opt/skia-binaries/skia-binaries-{key}.tar.gz
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -186,11 +188,13 @@ jobs:
       # registry/git are download caches, target/ the incremental build. The target key
       # carries the rustc version — resolved via `rustc --version` (below) rather than parsed
       # from rust-toolchain.toml, so a pin bump there invalidates stale incremental state too.
-      # `pf-console-ui` pulls skia-safe, so a target-cache miss makes this job download a prebuilt
-      # Skia from the same no-retry build-script fetch that took the android job out on
-      # 2026-08-22, over the same load-shedding runner network. Cheap insurance; see the script.
-      - name: curl with retries (skia-bindings' prebuilt fetch has none)
+      # Build scripts fetch with a bare curl over a runner network that drops packets under load.
+      - name: curl with retries (build-script fetches have none)
         run: sh scripts/ci/install-retrying-curl.sh
+
+      # Baked into the image; this fetches the pins while the running :latest predates them.
+      - name: Prebuilt Skia (no-op once the image bakes it)
+        run: sh ci/skia-binaries.sh x86_64-unknown-linux-gnu
 
       - name: Cache keys
         run: echo "rustc=$(rustc --version | cut -d' ' -f2)" >> "$GITHUB_ENV"
@@ -393,6 +397,8 @@ jobs:
     container:
       image: 192.168.1.58:5010/punktfunk-rust-ci-arm64cross:latest
     timeout-minutes: 60
+    env:
+      SKIA_BINARIES_URL: file:///opt/skia-binaries/skia-binaries-{key}.tar.gz
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -401,11 +407,12 @@ jobs:
       - name: sccache (no-op once the image bakes it)
         run: sh scripts/ci/ensure-sccache.sh
 
-      # `pf-console-ui` pulls skia-safe, so a target-cache miss makes this job download a prebuilt
-      # Skia from the same no-retry build-script fetch that took the android job out on
-      # 2026-08-22, over the same load-shedding runner network. Cheap insurance; see the script.
-      - name: curl with retries (skia-bindings' prebuilt fetch has none)
+      # Build scripts fetch with a bare curl over a runner network that drops packets under load.
+      - name: curl with retries (build-script fetches have none)
         run: sh scripts/ci/install-retrying-curl.sh
+
+      - name: Prebuilt Skia (no-op once the image bakes it)
+        run: sh ci/skia-binaries.sh aarch64-unknown-linux-gnu
 
       - name: Cache keys
         run: echo "rustc=$(rustc --version | cut -d' ' -f2)" >> "$GITHUB_ENV"

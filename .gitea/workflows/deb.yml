@@ -125,6 +125,7 @@ on:
       - 'scripts/ci/gitea-release.sh'
       - 'scripts/ci/pf-version.sh'
       - 'scripts/ci/retry.sh'
+      - 'ci/skia-binaries.sh'
       - '.gitea/workflows/deb.yml'
     # Single project version: a `vX.Y.Z` tag is THE release for every platform (see
     # docs-site channels.md). The old version-shadow (a client tag shipping a host package
@@ -163,6 +164,8 @@ jobs:
       # whose own CC_x86_64_unknown_linux_gnu=pf-host-cc must survive. See ci.yml's `rust` job.
       CC_x86_64_unknown_linux_gnu: sccache cc
       CXX_x86_64_unknown_linux_gnu: sccache c++
+      # Prebuilt Skia from disk, never github.com; see ci/skia-binaries.sh.
+      SKIA_BINARIES_URL: file:///opt/skia-binaries/skia-binaries-{key}.tar.gz
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -204,6 +207,9 @@ jobs:
           # precisely because a dlopen is invisible to shlibdeps.
           apt-get install -y --no-install-recommends dpkg-dev python3 \
             libgtk-4-dev libadwaita-1-dev libsdl3-dev
+
+      - name: Prebuilt Skia (no-op once the image bakes it)
+        run: sh ci/skia-binaries.sh x86_64-unknown-linux-gnu
 
       # The cargo-home (registry/git) cache IS shared with ci.yml — those are pure downloads,
       # profile-independent, and deduping them across the fleet is the whole point. The target
@@ -641,6 +647,8 @@ jobs:
     container:
       image: 192.168.1.58:5010/punktfunk-rust-ci-arm64cross:latest
     timeout-minutes: 90
+    env:
+      SKIA_BINARIES_URL: file:///opt/skia-binaries/skia-binaries-{key}.tar.gz
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -674,6 +682,9 @@ jobs:
         run: |
           apt-get update
           apt-get install -y --no-install-recommends dpkg-dev python3
+
+      - name: Prebuilt Skia (no-op once the image bakes it)
+        run: sh ci/skia-binaries.sh aarch64-unknown-linux-gnu
 
       - name: Cache keys
         run: echo "rustc=$(rustc --version | cut -d' ' -f2)" >> "$GITHUB_ENV"
