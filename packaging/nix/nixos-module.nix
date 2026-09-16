@@ -768,6 +768,8 @@ in
         # and retries per unit, so this is ordering only, not a hard requirement).
         after = [ "punktfunk-host.service" ];
         wantedBy = optional cfg.scripting.autoStart "default.target";
+        # Each plugin runs inside its own `bwrap` sandbox, built by the runner.
+        path = [ pkgs.bubblewrap ];
         serviceConfig = {
           Type = "simple";
           ExecStart = "${cfg.scripting.package}/bin/punktfunk-scripting";
@@ -779,11 +781,10 @@ in
           KillSignal = "SIGTERM";
           TimeoutStopSec = 30;
 
-          # Sandbox — the same confinement scripts/punktfunk-scripting.service gives the deb/rpm
-          # installs. The runner `import()`s the operator's own `.ts` files, so this is the one unit
-          # here that executes arbitrary code by design; without these it ran strictly LESS confined
-          # on NixOS than on every other channel. Keep the two files in step: module-check.nix
-          # asserts each directive below.
+          # Unit-level hardening, the same scripts/punktfunk-scripting.service gives the deb/rpm
+          # installs — keep the two in step, module-check.nix asserts each directive. It confines
+          # the supervisor and the operator's loose scripts, not a PLUGIN: those get their own
+          # bwrap sandbox, because a mount namespace on a same-uid unit is no boundary.
           NoNewPrivileges = true;
           # PrivateTmp deliberately OFF (field report 2026-08-03, the VirtualHere plugin). A
           # plugin's whole job is integrating with things already running on this box, and on Linux

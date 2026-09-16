@@ -86,6 +86,13 @@ fn test_state() -> Arc<AppState> {
     }
 }
 
+/// One identified plugin, so the id-scoped routes have something to accept and something to
+/// refuse. `demo` owns its own registration; the runner's shared `plugin-secret` is the
+/// unidentified lane beside it.
+fn test_plugin_tokens() -> std::collections::BTreeMap<String, String> {
+    std::collections::BTreeMap::from([("demo".to_string(), "demo-secret".to_string())])
+}
+
 // `None` installs "test-secret" (`send` attaches the matching bearer). An explicit token
 // is for mismatch cases such as `bearer_token_is_enforced`.
 fn test_app(state: Arc<AppState>, token: Option<&str>) -> Router {
@@ -94,6 +101,7 @@ fn test_app(state: Arc<AppState>, token: Option<&str>) -> Router {
         state,
         Some(token.unwrap_or("test-secret").to_string()),
         Some("plugin-secret".to_string()),
+        test_plugin_tokens(),
         DEFAULT_PORT,
         None,
         stats,
@@ -113,6 +121,7 @@ fn test_app_browser(state: Arc<AppState>) -> Router {
         state,
         Some("test-secret".to_string()),
         Some("plugin-secret".to_string()),
+        test_plugin_tokens(),
         DEFAULT_PORT,
         None,
         stats,
@@ -130,6 +139,7 @@ fn test_app_native(state: Arc<AppState>, np: Arc<crate::native_pairing::NativePa
         state,
         Some("test-secret".to_string()),
         Some("plugin-secret".to_string()),
+        test_plugin_tokens(),
         DEFAULT_PORT,
         Some(np),
         stats,
@@ -1059,6 +1069,7 @@ async fn host_info_publishes_the_hosts_own_fingerprint() {
         state,
         Some("test-secret".to_string()),
         Some("plugin-secret".to_string()),
+        test_plugin_tokens(),
         DEFAULT_PORT,
         None,
         stats,
@@ -1483,6 +1494,93 @@ async fn submit_pin_validates_and_requires_pending_pairing() {
     assert!(body["error"].is_string(), "media type: {body}");
 }
 
+/// The hole per-plugin tokens close: with one shared token, any plugin could overwrite another's
+/// registration — and then answer for its tiles. A plugin that proved which plugin it is may
+/// write its own id and nothing else.
+#[tokio::test]
+async fn a_plugin_may_write_only_its_own_id() {
+    let app = test_app(test_state(), None);
+    let put = |id: &str, token: &str| {
+        axum::http::Request::builder()
+            .method("PUT")
+            .uri(format!("/api/v1/plugins/{id}"))
+            .header("content-type", "application/json")
+            .header("authorization", format!("Bearer {token}"))
+            .body(Body::from(
+                serde_json::json!({ "title": "Demo" }).to_string(),
+            ))
+            .unwrap()
+    };
+    // Its own id: accepted.
+    let (status, _) = send(&app, put("demo", "demo-secret")).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    // Another plugin's: refused, whatever the payload says.
+    let (status, body) = send(&app, put("rom-manager", "demo-secret")).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    // Deregistering someone else is the same question.
+    let (status, _) = send(
+        &app,
+        axum::http::Request::builder()
+            .method("DELETE")
+            .uri("/api/v1/plugins/rom-manager")
+            .header("authorization", "Bearer demo-secret")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+}
+
+/// Same rule on the library side: a provider's entries belong to the plugin that owns the id.
+#[tokio::test]
+async fn a_plugin_may_reconcile_only_its_own_provider() {
+    let app = test_app(test_state(), None);
+    let (status, body) = send(
+        &app,
+        axum::http::Request::builder()
+            .method("PUT")
+            .uri("/api/v1/library/provider/steam")
+            .header("content-type", "application/json")
+            .header("authorization", "Bearer demo-secret")
+            .body(Body::from("[]"))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    let (status, _) = send(
+        &app,
+        axum::http::Request::builder()
+            .method("DELETE")
+            .uri("/api/v1/library/provider/steam")
+            .header("authorization", "Bearer demo-secret")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+}
+
+/// The runner's shared token keeps the older, unowned behaviour — a loose script has no plugin
+/// identity to check — so upgrading a host does not strand one.
+#[tokio::test]
+async fn the_shared_runner_token_stays_unowned() {
+    let app = test_app(test_state(), None);
+    let (status, _) = send(
+        &app,
+        axum::http::Request::builder()
+            .method("PUT")
+            .uri("/api/v1/plugins/anything")
+            .header("content-type", "application/json")
+            .header("authorization", "Bearer plugin-secret")
+            .body(Body::from(
+                serde_json::json!({ "title": "Demo" }).to_string(),
+            ))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+}
+
 /// A blank token is no token: `run` refuses to start unauthenticated, even on loopback.
 #[tokio::test]
 async fn blank_token_rejected() {
@@ -1490,6 +1588,7 @@ async fn blank_token_rejected() {
         bind: "127.0.0.1:0".parse().unwrap(),
         token: Some("   ".into()),
         plugin_token: None,
+        ..Default::default()
     };
     let err = run(
         test_state(),

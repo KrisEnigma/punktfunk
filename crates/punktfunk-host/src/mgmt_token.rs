@@ -16,6 +16,7 @@
 
 use anyhow::{Context, Result};
 use rand::RngCore;
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 use std::sync::OnceLock;
@@ -45,11 +46,53 @@ const ENV_VAR: &str = "PUNKTFUNK_MGMT_TOKEN";
 const FILE: &str = "mgmt-token";
 const PLUGIN_ENV_VAR: &str = "PUNKTFUNK_PLUGIN_TOKEN";
 const PLUGIN_FILE: &str = "plugin-token";
+/// `{ "<plugin id>": "<token>" }` — see [`load_or_generate_per_plugin`].
+const PER_PLUGIN_FILE: &str = "plugin-tokens.json";
 
 /// Admin token: env > file > generate+persist. Hex so `KEY=VALUE` is safe
 /// to source from a shell or systemd `EnvironmentFile`.
 pub fn load_or_generate() -> Result<String> {
     load_or_generate_impl(ENV_VAR, FILE)
+}
+
+/// One token per installed plugin, by plugin id, in `plugin-tokens.json`.
+///
+/// The shared [`load_or_generate_plugin`] token authenticates the RUNNER; these authenticate a
+/// PLUGIN, which is what lets the management API refuse a plugin writing another's registration.
+/// Ids that disappear (an uninstall) lose their token on the next `serve`.
+pub fn load_or_generate_per_plugin(ids: &[String]) -> Result<BTreeMap<String, String>> {
+    let dir = pf_paths::config_dir();
+    let path = dir.join(PER_PLUGIN_FILE);
+    let planted = crate::planted::quarantine_planted_secret(&path);
+    pf_paths::create_private_dir(&dir).with_context(|| format!("create {}", dir.display()))?;
+    let mut tokens: BTreeMap<String, String> = if planted {
+        BTreeMap::new()
+    } else {
+        fs::read_to_string(&path)
+            .ok()
+            .and_then(|t| serde_json::from_str(&t).ok())
+            .unwrap_or_default()
+    };
+    let before = tokens.clone();
+    tokens.retain(|id, _| ids.contains(id));
+    for id in ids {
+        tokens.entry(id.clone()).or_insert_with(|| {
+            let mut buf = [0u8; 32];
+            rand::rng().fill_bytes(&mut buf);
+            hex::encode(buf)
+        });
+    }
+    if tokens != before {
+        let body = serde_json::to_string_pretty(&tokens)?;
+        pf_paths::write_secret_file(&path, body.as_bytes())
+            .with_context(|| format!("write {}", path.display()))?;
+        tracing::info!(
+            path = %path.display(),
+            plugins = tokens.len(),
+            "minted per-plugin API tokens (owner-only)"
+        );
+    }
+    Ok(tokens)
 }
 
 /// Plugin-lane token, same precedence as [`load_or_generate`].

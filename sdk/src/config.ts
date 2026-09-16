@@ -180,6 +180,13 @@ export const resolveConfig = async (
  * already admits only the one pinned cert.
  */
 const makeFetch = async (ca: string | undefined): Promise<typeof fetch> => {
+	// Inside a sandbox there is no route to the host's port: the supervisor listens on this
+	// socket and forwards over its own pinned connection, so there is nothing to pin in here.
+	const unix = process.env.PUNKTFUNK_MGMT_UNIX?.trim();
+	if (unix) {
+		return ((input: Parameters<typeof fetch>[0], init?: RequestInit) =>
+			fetch(input, { ...init, unix } as RequestInit)) as typeof fetch;
+	}
 	if (!ca) return fetch;
 	const skipHostname = { checkServerIdentity: () => undefined };
 	// Bun: fetch takes node-compatible `tls` options.

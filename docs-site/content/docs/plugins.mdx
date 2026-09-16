@@ -130,8 +130,26 @@ A bare name resolves to the first-party package — `playnite` installs `@punktf
 from Punktfunk's own registry. Any other name installs from the **public npm registry** and is
 refused unless you add `--allow-public-registry` — a guard against typos and look-alike packages.
 
-> Plugins are operator-installed code with operator privileges. Install only plugins you trust,
-> from a registry you control.
+## Where a plugin runs
+
+On Linux each plugin runs in its own sandbox — a separate process with an empty home, no network
+unless it asked for one, and access to just the paths it declared (plus what you granted it). It
+reaches the host through a socket the runner holds, with a token of its own, so it can publish its
+own library entries and nothing else's.
+
+That needs **bubblewrap** (`bwrap`), which the packages depend on. If a host cannot build a sandbox
+— no bwrap, or a kernel with unprivileged user namespaces switched off — no plugin runs at all, and
+Troubleshooting says which of the two it is. `PUNKTFUNK_PLUGIN_SANDBOX=off` in `host.env` runs them
+in the runner's own process instead: that is your whole account, and the console says so while it
+is set.
+
+On **Windows** the runner is a low-privilege account (`NT AUTHORITY\LocalService`) rather than a
+sandbox, and plugins share it.
+
+Scripts you drop in `~/.config/punktfunk/scripts/` are your own code and are not sandboxed — the
+same as anything else you run yourself.
+
+> Plugins are operator-installed code. Install only plugins you trust, from a registry you control.
 
 ## What a plugin may run
 

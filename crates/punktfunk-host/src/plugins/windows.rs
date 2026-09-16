@@ -12,10 +12,15 @@ use super::*;
 /// `NT AUTHORITY\LocalService` in icacls SID form.
 pub(super) const LOCAL_SERVICE_SID: &str = "*S-1-5-19";
 
-/// Secrets the runner may read: scoped `plugin-token` and the TLS-pin cert
-/// (`native-cert.pem` after the identity split, else `cert.pem`). Never `mgmt-token`.
-/// Absent files are skipped, so listing both certs is safe on either host.
-const RUNNER_SECRET_FILES: [&str; 3] = ["plugin-token", "native-cert.pem", "cert.pem"];
+/// Secrets the runner may read: the scoped `plugin-token`, the per-plugin tokens it hands each
+/// sandboxed plugin, and the TLS-pin cert (`native-cert.pem` after the identity split, else
+/// `cert.pem`). Never `mgmt-token`. Absent files are skipped, so listing both certs is safe.
+const RUNNER_SECRET_FILES: [&str; 4] = [
+    "plugin-token",
+    "plugin-tokens.json",
+    "native-cert.pem",
+    "cert.pem",
+];
 
 /// Unit dirs the runner imports. Inheritable `(RX,WA)`: bun's loader opens unit
 /// files with FILE_WRITE_ATTRIBUTES; plain `(RX)` is EPERM on every import. WA

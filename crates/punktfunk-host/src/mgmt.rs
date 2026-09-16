@@ -129,6 +129,9 @@ pub struct Options {
     pub token: Option<String>,
     /// Scripting-runner bearer: [`auth::plugin_may_access`] only. `None` disables the lane.
     pub plugin_token: Option<String>,
+    /// Per-plugin bearers by plugin id — the same route set, plus an identity the handlers use
+    /// to refuse a plugin writing another plugin's registration.
+    pub plugin_tokens: std::collections::BTreeMap<String, String>,
 }
 
 impl Default for Options {
@@ -137,6 +140,7 @@ impl Default for Options {
             bind: SocketAddr::from(([127, 0, 0, 1], DEFAULT_PORT)),
             token: None,
             plugin_token: None,
+            plugin_tokens: std::collections::BTreeMap::new(),
         }
     }
 }
@@ -156,6 +160,9 @@ pub(crate) struct MgmtState {
     /// Plugin-lane token ([`Options::plugin_token`]). Checked after the admin
     /// token misses; gated per route by `auth::plugin_may_access`.
     plugin_token: Option<String>,
+    /// Per-plugin tokens by id ([`Options::plugin_tokens`]). A match also stamps
+    /// [`auth::PluginIdentity`], which is what the id-scoped routes check.
+    pub(crate) plugin_tokens: std::collections::BTreeMap<String, String>,
     /// Bound port, echoed in [`PortMap`].
     port: u16,
     /// Live device challenges and the tokens they became. See [`mgmt::device_auth`].
@@ -220,6 +227,7 @@ pub async fn run(
         state,
         Some(token),
         opts.plugin_token.filter(|t| !t.trim().is_empty()),
+        opts.plugin_tokens,
         opts.bind.port(),
         native,
         stats,
@@ -237,6 +245,7 @@ fn app(
     state: Arc<AppState>,
     token: Option<String>,
     plugin_token: Option<String>,
+    plugin_tokens: std::collections::BTreeMap<String, String>,
     port: u16,
     native: Option<Arc<crate::native_pairing::NativePairing>>,
     stats: Arc<crate::stats_recorder::StatsRecorder>,
@@ -256,6 +265,7 @@ fn app(
         gamestream_enabled,
         token,
         plugin_token,
+        plugin_tokens,
         port,
         device_auth: device_auth::DeviceAuth::default(),
         identity_fingerprint,
