@@ -1630,6 +1630,15 @@ pub(crate) async fn run_admitted(
     let (access_tx, access_rx) = tokio::sync::mpsc::unbounded_channel::<AccessUpdate>();
     let (audio_tx, audio_rx) =
         tokio::sync::mpsc::unbounded_channel::<punktfunk_core::quic::AudioState>();
+    // Input thread → client: which player each of this session's pads is.
+    let (pad_slots_tx, pad_slots_rx) =
+        tokio::sync::mpsc::unbounded_channel::<punktfunk_core::quic::PadSlots>();
+    // The device's stored player pick. Keyed by the pairing fingerprint, never by
+    // an address: the same device reconnecting is the same player.
+    let preferred_pad_slot = session_fp_hex.as_deref().and_then(|fp| np.pad_slot_of(fp));
+    let pad_id =
+        crate::inject::pad_pool::PadIdentity::new(session_fp_hex.as_deref(), preferred_pad_slot);
+    let pad_slots = Arc::new(std::sync::atomic::AtomicU16::new(0));
     // What `DELETE /session/{id}` and its siblings act on. `ceiling` is the pairing's own
     // mask: a live re-point clamps to it, so the console never grants past the pairing.
     let controls = crate::session_status::SessionControls {
@@ -1643,6 +1652,12 @@ pub(crate) async fn run_admitted(
         audio_tx: Some(audio_tx),
         // Filled by the stream thread once capture names the head.
         head: Arc::new(std::sync::Mutex::new(None)),
+        pad_slots: pad_slots.clone(),
+        fingerprint: session_fp_hex.clone(),
+        pad_owner: pad_id.owner,
+        preferred_pad_slot: Arc::new(std::sync::atomic::AtomicU8::new(
+            preferred_pad_slot.unwrap_or(crate::session_status::NO_PAD_SLOT),
+        )),
     };
     tokio::spawn(control::run(control::Task {
         ctrl_send,
@@ -1677,6 +1692,7 @@ pub(crate) async fn run_admitted(
         session_grants: session_grants.clone(),
         access_rx,
         audio_rx,
+        pad_slots_rx,
     }));
     // Only a fingerprint has a record to watch; with no record there is nothing to expire.
     match (session_fp_hex.clone(), access_watch) {
@@ -1800,6 +1816,9 @@ pub(crate) async fn run_admitted(
                         input_route,
                         gamepad,
                         pad_audio_on,
+                        pad_id,
+                        pad_slots,
+                        Some(pad_slots_tx),
                         grants,
                         frame_map,
                         stop,
