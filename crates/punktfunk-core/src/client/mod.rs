@@ -319,6 +319,9 @@ pub struct NativeClient {
     /// Why the speakers are silent: [`AUDIO_MUTE_LOCAL`] | [`AUDIO_MUTE_HOST`]. The embedder
     /// owns its bit, the control task the host's; clearing one leaves the other standing.
     audio_mute: Arc<AtomicU8>,
+    /// OS pad slots the host gave this session, one bit each. Slot `n` is player
+    /// `n + 1`; `0` until a pad of ours has a device on the host.
+    pad_slots: Arc<AtomicU16>,
     /// Smoothed QUIC round trip (µs), sampled by the worker. `0` until the first sample.
     rtt_us: Arc<AtomicU32>,
     /// The stats overlay window. Receipt and 0xCF timings land in it as they are pulled.
@@ -696,6 +699,7 @@ impl NativeClient {
         let audio_av_offset_ms = Arc::new(AtomicI64::new(0));
         let audio_buffer_ms = Arc::new(AtomicU32::new(0));
         let audio_mute = Arc::new(AtomicU8::new(0));
+        let pad_slots = Arc::new(AtomicU16::new(0));
         let rtt_us = Arc::new(AtomicU32::new(0));
         let decode_lat = Arc::new(Mutex::new(DecodeLatAcc::default()));
         // Pump seeds from Welcome before ready_tx, then follows every ack.
@@ -727,6 +731,7 @@ impl NativeClient {
         let pad_audio_caps_w = pad_audio_caps.clone();
         let pad_mouse_w = pad_mouse.clone();
         let audio_mute_w = audio_mute.clone();
+        let pad_slots_w = pad_slots.clone();
         let access_grants_w = access_grants.clone();
         let access_deadline_w = access_deadline_unix.clone();
         let end_reject_w = end_reject_code.clone();
@@ -808,6 +813,7 @@ impl NativeClient {
                     decode_lat: decode_lat_w,
                     live_bitrate: live_bitrate_w,
                     audio_mute: audio_mute_w,
+                    pad_slots: pad_slots_w,
                     access_grants: access_grants_w,
                     access_deadline_unix: access_deadline_w,
                     access_tx,
@@ -856,6 +862,7 @@ impl NativeClient {
             cursor_state: Mutex::new(cursor_state_rx),
             access: Mutex::new(access_rx),
             audio_mute,
+            pad_slots,
             access_grants,
             access_deadline_unix,
             end_reject_code,
@@ -1173,6 +1180,7 @@ impl NativeClient {
                 .clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32,
             rtt_us: self.rtt_us(),
             target_kbps: self.current_bitrate_kbps(),
+            pad_slots: self.pad_slots(),
         }
     }
 
@@ -1377,6 +1385,13 @@ impl NativeClient {
     /// [`audio_mute`](Self::audio_mute) to say whose mute it is.
     pub fn audio_muted(&self) -> bool {
         self.audio_mute() != 0
+    }
+
+    /// OS pad slots the host gave this session, one bit each: bit `n` = player
+    /// `n + 1`. `0` before a pad of ours has a device, or on a host too old to
+    /// send [`crate::quic::PadSlots`]. [`crate::hud::player_label`] is the wording.
+    pub fn pad_slots(&self) -> u16 {
+        self.pad_slots.load(Ordering::Relaxed)
     }
 
     /// `(pad, low, high)`; TTL of a v2 envelope is dropped. Use

@@ -76,6 +76,9 @@ pub(super) struct Task {
     /// Operator mute for this session (mgmt `PUT /session/{id}/audio`), so the client
     /// can name the silence rather than conceal a gap.
     pub(super) audio_rx: tokio::sync::mpsc::UnboundedReceiver<punktfunk_core::quic::AudioState>,
+    /// OS pad slots this session holds, from the input thread. The client names the
+    /// player it is from this; wire indices are per client and say nothing about it.
+    pub(super) pad_slots_rx: tokio::sync::mpsc::UnboundedReceiver<punktfunk_core::quic::PadSlots>,
     /// What became of this session's library launch, from the launch site and
     /// from the lease when the game dies on the spot.
     pub(super) launch_outcome_rx:
@@ -117,6 +120,7 @@ pub(super) async fn run(task: Task) {
         session_grants,
         mut access_rx,
         mut audio_rx,
+        mut pad_slots_rx,
         mut launch_outcome_rx,
     } = task;
     let pf_clipboard::ClipCoord {
@@ -137,6 +141,8 @@ pub(super) async fn run(task: Task) {
     let mut access_closed = false;
     // Same closed-channel discipline: the mute lane outlives nothing of its own.
     let mut audio_closed = false;
+    // Pad slots end with the input thread.
+    let mut pad_slots_closed = false;
     // Same again. The launch site drops its sender when the session ends.
     let mut launch_outcome_closed = false;
     let mut active = initial_mode;
@@ -432,6 +438,14 @@ pub(super) async fn run(task: Task) {
                 // perpetually ready and would spin `select!`.
                 let Some(state) = state else { audio_closed = true; continue };
                 if io::write_msg(&mut ctrl_send, &state.encode()).await.is_err() {
+                    break;
+                }
+            }
+            slots = pad_slots_rx.recv(), if !pad_slots_closed => {
+                // Same closed-mpsc rule as the audio arm above. The input thread is
+                // the only sender, and it ends with the session.
+                let Some(slots) = slots else { pad_slots_closed = true; continue };
+                if io::write_msg(&mut ctrl_send, &slots.encode()).await.is_err() {
                     break;
                 }
             }

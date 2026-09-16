@@ -20,7 +20,9 @@
 //! threads that outlive it.
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{
+    AtomicBool, AtomicI64, AtomicU16, AtomicU32, AtomicU64, AtomicU8, Ordering,
+};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::encode::{ChromaFormat, Codec};
@@ -114,10 +116,25 @@ pub struct SessionControls {
     /// Latched per session: the injector's slot is one per process, and a second
     /// session's bring-up would otherwise re-point this one at its head.
     pub head: Arc<Mutex<Option<StreamedHead>>>,
+    /// OS pad slots this session holds, one bit each — the player numbers a local
+    /// co-op game reads. Published by the input thread.
+    pub pad_slots: Arc<AtomicU16>,
+    /// Full cert fingerprint, when this session has one. The stable device key —
+    /// `client` is only its 12-hex prefix, and an address is not an identity.
+    pub fingerprint: Option<String>,
+    /// This device's key in [`crate::inject::pad_pool`]. A reservation and a
+    /// reconnect are keyed by it, so both follow the pairing, never the address.
+    pub pad_owner: u64,
+    /// Player slot the operator picked, 0-based; [`NO_PAD_SLOT`] = lazy claim.
+    pub preferred_pad_slot: Arc<AtomicU8>,
     /// Live pad tap this session's input thread publishes to. Idle until a console
     /// opens `GET /session/{id}/pads` ([`crate::pad_feed`]).
     pub pads: Arc<crate::pad_feed::PadFeed>,
 }
+
+/// `preferred_pad_slot` for a session the operator has not placed. Not a valid
+/// slot: `MAX_PADS` is 16.
+pub const NO_PAD_SLOT: u8 = u8::MAX;
 
 /// The compositor head one session streams — what its window list names.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -139,8 +156,46 @@ impl SessionControls {
             access_tx: None,
             audio_tx: None,
             head: Arc::new(Mutex::new(None)),
+            pad_slots: Arc::new(AtomicU16::new(0)),
+            fingerprint: None,
+            pad_owner: crate::inject::pad_pool::owner_key(None),
+            preferred_pad_slot: Arc::new(AtomicU8::new(NO_PAD_SLOT)),
             pads: Arc::new(crate::pad_feed::PadFeed::new()),
         }
+    }
+
+    /// The player slot the operator picked for this session, 0-based.
+    pub fn player(&self) -> Option<u8> {
+        match self.preferred_pad_slot.load(Ordering::Relaxed) {
+            NO_PAD_SLOT => None,
+            slot => Some(slot),
+        }
+    }
+
+    /// Place this session's pads on `slot`, or hand it back to the lazy claim with
+    /// `None`. The pool reservation is a hint the next pad to plug reads, so a pad
+    /// already built keeps the slot it was created under until it re-plugs.
+    ///
+    /// `false` = another live session asked for that slot first and keeps it.
+    pub fn set_player(&self, slot: Option<u8>) -> bool {
+        let Some(slot) = slot else {
+            self.preferred_pad_slot
+                .store(NO_PAD_SLOT, Ordering::Relaxed);
+            return true;
+        };
+        if !crate::inject::pad_pool::global().reserve(slot, self.pad_owner) {
+            return false;
+        }
+        self.preferred_pad_slot.store(slot, Ordering::Relaxed);
+        true
+    }
+
+    /// OS pad slots this session holds right now, lowest first.
+    pub fn pads(&self) -> Vec<u8> {
+        let mask = self.pad_slots.load(Ordering::Relaxed);
+        (0..punktfunk_core::input::MAX_PADS as u8)
+            .filter(|n| mask & (1 << n) != 0)
+            .collect()
     }
 
     /// Latch the head this session streams, once the capture pipeline names it.
@@ -295,6 +350,10 @@ pub struct SessionSnapshot {
     pub time_to_first_frame_ms: u32,
     /// Last mid-stream resize total, ms. 0 = no resize this session.
     pub last_resize_ms: u32,
+    /// OS pad slots this session holds, lowest first. Slot `n` is player `n + 1`.
+    pub pads: Vec<u8>,
+    /// Player slot the operator picked, 0-based. `None` = lazy claim.
+    pub preferred_pad_slot: Option<u8>,
 }
 
 fn registry() -> &'static Mutex<Vec<LiveSession>> {
@@ -607,6 +666,8 @@ pub fn snapshot() -> Vec<SessionSnapshot> {
                     .clone(),
                 time_to_first_frame_ms: s.ttff_ms.load(Ordering::Relaxed),
                 last_resize_ms: s.last_resize_ms.load(Ordering::Relaxed),
+                pads: s.controls.pads(),
+                preferred_pad_slot: s.controls.player(),
             }
         })
         .collect()

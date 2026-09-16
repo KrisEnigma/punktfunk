@@ -973,6 +973,7 @@ mod tests {
                 access_deadline_unix: Arc::new(std::sync::atomic::AtomicU64::new(0)),
                 access_tx,
                 audio_mute: Arc::new(std::sync::atomic::AtomicU8::new(0)),
+                pad_slots: Arc::new(std::sync::atomic::AtomicU16::new(0)),
             }
             .run(),
         );

@@ -3987,6 +3987,81 @@
         }
       }
     },
+    "/api/v1/session/{id}/player": {
+      "put": {
+        "tags": [
+          "session"
+        ],
+        "summary": "Place one session's player slot",
+        "description": "Which controller this session is: slot 0 is Player 1, and a local co-op game\nreads that order. Without a pick the slot is whichever comes free, so the pad\nthat moves first takes Player 1 and the order changes on every reconnect.\n\nThe pick is a reservation, not a seizure. A pad already built keeps the slot it\nwas created under until it re-plugs; a slot another live session asked for first\nstays theirs and this call answers `reserved: false`. It is remembered against\nthe device's pairing, so the same device reconnects as the same player — an\nanonymous session's pick lasts only as long as the session.",
+        "operationId": "setSessionPlayer",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Session id from `GET /status`",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SessionPlayerRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The pick, and whether it took the slot",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionPlayer"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Slot past the host's pad count",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No live session with that id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/session/{id}/windows": {
       "get": {
         "tags": [
@@ -8982,6 +9057,12 @@
             "type": "string",
             "example": "Living Room iPad"
           },
+          "preferred_pad_slot": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Player slot this device's pads take, 0-based; `null` = whichever comes free.\nSet through `PUT /session/{id}/player` while the device streams.",
+            "minimum": 0
+          },
           "until_disconnect": {
             "type": "boolean",
             "description": "The record is dropped when the device's last session ends, rather than at a clock\ntime. `expires_unix` may also be set; whichever comes first ends the grant."
@@ -10142,6 +10223,46 @@
           }
         }
       },
+      "SessionPlayer": {
+        "type": "object",
+        "required": [
+          "reserved",
+          "pads"
+        ],
+        "properties": {
+          "pads": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            },
+            "description": "OS pad slots the session holds right now. A pad already built keeps its slot\nuntil it re-plugs, so this can still name the old player for a moment."
+          },
+          "reserved": {
+            "type": "boolean",
+            "description": "`false` = another live session asked for that slot first and keeps it; this\nsession stays on the first-free claim."
+          },
+          "slot": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The pick now stored for this session.",
+            "minimum": 0
+          }
+        }
+      },
+      "SessionPlayerRequest": {
+        "type": "object",
+        "properties": {
+          "slot": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Player slot, 0-based: `0` is Player 1. Omit or `null` to hand the session\nback to the first-free claim.",
+            "example": 1,
+            "minimum": 0
+          }
+        }
+      },
       "SessionRef": {
         "type": "object",
         "description": "Plane-neutral A/V session (distinct from a video [`StreamRef`]).",
@@ -10180,6 +10301,7 @@
           "hdr",
           "join",
           "muted",
+          "pads",
           "uptime_s"
         ],
         "properties": {
@@ -10223,8 +10345,23 @@
             "type": "boolean",
             "description": "Audio is held back for this session alone (`PUT /session/{id}/audio`)."
           },
+          "pads": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            },
+            "description": "OS pad slots this session holds, lowest first. Slot `n` is player `n + 1` to a\nlocal co-op game. Empty while the session has no controller."
+          },
           "plane": {
             "$ref": "#/components/schemas/Plane"
+          },
+          "preferred_pad_slot": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Player slot the operator picked for this session, 0-based (`PUT\n/session/{id}/player`). `null` = the slot is whichever comes free.",
+            "minimum": 0
           },
           "uptime_s": {
             "type": "integer",

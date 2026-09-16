@@ -685,6 +685,61 @@ async fn muting_one_session_leaves_the_other_hearing() {
     assert!(!muted(one.id));
 }
 
+/// The operator places one session's player: the pick lands on that row of `/status`
+/// and nothing else, and it can be handed back.
+///
+/// Whether the pool actually hands that slot over is pinned in `pf_inject::pad_pool`
+/// against a private pool — the process-wide one is shared with every other test here.
+#[tokio::test]
+async fn placing_a_player_touches_only_that_session() {
+    let _serial = SESSION_REGISTRY_LOCK.lock().await;
+    let app = test_app(test_state(), None);
+    let (one, ..) = fake_session_with_flags("aabbccddeeff");
+    let (two, ..) = fake_session_with_flags("112233445566");
+    let pick =
+        |id: u64, body: serde_json::Value| put_json(&format!("/api/v1/session/{id}/player"), body);
+
+    // Past the host's slot count: refused, so no console can store a slot no pad can take.
+    let (status, _) = send(&app, pick(one.id, serde_json::json!({ "slot": 16 }))).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    // An id nothing is streaming is never another session's controllers.
+    let ghost = one.id + two.id + 1000;
+    let (status, _) = send(&app, pick(ghost, serde_json::json!({ "slot": 1 }))).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    let (status, body) = send(&app, pick(one.id, serde_json::json!({ "slot": 1 }))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["slot"], 1, "{body}");
+
+    let (_, body) = send(&app, get_req("/api/v1/status")).await;
+    let row = |id: u64| {
+        body["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["id"] == id)
+            .cloned()
+            .unwrap()
+    };
+    assert_eq!(row(one.id)["preferred_pad_slot"], 1, "{body}");
+    assert!(
+        row(two.id)["preferred_pad_slot"].is_null(),
+        "the other session keeps the first-free claim"
+    );
+    // Both rows carry the pads column whether or not anything is placed.
+    assert_eq!(row(two.id)["pads"], serde_json::json!([]));
+
+    // Handing it back leaves the row unplaced again.
+    let (status, _) = send(&app, pick(one.id, serde_json::json!({ "slot": null }))).await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, body) = send(&app, get_req("/api/v1/status")).await;
+    assert!(body["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|r| r["preferred_pad_slot"].is_null()));
+}
+
 /// A live re-point moves the mask the input thread reads, and cannot widen past the
 /// pairing: these sessions are paired controller-only, so `full` comes back clamped.
 #[tokio::test]
@@ -1804,6 +1859,10 @@ fn every_route_is_classified_for_the_plugin_and_cert_lanes() {
         ("POST", "/api/v1/session/{id}/idr", true, false),
         ("PUT", "/api/v1/session/{id}/audio", true, false),
         ("PUT", "/api/v1/session/{id}/access", false, false),
+        // Placing a player writes the device's pairing record, so it is pairing
+        // administration too — and a cert caller is not bound to a session id, so it
+        // could re-seat another session's controllers.
+        ("PUT", "/api/v1/session/{id}/player", false, false),
         // Finished sessions: the same facts `/status` already shows a plugin about a live
         // one. Not the cert lane — it names every other client that streamed here.
         ("GET", "/api/v1/session/last", true, false),

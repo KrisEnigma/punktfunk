@@ -370,6 +370,7 @@ fn api_router_parts() -> (Router<Arc<MgmtState>>, utoipa::openapi::OpenApi) {
         .routes(routes!(session::request_session_idr))
         .routes(routes!(session::set_session_audio))
         .routes(routes!(session::set_session_access))
+        .routes(routes!(session::set_session_player))
         // The registry's other side: what finished sessions came to.
         .routes(routes!(session::get_recent_sessions))
         .routes(routes!(session::get_session_windows))
