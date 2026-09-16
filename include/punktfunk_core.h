@@ -914,6 +914,13 @@
 // [`AudioState`]. 0x59: next after [`MSG_ACCESS_UPDATE`].
 #define PUNKTFUNK_MSG_AUDIO_STATE 89
 
+// [`LaunchOutcome`]. 0x5A: next after [`MSG_AUDIO_STATE`].
+#define PUNKTFUNK_MSG_LAUNCH_OUTCOME 90
+
+// Longest [`LaunchOutcome::message`] in UTF-8 bytes. One sentence plus a cause;
+// a host cannot make the client hold more than this.
+#define PUNKTFUNK_LAUNCH_MESSAGE_MAX 200
+
 #define PUNKTFUNK_AUDIO_MAGIC 201
 
 #define PUNKTFUNK_RUMBLE_MAGIC 202
