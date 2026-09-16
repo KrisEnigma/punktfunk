@@ -19,9 +19,9 @@ internal object SettingsFields {
 
     val ALL: List<Field<*>> = listOf(
         field("width", "width", IntKind, { it.width }, { s, v -> s.copy(width = v) },
-            overlay({ it.width }, { o, v -> o.copy(width = v) })),
+            overlay({ it.width }, { o, v -> o.copy(width = v) }), console = Console(ConsoleSizeKind)),
         field("height", "height", IntKind, { it.height }, { s, v -> s.copy(height = v) },
-            overlay({ it.height }, { o, v -> o.copy(height = v) })),
+            overlay({ it.height }, { o, v -> o.copy(height = v) }), console = Console(ConsoleSizeKind)),
         field("hz", "refresh_hz", IntKind, { it.hz }, { s, v -> s.copy(hz = v) },
             overlay({ it.hz }, { o, v -> o.copy(hz = v) }), prefsKey = "hz"),
         // Qualifiers on the safe-area resolution. `android.` keys, so they ride the console
@@ -206,6 +206,23 @@ internal object SettingsFields {
         override fun write(e: SharedPreferences.Editor, k: String, v: Int) { e.putInt(k, v) }
         override fun read(j: JSONObject, k: String): Int? = if (j.has(k)) j.optInt(k) else null
         override fun write(j: JSONObject, k: String, v: Int) { j.put(k, v) }
+    }
+
+    /**
+     * `width`/`height` on the console, whose sizes are unsigned: one negative value fails the
+     * whole document. [SAFE_AREA_MODE] travels as `0` plus `android.safe_area_mode`.
+     */
+    object ConsoleSizeKind : Kind<Int> {
+        const val SAFE_AREA_KEY = "android.safe_area_mode"
+        override fun read(p: SharedPreferences, k: String, def: Int) = p.getInt(k, def)
+        override fun write(e: SharedPreferences.Editor, k: String, v: Int) { e.putInt(k, v) }
+        override fun read(j: JSONObject, k: String): Int? = if (!j.has(k)) null else j.optInt(k).let {
+            if (it == 0 && j.optBoolean(SAFE_AREA_KEY)) SAFE_AREA_MODE else it
+        }
+        override fun write(j: JSONObject, k: String, v: Int) {
+            j.put(k, v.coerceAtLeast(0))
+            j.put(SAFE_AREA_KEY, v == SAFE_AREA_MODE)
+        }
     }
 
     object BoolKind : Kind<Boolean> {
