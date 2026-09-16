@@ -744,6 +744,7 @@ public final class Stage2Pipeline {
         // config is the Welcome's latched value, which a mid-session flip then overrides per-frame.
         decoder.setChroma444(connection.isChroma444)
         decoder.setCodec(connection.videoCodec)
+        decoder.setBitDepth(connection.bitDepth)
         presenter.configure(hdr: connection.isHDR)
         decodedSink?.reset()
 
