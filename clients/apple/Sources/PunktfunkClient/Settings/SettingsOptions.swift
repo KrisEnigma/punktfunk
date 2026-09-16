@@ -175,6 +175,18 @@ enum SettingsOptions {
         ("3 Gbps", 3_000_000),
     ]
 
+    /// A stored rate none of the presets hold: typed, slid, or written by the speed test.
+    static func isCustomBitrate(_ kbps: Int) -> Bool {
+        !bitratePresets.contains { $0.tag == kbps }
+    }
+
+    /// A typed rate in whole Mbps as kbps, capped at the slider's 3 Gbps top. nil for empty or
+    /// `0`, which leave the stored rate alone — Automatic is a list entry, not a number.
+    static func customBitrateKbps(_ text: String) -> Int? {
+        guard let mbps = Int(text.prefix(4)), mbps > 0 else { return nil }
+        return min(mbps, 3_000) * 1_000
+    }
+
     /// The presets plus the currently stored value when it isn't one of them (set via the touch
     /// slider or a synced device) — so the current choice stays visible/selectable.
     static func bitrateOptions(current: Int) -> [(label: String, tag: Int)] {

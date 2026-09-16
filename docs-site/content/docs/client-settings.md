@@ -50,7 +50,8 @@ parity, packet framing and the audio plane's share all fit inside it, so "20 Mbp
 your network. For H.264, HEVC and AV1, Automatic is the host's default **20 Mbps** plus two things
 an explicit rate switches off: adaptive bitrate, and a link-capacity probe about two seconds in that
 lets the rate climb past 20 Mbps. Automatic never descends below **2 Mbps**; an explicit rate is
-fixed for the session, clamped to **500 kbps – 8 Gbps**. A host card's menu has **Test network
+fixed for the session, clamped to **500 kbps – 8 Gbps**. Every client takes a rate that isn't on
+its list: type it, or slide to it on iPhone, iPad and Mac. A host card's menu has **Test network
 speed…** to suggest a value.
 
 PyroWave is **always Automatic**: a fixed per-pixel budget for the negotiated mode (hundreds of
