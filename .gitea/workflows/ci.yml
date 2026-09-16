@@ -172,6 +172,7 @@ jobs:
                    crates/pf-encode/src/enc/linux/reframe \
                    crates/pf-encode/src/enc/linux/rgb2yuv \
                    crates/pf-encode/src/enc/linux/rgb2yuv10 \
+                   crates/pf-encode/src/enc/linux/rgb2yuv10_709 \
                    crates/pf-encode/src/enc/linux/rgb2yuv444; do
             s=${p##*/}
             glslangValidator -V "$p.comp" -o "/tmp/$s.spv" >/dev/null
