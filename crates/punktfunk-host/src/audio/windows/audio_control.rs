@@ -493,6 +493,8 @@ fn recover_orphaned_default() {
                     "restore the default {what} device left by a previous run"),
             }
         }
+        // Same idea for the per-app voice-chat pins a crash left behind.
+        super::voice_route::recover_orphaned();
     });
 }
 

@@ -608,9 +608,17 @@ fn capture_once(
     if let Some(id) = &host_out {
         voice.arm(id);
     }
+    // Only when the capture is silent on the host: a plan that fell back to real hardware
+    // is already audible, and a second render would play the mix twice.
     let mut playthrough = match &host_out {
         Some(id) if audio_control::playthrough_requested() => {
-            Playthrough::open(id, channels, open_hz)
+            if silent_loopback(&dev_name, &dev_id) {
+                Playthrough::open(id, channels, open_hz)
+            } else {
+                tracing::info!(device = %dev_name,
+                    "host playthrough not needed — the captured endpoint is audible on the host");
+                None
+            }
         }
         _ => None,
     };

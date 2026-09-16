@@ -4,10 +4,15 @@
 //! device preferences" page writes: `AudioPolicyConfig::SetPersistedDefaultAudioEndpoint
 //! (pid, flow, role, device)`, undocumented like the `IPolicyConfig` default-endpoint
 //! write next door. The store is per user and the host is SYSTEM, so the write has to
-//! come from the signed-in user's context: [`VoiceRoute`] finds voice-app processes
-//! from the capture thread and spawns this same binary as the console user
-//! (`punktfunk-host voice-route set …`, [`cli`]) to pin them. `clear` at session end
-//! sets each pin back to "default". A host that is not SYSTEM writes in-process.
+//! come from the signed-in user's context: a worker thread finds voice-app processes
+//! and runs this same binary as the console user, windowless
+//! (`punktfunk-host voice-route set …`, [`cli`]), to pin them. `clear` sets each pin
+//! back to "default". A host that is not SYSTEM writes in-process.
+//!
+//! A pin is keyed by the app, not the pid, and outlives both the process and a host
+//! crash. The exe names pinned are kept in a marker file until each is cleared against
+//! a running process — at session end, at the next host start, or the next session end
+//! the app is running again ([`recover_orphaned`]).
 //!
 //! The target is the output the operator heard before the session parked the default
 //! on the plan's sink ([`super::audio_control::parked_previous_render`]).
@@ -15,25 +20,31 @@
 use anyhow::{anyhow, bail, Context, Result};
 use std::collections::BTreeSet;
 use std::ffi::c_void;
+use std::sync::mpsc::{channel, Receiver};
 use std::time::{Duration, Instant};
 
-/// How often the capture loop looks for a voice app launched mid-session.
+/// How often the worker looks for a voice app launched mid-session.
 const RESCAN_EVERY: Duration = Duration::from_secs(5);
+/// A pin helper that has not exited in this long is not going to.
+const HELPER_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub(crate) fn wanted() -> bool {
     pf_host_config::config().audio_voice_chat == pf_host_config::VoiceChatRoute::Host
 }
 
-/// The capture thread's pins: which output, and which pids point at it.
+/// The capture thread's pins: which output, which pids point at it, and the worker
+/// that writes them.
 #[derive(Default)]
 pub(crate) struct VoiceRoute {
     target: Option<String>,
     pinned: BTreeSet<u32>,
     last_scan: Option<Instant>,
+    /// A worker's report: the pids and exe names it pinned.
+    inflight: Option<Receiver<Vec<(u32, String)>>>,
 }
 
 impl VoiceRoute {
-    /// Point voice apps at `device_id` for this capture. A changed target drops the old
+    /// Point voice apps at `device_id` for this capture. A changed target clears the old
     /// pins first; the next [`tick`](Self::tick) writes the new ones.
     pub(crate) fn arm(&mut self, device_id: &str) {
         if !wanted() || self.target.as_deref() == Some(device_id) {
@@ -47,8 +58,23 @@ impl VoiceRoute {
         );
     }
 
-    /// Pin every voice app not yet pinned. A process snapshot every [`RESCAN_EVERY`].
+    /// Collect the last worker's pins and start the next scan when one is due. Nothing
+    /// here touches a process or a snapshot: this runs on the capture thread.
     pub(crate) fn tick(&mut self) {
+        if let Some(rx) = &self.inflight {
+            match rx.try_recv() {
+                Ok(pins) => {
+                    self.inflight = None;
+                    if !pins.is_empty() {
+                        tracing::info!(pins = ?pins, "voice-chat apps pinned to the host output");
+                        self.pinned.extend(pins.iter().map(|(pid, _)| *pid));
+                        owe(pins.into_iter().map(|(_, exe)| exe));
+                    }
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => self.inflight = None,
+                Err(std::sync::mpsc::TryRecvError::Empty) => return,
+            }
+        }
         let Some(target) = self.target.clone() else {
             return;
         };
@@ -56,30 +82,93 @@ impl VoiceRoute {
             return;
         }
         self.last_scan = Some(Instant::now());
-        let apps = &pf_host_config::config().audio_voice_apps;
-        let fresh: Vec<u32> = voice_pids(apps)
-            .into_iter()
-            .filter(|p| !self.pinned.contains(p))
-            .collect();
-        if fresh.is_empty() {
-            return;
-        }
-        if run_helper(&["set", &target, &csv(&fresh)]) {
-            tracing::info!(pids = ?fresh, "voice-chat apps pinned to the host output");
-            self.pinned.extend(fresh);
-        }
+        let known = self.pinned.clone();
+        let (tx, rx) = channel();
+        self.inflight = Some(rx);
+        std::thread::Builder::new()
+            .name("punktfunk-voice-pin".into())
+            .spawn(move || {
+                let apps = &pf_host_config::config().audio_voice_apps;
+                let fresh: Vec<(u32, String)> = voice_processes(apps)
+                    .into_iter()
+                    .filter(|(pid, _)| !known.contains(pid))
+                    .collect();
+                let pids: Vec<u32> = fresh.iter().map(|(pid, _)| *pid).collect();
+                let done = fresh.is_empty() || run_helper(&["set", &target, &csv(&pids)]);
+                let _ = tx.send(if done { fresh } else { Vec::new() });
+            })
+            .map_err(|e| tracing::warn!(error = %e, "voice-chat pin worker did not start"))
+            .ok();
     }
 
-    /// Put every pinned app back on the default output. Session end, or a target change.
+    /// Put every pinned app back on the default output: session end, or a target change.
+    /// Blocking — the capture is stopping. An app that already exited stays owed.
     pub(crate) fn clear(&mut self) {
         self.target = None;
         self.last_scan = None;
-        if self.pinned.is_empty() {
-            return;
-        }
-        let pids: Vec<u32> = std::mem::take(&mut self.pinned).into_iter().collect();
-        run_helper(&["clear", &csv(&pids)]);
+        self.inflight = None;
+        self.pinned.clear();
+        recover_orphaned();
     }
+}
+
+/// Clear the pins the marker still owes, for every owed app that is running now. Host
+/// start and session end; a crash or an app that exited before the clear leaves the
+/// marker for the next chance.
+pub(crate) fn recover_orphaned() {
+    let owed = read_owed();
+    if owed.is_empty() {
+        return;
+    }
+    let apps: Vec<String> = owed.iter().cloned().collect();
+    let running: Vec<(u32, String)> = voice_processes(&apps);
+    let pids: Vec<u32> = running.iter().map(|(pid, _)| *pid).collect();
+    if pids.is_empty() {
+        tracing::debug!(owed = ?owed, "voice-chat pins owed to apps that are not running");
+        return;
+    }
+    if !run_helper(&["clear", &csv(&pids)]) {
+        return;
+    }
+    let cleared: BTreeSet<String> = running.into_iter().map(|(_, exe)| exe).collect();
+    let left: BTreeSet<String> = owed.difference(&cleared).cloned().collect();
+    write_owed(&left);
+    tracing::info!(cleared = ?cleared, still_owed = ?left, "voice-chat pins cleared");
+}
+
+fn marker_path() -> std::path::PathBuf {
+    pf_paths::config_dir().join("voice-route.pinned")
+}
+
+/// Lowercase exe names whose pin has not been cleared yet, one per line.
+fn read_owed() -> BTreeSet<String> {
+    std::fs::read_to_string(marker_path())
+        .map(|s| {
+            s.lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .map(String::from)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn write_owed(owed: &BTreeSet<String>) {
+    let path = marker_path();
+    if owed.is_empty() {
+        let _ = std::fs::remove_file(path);
+        return;
+    }
+    let body: String = owed.iter().map(|e| format!("{e}\n")).collect();
+    if let Err(e) = std::fs::write(&path, body) {
+        tracing::warn!(error = %e, "voice-chat pin marker not written — a crash would leave the pins");
+    }
+}
+
+fn owe(exes: impl IntoIterator<Item = String>) {
+    let mut owed = read_owed();
+    owed.extend(exes);
+    write_owed(&owed);
 }
 
 fn csv(pids: &[u32]) -> String {
@@ -89,8 +178,9 @@ fn csv(pids: &[u32]) -> String {
         .join(",")
 }
 
-/// Pids whose exe name carries a voice-app fragment. Toolhelp, as `procscan` does.
-fn voice_pids(apps: &[String]) -> Vec<u32> {
+/// `(pid, lowercase exe name)` of every process carrying a voice-app fragment. Toolhelp,
+/// as `procscan` does. Never on the capture thread.
+fn voice_processes(apps: &[String]) -> Vec<(u32, String)> {
     use windows::Win32::Foundation::CloseHandle;
     use windows::Win32::System::Diagnostics::ToolHelp::{
         CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
@@ -114,9 +204,9 @@ fn voice_pids(apps: &[String]) -> Vec<u32> {
                     .iter()
                     .position(|&c| c == 0)
                     .unwrap_or(entry.szExeFile.len());
-                let exe = String::from_utf16_lossy(&entry.szExeFile[..len]);
+                let exe = String::from_utf16_lossy(&entry.szExeFile[..len]).to_ascii_lowercase();
                 if pf_host_config::voice_app_matches([exe.as_str()], apps) {
-                    out.push(entry.th32ProcessID);
+                    out.push((entry.th32ProcessID, exe));
                 }
                 if Process32NextW(snap, &mut entry).is_err() {
                     break;
@@ -128,8 +218,8 @@ fn voice_pids(apps: &[String]) -> Vec<u32> {
     out
 }
 
-/// Run `voice-route <args>` as the console user; in-process when this host is not
-/// SYSTEM (a dev run already is the user). `true` when the write was handed off or done.
+/// Run `voice-route <args>` as the console user, windowless, and wait for its verdict;
+/// in-process when this host is not SYSTEM (a dev run already is the user).
 fn run_helper(args: &[&str]) -> bool {
     let exe = match std::env::current_exe() {
         Ok(p) => p,
@@ -139,8 +229,16 @@ fn run_helper(args: &[&str]) -> bool {
         }
     };
     let cmdline = format!("\"{}\" voice-route {}", exe.display(), args.join(" "));
-    match crate::windows::interactive::spawn_as_current_session_user(&cmdline, None) {
-        Ok(_) => true,
+    match crate::windows::interactive::run_hidden_as_current_session_user(&cmdline, HELPER_TIMEOUT)
+    {
+        Ok(0) => true,
+        Ok(code) => {
+            tracing::warn!(
+                code,
+                "voice-chat pin helper refused — the apps stay where they are"
+            );
+            false
+        }
         Err(spawn_err) => {
             let owned: Vec<String> = args.iter().map(|s| s.to_string()).collect();
             match cli(&owned) {
@@ -149,7 +247,7 @@ fn run_helper(args: &[&str]) -> bool {
                     tracing::warn!(
                         error = %format!("{e:#}"),
                         spawn = %format!("{spawn_err:#}"),
-                        "voice-chat pin not written — the apps stay in the stream"
+                        "voice-chat pin not written — the apps stay where they are"
                     );
                     false
                 }
@@ -286,7 +384,9 @@ impl AudioPolicyConfig {
         unsafe { &**(self.raw as *const *const IAudioPolicyConfigFactoryVtbl) }
     }
 
-    /// Pin `pid`'s render streams to `device_id` for every role; `None` clears the pin.
+    /// Pin `pid`'s render streams to `device_id`, or clear the pin with `None`. All three
+    /// roles: a voice app may open its call audio on the communications role, and a pin
+    /// that skipped it would leave exactly the voices in the stream.
     fn set_persisted_render(&self, pid: u32, device_id: Option<&str>) -> Result<()> {
         let hs = device_id.map(|id| windows::core::HSTRING::from(mmdevapi_path(id)));
         // SAFETY: HSTRING is one pointer (asserted above); the copy is the handle, which `hs`
