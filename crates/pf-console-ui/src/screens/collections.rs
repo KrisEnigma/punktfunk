@@ -865,6 +865,7 @@ mod tests {
             settings: &mut settings,
             store: crate::store::file_store(),
             platform: crate::platform::Platform::Desktop,
+            screen: None,
             pads: &[],
             deck: false,
             fallback_ui: false,

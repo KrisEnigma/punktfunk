@@ -235,6 +235,12 @@ object SkiaConsole {
             .put("presets", JSONArray(ConsoleJson.presets(presets)))
             .put("known_hosts", JSONObject(ConsoleJson.knownHosts(knownHostStore.all())))
             .put("entry", startEntry(initial, pendingLink, presets))
+        // A phone's own shape leads the Aspect row; a TV's panel is a standard one.
+        if (!io.unom.punktfunk.isTvDevice(app)) {
+            val (nw, nh, _) = io.unom.punktfunk.nativeDisplayMode(app)
+            val (sw, sh, _) = io.unom.punktfunk.safeDisplayMode(app)
+            opts.put("screen", JSONArray(listOf(nw, nh))).put("safe_area", JSONArray(listOf(sw, sh)))
+        }
         handle = runCatching { NativeBridge.nativeConsoleCreate(opts.toString()) }.getOrDefault(0L)
         if (handle == 0L) {
             Log.e(TAG, "console: native create failed")
