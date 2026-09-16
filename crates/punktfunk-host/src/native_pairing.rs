@@ -37,6 +37,9 @@ pub use store::{Access, PairedClient};
 /// starts [`RECONNECT_GRACE`]; a later last-out invalidates that waiter so the
 /// window is always from the latest drop. Drop, not a pair of calls: return,
 /// error, or cancel all release the count.
+///
+/// Named apart from `gamelease::SessionGuard` and `session_status::LiveSessionGuard`, which
+/// count different things in the same binary.
 pub struct SessionCountGuard {
     np: std::sync::Arc<NativePairing>,
     fp_hex: String,
@@ -435,9 +438,7 @@ impl NativePairing {
     fn session_ended(&self, fp_hex: &str) -> Option<u64> {
         let mut live = self.live.lock().unwrap();
         let key = fp_hex.to_ascii_lowercase();
-        let Some(n) = live.counts.get_mut(&key) else {
-            return None;
-        };
+        let n = live.counts.get_mut(&key)?;
         *n = n.saturating_sub(1);
         if *n > 0 {
             return None;
