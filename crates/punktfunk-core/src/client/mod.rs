@@ -43,6 +43,34 @@ mod worker;
 pub use self::frame_channel::{ADAPT_REPORT_INTERVAL, FLUSH_COOLDOWN, NO_VIDEO_RETRY};
 pub use self::planes::AudioPacket;
 pub use self::probe::ProbeOutcome;
+
+/// This client silenced its own speakers ([`NativeClient::set_audio_muted`]). The host keeps
+/// sending, so a session joined to the same sink still hears the game.
+pub const AUDIO_MUTE_LOCAL: u8 = 1 << 0;
+/// The operator muted this session from the console ([`crate::quic::AudioState`]). The host
+/// stopped encoding this session's audio, so a local unmute brings nothing back.
+pub const AUDIO_MUTE_HOST: u8 = 1 << 1;
+
+/// The sentence the overlay shows for a mute mask; `None` when the stream is audible. One
+/// place, so no client invents its own wording for whose mute it is.
+pub fn audio_mute_label(mask: u8) -> Option<&'static str> {
+    match (mask & AUDIO_MUTE_HOST != 0, mask & AUDIO_MUTE_LOCAL != 0) {
+        (true, true) => Some("Muted by the host and on this device"),
+        (true, false) => Some("Muted by the host"),
+        (false, true) => Some("Muted on this device"),
+        (false, false) => None,
+    }
+}
+
+/// Set or clear one bit of a mute mask. Read-modify-write on the atomic: the embedder and
+/// the control task own different bits and never wait on each other.
+pub(crate) fn set_mute_bit(cell: &AtomicU8, bit: u8, on: bool) {
+    if on {
+        cell.fetch_or(bit, Ordering::Relaxed);
+    } else {
+        cell.fetch_and(!bit, Ordering::Relaxed);
+    }
+}
 pub use self::rumble::{ActuatorQuirks, RumbleCommand};
 
 use self::control::{CtrlRequest, Negotiated};
@@ -269,6 +297,9 @@ pub struct NativeClient {
     audio_av_offset_ms: Arc<AtomicI64>,
     /// Playback-ring depth (ms). Audio writes, HUD reads.
     audio_buffer_ms: Arc<AtomicU32>,
+    /// Why the speakers are silent: [`AUDIO_MUTE_LOCAL`] | [`AUDIO_MUTE_HOST`]. The embedder
+    /// owns its bit, the control task the host's; clearing one leaves the other standing.
+    audio_mute: Arc<AtomicU8>,
     /// Smoothed QUIC round trip (µs), sampled by the worker. `0` until the first sample.
     rtt_us: Arc<AtomicU32>,
     /// The stats overlay window. Receipt and 0xCF timings land in it as they are pulled.
@@ -645,6 +676,7 @@ impl NativeClient {
         let video_e2e_ns = Arc::new(AtomicU64::new(0));
         let audio_av_offset_ms = Arc::new(AtomicI64::new(0));
         let audio_buffer_ms = Arc::new(AtomicU32::new(0));
+        let audio_mute = Arc::new(AtomicU8::new(0));
         let rtt_us = Arc::new(AtomicU32::new(0));
         let decode_lat = Arc::new(Mutex::new(DecodeLatAcc::default()));
         // Pump seeds from Welcome before ready_tx, then follows every ack.
@@ -675,6 +707,7 @@ impl NativeClient {
         let live_bitrate_w = live_bitrate.clone();
         let pad_audio_caps_w = pad_audio_caps.clone();
         let pad_mouse_w = pad_mouse.clone();
+        let audio_mute_w = audio_mute.clone();
         let access_grants_w = access_grants.clone();
         let access_deadline_w = access_deadline_unix.clone();
         let end_reject_w = end_reject_code.clone();
@@ -755,6 +788,7 @@ impl NativeClient {
                     rtt_us: rtt_us_w,
                     decode_lat: decode_lat_w,
                     live_bitrate: live_bitrate_w,
+                    audio_mute: audio_mute_w,
                     access_grants: access_grants_w,
                     access_deadline_unix: access_deadline_w,
                     access_tx,
@@ -802,6 +836,7 @@ impl NativeClient {
             cursor_shape: Mutex::new(cursor_shape_rx),
             cursor_state: Mutex::new(cursor_state_rx),
             access: Mutex::new(access_rx),
+            audio_mute,
             access_grants,
             access_deadline_unix,
             end_reject_code,
@@ -1305,6 +1340,26 @@ impl NativeClient {
         }
     }
 
+    /// Mute this client's own speakers. Nothing leaves for the host: it keeps encoding, and a
+    /// session joined to the same sink keeps hearing the game. Packets keep arriving and keep
+    /// decoding — the embedder zeroes only what it queues for the device — so the decoder never
+    /// loses its state and unmute lands in step. Leaves [`AUDIO_MUTE_HOST`] alone.
+    pub fn set_audio_muted(&self, muted: bool) {
+        set_mute_bit(&self.audio_mute, AUDIO_MUTE_LOCAL, muted);
+    }
+
+    /// Why this session is silent: [`AUDIO_MUTE_LOCAL`], [`AUDIO_MUTE_HOST`], both, or `0`.
+    /// The overlay names the reason from this; [`audio_mute_label`] is the shared wording.
+    pub fn audio_mute(&self) -> u8 {
+        self.audio_mute.load(Ordering::Relaxed)
+    }
+
+    /// Either reason silences the speakers. Zero the decoded frame on this; show
+    /// [`audio_mute`](Self::audio_mute) to say whose mute it is.
+    pub fn audio_muted(&self) -> bool {
+        self.audio_mute() != 0
+    }
+
     /// `(pad, low, high)`; TTL of a v2 envelope is dropped. Use
     /// [`NativeClient::next_rumble_ttl`] to honor it. `(0, 0)` = stop.
     pub fn next_rumble(&self, timeout: Duration) -> Result<(u16, u16, u16)> {
@@ -1713,5 +1768,40 @@ mod client_caps_tests {
         // Escape: 48/16 looks like legacy, so the caller sets HIRES itself and is not overridden.
         let explicit = advertised_client_caps(CLIENT_CAP_AUDIO_HIRES, SAMPLE_RATE_HZ, BITS_16);
         assert_eq!(explicit & CLIENT_CAP_AUDIO_HIRES, CLIENT_CAP_AUDIO_HIRES);
+    }
+}
+
+#[cfg(test)]
+mod mute_tests {
+    use super::*;
+
+    /// The player's mute and the operator's are separate bits: each unmutes on its own, and
+    /// while either stands the overlay says which one it is.
+    #[test]
+    fn a_local_mute_and_a_host_mute_never_stand_in_for_each_other() {
+        let m = AtomicU8::new(0);
+        assert_eq!(audio_mute_label(m.load(Ordering::Relaxed)), None);
+
+        set_mute_bit(&m, AUDIO_MUTE_LOCAL, true);
+        assert_eq!(
+            audio_mute_label(m.load(Ordering::Relaxed)),
+            Some("Muted on this device")
+        );
+
+        set_mute_bit(&m, AUDIO_MUTE_HOST, true);
+        assert_eq!(
+            audio_mute_label(m.load(Ordering::Relaxed)),
+            Some("Muted by the host and on this device")
+        );
+
+        // Unmuting locally must not claim the player can hear again.
+        set_mute_bit(&m, AUDIO_MUTE_LOCAL, false);
+        assert_eq!(
+            audio_mute_label(m.load(Ordering::Relaxed)),
+            Some("Muted by the host")
+        );
+
+        set_mute_bit(&m, AUDIO_MUTE_HOST, false);
+        assert_eq!(audio_mute_label(m.load(Ordering::Relaxed)), None);
     }
 }

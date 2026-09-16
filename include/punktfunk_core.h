@@ -25,7 +25,7 @@
 // Not [`WIRE_VERSION`]. The C surface can grow without a wire byte changing.
 // Pin the integer in `abi.rs` (`abi_version_is_pinned`). Per-bump notes live
 // in `CHANGELOG.md`.
-#define PUNKTFUNK_ABI_VERSION 33
+#define PUNKTFUNK_ABI_VERSION 34
 
 // punktfunk/1 wire version. `Hello`/`Welcome` carry it; hosts equality-check it.
 //
@@ -343,6 +343,18 @@
 #define PUNKTFUNK_AUDIO_BITS_16 16
 
 #define PUNKTFUNK_AUDIO_BITS_24 24
+
+#if defined(PUNKTFUNK_FEATURE_QUIC)
+// This client silenced its own speakers ([`NativeClient::set_audio_muted`]). The host keeps
+// sending, so a session joined to the same sink still hears the game.
+#define PUNKTFUNK_AUDIO_MUTE_LOCAL (1 << 0)
+#endif
+
+#if defined(PUNKTFUNK_FEATURE_QUIC)
+// The operator muted this session from the console ([`crate::quic::AudioState`]). The host
+// stopped encoding this session's audio, so a local unmute brings nothing back.
+#define PUNKTFUNK_AUDIO_MUTE_HOST (1 << 1)
+#endif
 
 #if defined(PUNKTFUNK_FEATURE_QUIC)
 // Two missed 500 ms legacy refreshes. A quieter host is treated as gone.
@@ -2410,6 +2422,27 @@ PunktfunkStatus punktfunk_connection_next_au(PunktfunkConnection *c,
 PunktfunkStatus punktfunk_connection_next_audio(PunktfunkConnection *c,
                                                 PunktfunkAudioPacket *out,
                                                 uint32_t timeout_ms);
+#endif
+
+#if defined(PUNKTFUNK_FEATURE_QUIC)
+// Mute this client's own speakers. Local only: the host keeps encoding and a session joined
+// to the same display keeps hearing the game. Audio keeps arriving and decoding — zero only
+// what you queue for the device — so unmute lands in step instead of re-syncing. Does not
+// clear `PUNKTFUNK_AUDIO_MUTE_HOST`.
+//
+// # Safety
+// `c` is a valid connection handle. Callable from any thread.
+PunktfunkStatus punktfunk_connection_set_audio_muted(PunktfunkConnection *c, bool muted);
+#endif
+
+#if defined(PUNKTFUNK_FEATURE_QUIC)
+// Why this session is silent: `PUNKTFUNK_AUDIO_MUTE_LOCAL`, `PUNKTFUNK_AUDIO_MUTE_HOST`,
+// both, or `0`. Name the reason in the overlay from this — a local unmute leaves an
+// operator mute standing, and the player is owed the difference.
+//
+// # Safety
+// `c` is a valid connection handle; `out` is NULL or writable for one `u8`.
+PunktfunkStatus punktfunk_connection_audio_mute(PunktfunkConnection *c, uint8_t *out);
 #endif
 
 #if defined(PUNKTFUNK_FEATURE_QUIC)
