@@ -594,7 +594,13 @@ const NEUTRAL_REPORT: [u8; 64] = {
     // finger held at (0, 0) until the host attaches.
     r[33] = 0x80;
     r[37] = 0x80;
-    r[53] = 0x0A; // battery: discharging, full — zero reads as ~5 %
+    // The rest of a USB pad at rest, as pf-inject's `serialize_state` writes it: IMU temperature,
+    // no trigger effect (zone 9), charge complete, USB data + power.
+    r[32] = 0x14;
+    r[42] = 0x09;
+    r[43] = 0x09;
+    r[53] = 0x2A;
+    r[54] = 0x18;
     r
 };
 // Neutral DualShock 4 input report 0x01: sticks centered (0x80); the dpad hat is in byte 5 (low
