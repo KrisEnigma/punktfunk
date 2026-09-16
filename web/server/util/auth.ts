@@ -526,10 +526,10 @@ export function csrfRequestOrigin(o: {
  * Whether a mutating request came from another origin and must be refused.
  *
  * SameSite=Lax still attaches the session cookie to another port on the same
- * host (the plugin-UI origin). `Sec-Fetch-Site: same-site` catches a modern
- * browser; `Origin` catches one that omits Fetch-Site. A missing Origin is
- * curl and is allowed — the threat is a browser. `Origin: null` is an opaque
- * document and is not.
+ * host (the plugin-UI origin). A browser that sends `Sec-Fetch-Site` is judged
+ * by it alone: the console answers with `Referrer-Policy: no-referrer`, so its
+ * own form POSTs carry `Origin: null`. Without Fetch-Site, `Origin` decides; a
+ * missing one is curl and is allowed, `null` is an opaque document and is not.
  */
 export function isCrossSiteMutation(o: {
 	method: string;
@@ -542,7 +542,7 @@ export function isCrossSiteMutation(o: {
 		return false;
 	}
 	const site = o.fetchSite?.toLowerCase();
-	if (site && site !== "same-origin" && site !== "none") return true;
+	if (site) return site !== "same-origin" && site !== "none";
 	const origin = o.origin?.trim();
 	if (!origin) return false;
 	if (origin === "null") return true;

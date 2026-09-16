@@ -103,9 +103,8 @@ describe("verifyUiPassword", () => {
 });
 
 // The CSRF gate. Plugin UIs are another port on the same host, so SameSite=Lax
-// still sends the session cookie; Origin is what distinguishes that POST from
-// the console's own. Fetch-Site is secondary — a browser that omits it still
-// sends Origin.
+// still sends the session cookie. Fetch-Site decides when present; Origin
+// covers a browser that omits it.
 const CONSOLE = "https://192.168.1.21:47992";
 const PLUGIN = "https://192.168.1.21:47993";
 
@@ -139,6 +138,15 @@ describe("isCrossSiteMutation", () => {
 
 	test("Origin null is refused", () => {
 		expect(post({ origin: "null" })).toBe(true);
+	});
+
+	test("Fetch-Site same-origin wins over Origin", () => {
+		// no-referrer makes a same-origin form POST send Origin: null; a proxy
+		// that rewrites Host makes the Origin mismatch the request.
+		expect(post({ fetchSite: "same-origin", origin: "null" })).toBe(false);
+		expect(
+			post({ fetchSite: "same-origin", origin: "https://console.example" }),
+		).toBe(false);
 	});
 
 	test("GET is never a CSRF mutation", () => {
