@@ -384,6 +384,11 @@ fn stream_ordered_requested() -> bool {
         .unwrap_or(true)
 }
 
+/// A dead convert worker waits this long before the lane spawns another. A crash loop would
+/// otherwise cost a process and a CUDA context on every frame; three deaths trip the raw lane's
+/// degrade latch, and the next session negotiates the import path instead.
+const WORKER_RESPAWN_BACKOFF: std::time::Duration = std::time::Duration::from_secs(1);
+
 /// The raw frame the fused pass last converted, and the ring slot holding the result.
 /// `cursor` is what the pass baked in — see [`cursor_mark`].
 #[derive(Clone, Copy)]
@@ -796,6 +801,8 @@ pub struct NvencCudaEncoder {
     /// The worker's convert timeline in CUDA: each pass's value is waited on the copy stream
     /// before NVENC maps the slot.
     convert_sem: Option<cuda::ExternalSemaphore>,
+    /// Earliest the lane may spawn another convert worker ([`WORKER_RESPAWN_BACKOFF`]).
+    worker_retry_at: Option<std::time::Instant>,
     /// One-shot [`diagnose_failed_open`](Self::diagnose_failed_open) — a reset burst logs once.
     diagnosed: bool,
     /// Two-thread retrieve. `None` in sync mode. Lives `init_session`→`teardown`.
@@ -925,6 +932,7 @@ impl NvencCudaEncoder {
             worker_cursor_serial: u64::MAX,
             last_raw: None,
             convert_sem: None,
+            worker_retry_at: None,
             diagnosed: false,
             inited: false,
             rfi_supported: false,
@@ -1016,6 +1024,10 @@ impl NvencCudaEncoder {
         }
         if let Some(w) = self.worker.as_mut() {
             w.forget_slots();
+            // The ring is retired, so every dmabuf the worker cached against it is stale.
+            // This releases the held fds and the Vulkan images they imported; without it a
+            // renegotiation leaves the old pool's imports sitting under the new one's.
+            w.clear_cache();
         }
         self.worker_slots.clear();
         self.last_raw = None;
@@ -1973,11 +1985,21 @@ impl NvencCudaEncoder {
         src_size: (u32, u32),
     ) -> Result<u64> {
         if self.worker.as_ref().is_none_or(|w| w.dead()) {
-            self.worker =
-                Some(pf_zerocopy::Importer::new_for_capture().context("spawn the convert worker")?);
+            // A corpse, not a first spawn: its death is the lane's to count.
+            if self.worker.take().is_some() {
+                pf_zerocopy::note_raw_dmabuf_import_failure("convert worker died");
+            }
+            // The timeline and the slot registrations belonged to that process.
             self.worker_slots.clear();
             self.worker_cursor_serial = u64::MAX;
             self.convert_sem = None;
+            let now = std::time::Instant::now();
+            if self.worker_retry_at.is_some_and(|at| now < at) {
+                bail!("NVENC (Linux): the convert worker is restarting");
+            }
+            self.worker_retry_at = Some(now + WORKER_RESPAWN_BACKOFF);
+            self.worker =
+                Some(pf_zerocopy::Importer::new_for_capture().context("spawn the convert worker")?);
         }
         let vk = self
             .vk_blend
