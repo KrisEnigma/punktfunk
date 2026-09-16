@@ -1075,6 +1075,7 @@ pub fn row_spec(
             deck: ctx.deck,
             fallback_ui: ctx.fallback_ui,
             pyrowave_ok: ctx.pyrowave_ok,
+            av1_ok: ctx.av1_ok,
             device_name: ctx.device_name,
             t: ctx.t,
         };
@@ -1260,6 +1261,8 @@ fn row_spec_base(id: RowId, ctx: &Ctx, presets: &[(String, String)]) -> RowSpec 
             "Video codec",
             if s.codec == "pyrowave" && !ctx.pyrowave_ok {
                 "PyroWave (unsupported)".into()
+            } else if s.codec == "av1" && !ctx.av1_ok {
+                "AV1 (unsupported)".into()
             } else {
                 label_for(codecs(ctx.platform), &s.codec).into()
             },
@@ -1511,6 +1514,10 @@ pub fn detail(id: RowId, ctx: &Ctx) -> &'static str {
         RowId::Codec if ctx.settings.codec == "pyrowave" && !ctx.pyrowave_ok => {
             "This device can't decode PyroWave — it needs a Vulkan 1.3 GPU, which most TV \
              boxes don't have. The session streams HEVC instead."
+        }
+        RowId::Codec if ctx.settings.codec == "av1" && !ctx.av1_ok => {
+            "This device has no hardware AV1 decoder, so the client never asks for AV1 — \
+             the session streams HEVC instead."
         }
         RowId::Codec => "A preference — the host falls back if it can't encode this one.",
         RowId::Decoder => "Automatic picks the best hardware decoder for this GPU, then software.",
@@ -2120,6 +2127,7 @@ pub(crate) mod tests {
             deck: false,
             fallback_ui: false,
             pyrowave_ok: true,
+            av1_ok: true,
             device_name: "t",
             t: 0.0,
         };
@@ -2227,6 +2235,7 @@ pub(crate) mod tests {
             deck: false,
             fallback_ui: false,
             pyrowave_ok: true,
+            av1_ok: true,
             device_name: "t",
             t: 0.0,
         };
@@ -2263,6 +2272,7 @@ pub(crate) mod tests {
             deck: false,
             fallback_ui: false,
             pyrowave_ok: true,
+            av1_ok: true,
             device_name: "t",
             t: 0.0,
         };
@@ -2325,6 +2335,7 @@ pub(crate) mod tests {
             deck: false,
             fallback_ui: false,
             pyrowave_ok: true,
+            av1_ok: true,
             device_name: "t",
             t: 0.0,
         };
@@ -2370,6 +2381,7 @@ pub(crate) mod tests {
             deck: false,
             fallback_ui: false,
             pyrowave_ok: true,
+            av1_ok: true,
             device_name: "t",
             t: 0.0,
         };
@@ -2403,6 +2415,7 @@ pub(crate) mod tests {
             deck: false,
             fallback_ui: false,
             pyrowave_ok: true,
+            av1_ok: true,
             device_name: "t",
             t: 0.0,
         };
@@ -2444,6 +2457,7 @@ pub(crate) mod tests {
             deck: false,
             fallback_ui: false,
             pyrowave_ok: true,
+            av1_ok: true,
             device_name: "t",
             t: 0.0,
         };
@@ -2489,6 +2503,7 @@ pub(crate) mod tests {
             deck: false,
             fallback_ui: false,
             pyrowave_ok: true,
+            av1_ok: true,
             device_name: "t",
             t: 0.0,
         };
@@ -2518,6 +2533,7 @@ pub(crate) mod tests {
             deck: false,
             fallback_ui: false,
             pyrowave_ok: true,
+            av1_ok: true,
             device_name: "t",
             t: 0.0,
         };
@@ -2553,6 +2569,7 @@ pub(crate) mod tests {
             deck: false,
             fallback_ui: true,
             pyrowave_ok: true,
+            av1_ok: true,
             device_name: "t",
             t: 0.0,
         };
@@ -2581,6 +2598,7 @@ pub(crate) mod tests {
             deck: false,
             fallback_ui: false,
             pyrowave_ok: false,
+            av1_ok: false,
             device_name: "t",
             t: 0.0,
         };
@@ -2609,6 +2627,53 @@ pub(crate) mod tests {
         );
     }
 
+    /// A device with no hardware AV1 decoder never advertises AV1, so the row that still
+    /// says "AV1" is the bug (#1138): the value and the line under it both say it lost.
+    #[test]
+    fn av1_reads_unsupported_without_a_hardware_decoder() {
+        let (mut settings, pads) = ctx_parts();
+        settings.codec = "av1".into();
+        let library = crate::library::LibraryShared::default();
+        let mut ctx = Ctx {
+            hosts: &[],
+            library: &library,
+            settings: &mut settings,
+            store: crate::store::file_store(),
+            platform: crate::platform::Platform::Desktop,
+            pads: &pads,
+            deck: false,
+            fallback_ui: false,
+            pyrowave_ok: true,
+            av1_ok: false,
+            device_name: "t",
+            t: 0.0,
+        };
+        let value = row_spec(RowId::Codec, &ctx, &[], &Default::default())
+            .value
+            .unwrap();
+        assert_eq!(value, "AV1 (unsupported)");
+        assert!(detail(RowId::Codec, &ctx).contains("no hardware AV1 decoder"));
+
+        // The other codecs keep the plain row and the plain line.
+        ctx.settings.codec = "hevc".into();
+        assert_eq!(
+            row_spec(RowId::Codec, &ctx, &[], &Default::default())
+                .value
+                .unwrap(),
+            "HEVC"
+        );
+        assert!(!detail(RowId::Codec, &ctx).contains("AV1"));
+
+        ctx.settings.codec = "av1".into();
+        ctx.av1_ok = true;
+        assert_eq!(
+            row_spec(RowId::Codec, &ctx, &[], &Default::default())
+                .value
+                .unwrap(),
+            "AV1"
+        );
+    }
+
     #[test]
     fn bitrate_dims_under_pyrowave() {
         let (mut settings, pads) = ctx_parts();
@@ -2625,6 +2690,7 @@ pub(crate) mod tests {
             deck: false,
             fallback_ui: false,
             pyrowave_ok: true,
+            av1_ok: true,
             device_name: "t",
             t: 0.0,
         };
@@ -2656,6 +2722,7 @@ pub(crate) mod tests {
             deck: false,
             fallback_ui: false,
             pyrowave_ok: true,
+            av1_ok: true,
             device_name: "t",
             t: 0.0,
         };
@@ -2726,6 +2793,7 @@ pub(crate) mod tests {
             deck: false,
             fallback_ui: false,
             pyrowave_ok: true,
+            av1_ok: true,
             device_name: "t",
             t: 0.0,
         };
@@ -2759,6 +2827,7 @@ pub(crate) mod tests {
             deck: false,
             fallback_ui: false,
             pyrowave_ok: true,
+            av1_ok: true,
             device_name: "t",
             t: 0.0,
         };
@@ -2790,6 +2859,7 @@ pub(crate) mod tests {
             deck: false,
             fallback_ui: false,
             pyrowave_ok: true,
+            av1_ok: true,
             device_name: "t",
             t: 0.0,
         };
@@ -2820,6 +2890,7 @@ pub(crate) mod tests {
             deck: false,
             fallback_ui: false,
             pyrowave_ok: true,
+            av1_ok: true,
             device_name: "t",
             t: 0.0,
         };
@@ -2851,6 +2922,7 @@ pub(crate) mod tests {
             deck: false,
             fallback_ui: false,
             pyrowave_ok: true,
+            av1_ok: true,
             device_name: "t",
             t: 0.0,
         };
@@ -2939,6 +3011,7 @@ pub(crate) mod tests {
             deck: false,
             fallback_ui: false,
             pyrowave_ok: true,
+            av1_ok: true,
             device_name: "t",
             t: 0.0,
         };
@@ -2990,6 +3063,7 @@ pub(crate) mod tests {
             deck: false,
             fallback_ui: false,
             pyrowave_ok: true,
+            av1_ok: true,
             device_name: "t",
             t: 0.0,
         };
@@ -3021,6 +3095,7 @@ pub(crate) mod tests {
             deck: false,
             fallback_ui: false,
             pyrowave_ok: true,
+            av1_ok: true,
             device_name: "t",
             t: 0.0,
         };
@@ -3287,6 +3362,7 @@ pub(crate) mod tests {
             deck: false,
             fallback_ui: false,
             pyrowave_ok: true,
+            av1_ok: true,
             device_name: "t",
             t: 0.0,
         };
@@ -3328,6 +3404,7 @@ pub(crate) mod tests {
             deck: false,
             fallback_ui: false,
             pyrowave_ok: true,
+            av1_ok: true,
             device_name: "t",
             t: 0.0,
         };
@@ -3364,6 +3441,7 @@ pub(crate) mod tests {
             deck: false,
             fallback_ui: false,
             pyrowave_ok: true,
+            av1_ok: true,
             device_name: "t",
             t: 0.0,
         };
@@ -3404,6 +3482,7 @@ pub(crate) mod tests {
             deck: false,
             fallback_ui: false,
             pyrowave_ok: true,
+            av1_ok: true,
             device_name: "t",
             t: 0.0,
         };
@@ -3478,6 +3557,7 @@ pub(crate) mod tests {
             deck: false,
             fallback_ui: false,
             pyrowave_ok: true,
+            av1_ok: true,
             device_name: "t",
             t: 0.0,
         };
@@ -3533,6 +3613,7 @@ pub(crate) mod tests {
             deck: false,
             fallback_ui: false,
             pyrowave_ok: true,
+            av1_ok: true,
             device_name: "t",
             t: 0.0,
         };
