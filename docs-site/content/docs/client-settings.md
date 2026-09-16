@@ -190,7 +190,9 @@ ordinary type.
 It defaults **off on Apple** because switching it on costs a permission question, which is worth
 asking only from a controller the app can see you own: Input Monitoring on a Mac (the controller
 shares its USB interface with the pad's built-in keyboard mode, so macOS treats opening it as
-keyboard listening), Bluetooth on an iPhone or iPad. Android needs no such prompt for a pad
+keyboard listening), Bluetooth on an iPhone or iPad. A Mac takes the cable only when a pad is
+attached at the moment the stream starts, so a Mac without one falls back to the radio and is
+asked for Bluetooth instead. Android needs no such prompt for a pad
 already attached, so it defaults on and simply does nothing when no SC2 is present. The capture
 engages at the next stream, and a badge confirms it.
 
