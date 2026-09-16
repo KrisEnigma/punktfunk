@@ -1714,6 +1714,9 @@ pub(crate) async fn run_admitted(
         audio_rx,
         pad_slots_rx,
         launch_outcome_rx,
+        peer: peer.ip(),
+        counters: counters.clone(),
+        stats: stats.clone(),
     }));
     // Only a fingerprint has a record to watch; with no record there is nothing to expire.
     match (session_fp_hex.clone(), access_watch) {

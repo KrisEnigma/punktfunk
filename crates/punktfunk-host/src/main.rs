@@ -131,6 +131,8 @@ mod client_logs;
 // Re-`Hello::launch` must not start a second copy — design/session-game-lifetime.md.
 mod launchreg;
 mod library;
+#[forbid(unsafe_code)]
+mod link_health;
 mod log_capture;
 // Network-facing secure-default surface. `not(test)` because tests mutate process env
 // (`set_var` is unsafe in 2024) and `native` has in-process C-ABI roundtrips.

@@ -270,6 +270,11 @@ pub struct SessionCounters {
     bitrate_max_kbps: AtomicU32,
     bitrate_sum_kbps: AtomicU64,
     bitrate_notes: AtomicU32,
+    /// Last rate noted, so a rebuild at the same number is not a move.
+    bitrate_last_kbps: AtomicU32,
+    /// Per-minute link health ([`crate::link_health`]). Drained by the control task, not by
+    /// the summary: these are window deltas, the rest of this block is session totals.
+    pub link: crate::link_health::LinkCounters,
 }
 
 impl SessionCounters {
@@ -310,6 +315,9 @@ impl SessionCounters {
     pub fn note_bitrate(&self, kbps: u32) {
         if kbps == 0 {
             return;
+        }
+        if self.bitrate_last_kbps.swap(kbps, Ordering::Relaxed) != kbps {
+            self.link.note_retarget();
         }
         self.bitrate_min_kbps
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |m| {
@@ -434,6 +442,9 @@ pub struct SessionSnapshot {
     pub pads: Vec<u8>,
     /// Player slot the operator picked, 0-based. `None` = lazy claim.
     pub preferred_pad_slot: Option<u8>,
+    /// Last closed link-health minute ([`crate::link_health`]). `None` in a session's first
+    /// minute, before one has closed.
+    pub link: Option<crate::link_health::LinkMinute>,
 }
 
 fn registry() -> &'static Mutex<Vec<LiveSession>> {
@@ -634,6 +645,8 @@ pub fn register(reg: Registration) -> LiveSessionGuard {
     session
         .counters
         .note_bitrate(session.bitrate_kbps.load(Ordering::Relaxed));
+    // The link-health lines carry this id, so a line ties to a `/status` row.
+    session.counters.link.set_session_id(id);
     crate::events::emit(crate::events::EventKind::SessionStarted {
         session: session_ref(&session),
     });
@@ -755,6 +768,7 @@ pub fn snapshot() -> Vec<SessionSnapshot> {
                 last_resize_ms: s.last_resize_ms.load(Ordering::Relaxed),
                 pads: s.controls.pads(),
                 preferred_pad_slot: s.controls.player(),
+                link: s.counters.link.last(),
             }
         })
         .collect()
