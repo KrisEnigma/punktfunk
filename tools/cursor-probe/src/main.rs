@@ -93,6 +93,7 @@ mod linux {
             gpu,
             false,
             false,
+            false,
             policy,
             vout.expect_exact_dims,
             kwin,
