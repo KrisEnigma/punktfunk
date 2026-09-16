@@ -96,7 +96,7 @@ impl AudioOutputMode {
 }
 
 /// Where voice-chat apps play while a stream runs (`PUNKTFUNK_AUDIO_VOICE_CHAT`).
-/// Linux only: the other planes capture one endpoint and cannot split a mix.
+/// Linux moves the apps' PipeWire streams; Windows writes their per-app output device.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum VoiceChatRoute {
     /// In the stream like everything else. Right when the viewer is not in the call.
@@ -138,8 +138,8 @@ impl VoiceChatRoute {
     }
 }
 
-/// Lowercase fragments a voice-chat app's `application.name` or process binary
-/// contains. Discord's three builds all contain `discord`.
+/// Lowercase fragments a voice-chat app's `application.name`, process binary or
+/// exe file name contains. Discord's three builds all contain `discord`.
 pub const DEFAULT_VOICE_APPS: &[&str] = &[
     "discord",
     "vesktop",
@@ -151,20 +151,30 @@ pub const DEFAULT_VOICE_APPS: &[&str] = &[
     "mumble",
 ];
 
-/// `PUNKTFUNK_AUDIO_VOICE_APPS`: a comma list replacing [`DEFAULT_VOICE_APPS`].
-/// Blank entries drop; an empty or unset value keeps the default list.
+/// `PUNKTFUNK_AUDIO_VOICE_APPS`: a comma list added to [`DEFAULT_VOICE_APPS`],
+/// lowercased, blanks and repeats dropped. A console store feeds the same list later.
 pub fn parse_voice_apps(raw: Option<&str>) -> Vec<String> {
-    let listed: Vec<String> = raw
+    let mut apps: Vec<String> = DEFAULT_VOICE_APPS.iter().map(|s| s.to_string()).collect();
+    for extra in raw
         .unwrap_or_default()
         .split(',')
         .map(|s| s.trim().to_ascii_lowercase())
         .filter(|s| !s.is_empty())
-        .collect();
-    if listed.is_empty() {
-        DEFAULT_VOICE_APPS.iter().map(|s| s.to_string()).collect()
-    } else {
-        listed
+    {
+        if !apps.contains(&extra) {
+            apps.push(extra);
+        }
     }
+    apps
+}
+
+/// Whether any of `names` (an application name, a binary path, an exe file name)
+/// contains a listed voice-app fragment. Case-insensitive; the list is lowercase.
+pub fn voice_app_matches<'a>(names: impl IntoIterator<Item = &'a str>, apps: &[String]) -> bool {
+    names
+        .into_iter()
+        .map(str::to_ascii_lowercase)
+        .any(|n| apps.iter().any(|a| n.contains(a.as_str())))
 }
 
 /// Operator and dispatch knobs resolved once. Session-mutated values stay at
@@ -562,13 +572,24 @@ mod tests {
         );
         assert_eq!(VoiceChatRoute::parse("both"), None);
         assert_eq!(VoiceChatRoute::default(), VoiceChatRoute::Stream);
-        // A blank or absent list keeps the default; a typed one replaces it, lowercased.
+        // A blank or absent list is the default; a typed one adds to it, lowercased, no repeats.
         assert_eq!(parse_voice_apps(None), DEFAULT_VOICE_APPS);
         assert_eq!(parse_voice_apps(Some(" , ")), DEFAULT_VOICE_APPS);
-        assert_eq!(
-            parse_voice_apps(Some("Discord, firefox ,,")),
-            vec!["discord", "firefox"]
-        );
+        let extended = parse_voice_apps(Some("Discord, firefox ,,"));
+        assert_eq!(extended.len(), DEFAULT_VOICE_APPS.len() + 1);
+        assert_eq!(extended.last().map(String::as_str), Some("firefox"));
+        assert!(voice_app_matches(["Discord"], &extended));
+        assert!(voice_app_matches(
+            ["WEBRTC VoiceEngine", "DiscordCanary.exe"],
+            &extended
+        ));
+        assert!(voice_app_matches(["/usr/bin/vesktop"], &extended));
+        assert!(voice_app_matches(["Firefox"], &extended));
+        assert!(!voice_app_matches(
+            ["Firefox", "firefox.exe"],
+            &parse_voice_apps(None)
+        ));
+        assert!(!voice_app_matches(std::iter::empty(), &extended));
     }
 
     /// `prefers_host_hardware` and `keeps_default` must stay mutually exclusive:
