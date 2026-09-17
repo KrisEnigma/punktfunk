@@ -269,7 +269,7 @@ struct Nv12Blit {
     y_tex: u32,
     /// Immutable `GL_RG8` chroma, W/2 × H/2.
     uv_tex: u32,
-    /// Retargeted per frame. `GL_LINEAR` so the UV pass averages 2×2.
+    /// Retargeted per frame. `GL_LINEAR` so the UV pass's two taps each average two texels.
     src_tex: u32,
     width: u32,
     height: u32,

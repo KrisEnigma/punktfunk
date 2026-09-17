@@ -490,18 +490,21 @@ float main(float4 pos : SV_POSITION) : SV_TARGET {
 }
 ";
 
-/// PyroWave chroma: half-res interleaved CbCr into `R8G8_UNORM`. Centre-sited
-/// 2×2 box, then BT.709 limited Cb/Cr — byte-identical to `rgb2yuv.comp`.
-/// Even dimensions keep the 2×2 block in-bounds.
+/// PyroWave chroma: half-res interleaved CbCr into `R8G8_UNORM`. Left-sited
+/// (H.273 type 0) [1 2 1] over columns p.x-1..p.x+1, then BT.709 limited Cb/Cr —
+/// the same as `rgb2yuv.comp`. Even dimensions keep p.x+1 in-bounds.
 const PYRO_UV_PS: &str = r"
 Texture2D<float4> tx : register(t0);
 float2 main(float4 pos : SV_POSITION) : SV_TARGET {
     int2 p = int2(pos.xy) * 2;
+    int2 l = int2(max(p.x - 1, 0), p.y);
     float3 c00 = tx.Load(int3(p,             0)).rgb;
     float3 c10 = tx.Load(int3(p + int2(1,0), 0)).rgb;
     float3 c01 = tx.Load(int3(p + int2(0,1), 0)).rgb;
     float3 c11 = tx.Load(int3(p + int2(1,1), 0)).rgb;
-    float3 a = (c00 + c10 + c01 + c11) * 0.25;
+    float3 cl0 = tx.Load(int3(l,             0)).rgb;
+    float3 cl1 = tx.Load(int3(l + int2(0,1), 0)).rgb;
+    float3 a = (cl0 + 2.0 * c00 + c10 + cl1 + 2.0 * c01 + c11) * 0.125;
     float u = 128.0/255.0 - 0.1006*a.r - 0.3386*a.g + 0.4392*a.b;
     float v = 128.0/255.0 + 0.4392*a.r - 0.3989*a.g - 0.0403*a.b;
     return float2(u, v);
@@ -567,17 +570,20 @@ float main(float4 pos : SV_POSITION) : SV_TARGET {
 }
 ";
 
-/// PyroWave HDR 4:2:0 chroma: half-res, centre-sited 2×2 in scRGB-linear
-/// (matches SDR + `rgb2yuv.comp`, not the P010 left-cosite), then PQ + studio Cb/Cr.
+/// PyroWave HDR 4:2:0 chroma: half-res, left-sited [1 2 1] like the SDR pass, averaged
+/// in scRGB-linear, then PQ + studio Cb/Cr.
 const PYRO_HDR_UV_PS: &str = r"
 #include_common
 float2 main(float4 pos : SV_POSITION) : SV_TARGET {
     int2 p = int2(pos.xy) * 2;
+    int2 l = int2(max(p.x - 1, 0), p.y);
     float3 a = tx.Load(int3(p,             0)).rgb;
     float3 b = tx.Load(int3(p + int2(1,0), 0)).rgb;
     float3 c = tx.Load(int3(p + int2(0,1), 0)).rgb;
     float3 d = tx.Load(int3(p + int2(1,1), 0)).rgb;
-    float3 pq = scrgb_to_pq2020_rgb((a + b + c + d) * 0.25);
+    float3 e = tx.Load(int3(l,             0)).rgb;
+    float3 f = tx.Load(int3(l + int2(0,1), 0)).rgb;
+    float3 pq = scrgb_to_pq2020_rgb((e + 2.0 * a + b + f + 2.0 * c + d) * 0.125);
     return cbcr_unorm(pq);
 }
 ";
