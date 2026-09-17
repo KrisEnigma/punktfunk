@@ -250,8 +250,12 @@ aims**: the dial highlights whatever slot your thumb points at, and letting go r
 centre — the D-pad is what steps disc by disc. **A** fires the highlight, the centre one opens the
 sheet, **Y** returns to the centre and **B** closes.
 
-A Mac hands your pointer back for as long as the dial is up, so you can click a button, and takes
-capture again when it closes. Buttons a platform cannot serve are dimmed and say why: **Touch
+On a keyboard, **Tab** steps through the six buttons and then the centre, the **arrows** aim (up is
+the top button, down the bottom, and again from either lands on the centre), **Enter** fires and
+**Esc** closes. The dial opens with the centre lit, so a first Enter opens the sheet.
+
+Every desktop hands your pointer back for as long as the dial is up, so you can click a button, and
+takes capture again when it closes. Buttons a platform cannot serve are dimmed and say why: **Touch
 mode**, **Virtual controller** and **Keyboard** on a Mac, which has no touch screen and no software
 keyboard. **Guide button** and **Quick access menu** are dimmed wherever controller input is not
 forwarded — they ride the same wire pad.
