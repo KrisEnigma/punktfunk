@@ -875,6 +875,7 @@
 	"sessions_own_display": "Own display",
 	"sessions_joined": "Joined another session",
 	"sessions_uptime": "Up {time}",
+	"sessions_shared_path": "Same network as {names}",
 	"sessions_muted": "Muted",
 	"action_mute": "Mute",
 	"action_unmute": "Unmute",

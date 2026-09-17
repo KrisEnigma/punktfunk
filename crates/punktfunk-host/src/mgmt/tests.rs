@@ -475,6 +475,7 @@ fn fake_native_session(
         chroma: crate::encode::ChromaFormat::Yuv420,
         end_reason: Arc::new(std::sync::atomic::AtomicU8::new(0)),
         counters: Arc::new(crate::session_status::SessionCounters::default()),
+        peer: None,
     })
 }
 
@@ -523,6 +524,7 @@ fn fake_session_with_flags(
         chroma: crate::encode::ChromaFormat::Yuv420,
         end_reason: Arc::new(std::sync::atomic::AtomicU8::new(0)),
         counters: Arc::new(crate::session_status::SessionCounters::default()),
+        peer: None,
     });
     (guard, stop, quit, idr)
 }

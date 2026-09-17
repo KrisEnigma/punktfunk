@@ -79,6 +79,8 @@ struct LiveSession {
     tally: Option<SessionTally>,
     /// Totals the input, audio and encode paths bump while the session runs.
     counters: Arc<SessionCounters>,
+    /// Client address, so sessions from one NAT or tunnel can be told apart.
+    peer: Option<std::net::IpAddr>,
 }
 
 /// The video loop's own totals, handed over as it finishes.
@@ -445,6 +447,8 @@ pub struct SessionSnapshot {
     /// Last closed link-health minute ([`crate::link_health`]). `None` in a session's first
     /// minute, before one has closed.
     pub link: Option<crate::link_health::LinkMinute>,
+    /// Other live sessions from the same client address.
+    pub shared_path_with: Vec<u64>,
 }
 
 fn registry() -> &'static Mutex<Vec<LiveSession>> {
@@ -581,6 +585,8 @@ pub struct Registration {
     pub end_reason: Arc<AtomicU8>,
     /// The session's shared counter block, already being bumped by its side threads.
     pub counters: Arc<SessionCounters>,
+    /// Client address. `None` only where there is no connection (tests).
+    pub peer: Option<std::net::IpAddr>,
 }
 
 /// Publish a live native session. The guard removes it on drop and pairs
@@ -606,6 +612,7 @@ pub fn register(reg: Registration) -> LiveSessionGuard {
         chroma,
         end_reason,
         counters,
+        peer,
     } = reg;
     let id = next_id();
     // A standing title policy reaches a session that arrives under it.
@@ -639,6 +646,7 @@ pub fn register(reg: Registration) -> LiveSessionGuard {
         end_reason,
         tally: None,
         counters,
+        peer: peer.map(|ip| ip.to_canonical()),
     };
     // The opening rate, so the span has a floor before adaptive bitrate moves it. Registration
     // is after the encoder opened, so this is what it actually runs at.
@@ -650,7 +658,19 @@ pub fn register(reg: Registration) -> LiveSessionGuard {
     crate::events::emit(crate::events::EventKind::SessionStarted {
         session: session_ref(&session),
     });
-    registry().lock().unwrap().push(session);
+    let mut reg = registry().lock().unwrap();
+    let sharing = shared_path(&reg, session.id, session.peer);
+    if !sharing.is_empty() {
+        // Same address is one NAT or tunnel, not proof of one bottleneck — so an observation.
+        tracing::warn!(
+            session = session.id,
+            peer = ?session.peer,
+            others = ?sharing,
+            "sessions share one client address — each adapts its bitrate on its own"
+        );
+    }
+    reg.push(session);
+    drop(reg);
     LiveSessionGuard {
         id,
         _sleep: crate::sleep_inhibit::hold(),
@@ -733,16 +753,25 @@ pub fn record_tally(id: u64, tally: SessionTally) {
     }
 }
 
+/// Ids of the other live sessions from `peer`, oldest first.
+fn shared_path(reg: &[LiveSession], id: u64, peer: Option<std::net::IpAddr>) -> Vec<u64> {
+    let Some(peer) = peer else {
+        return Vec::new();
+    };
+    reg.iter()
+        .filter(|s| s.id != id && s.peer == Some(peer))
+        .map(|s| s.id)
+        .collect()
+}
+
 pub fn count() -> usize {
     registry().lock().unwrap().len()
 }
 
 /// Snapshot of every live native session; mode/bitrate read live. Newest last.
 pub fn snapshot() -> Vec<SessionSnapshot> {
-    registry()
-        .lock()
-        .unwrap()
-        .iter()
+    let reg = registry().lock().unwrap();
+    reg.iter()
         .map(|s| {
             let (width, height, fps) = crate::native::unpack_mode(s.mode.load(Ordering::Relaxed));
             SessionSnapshot {
@@ -769,6 +798,7 @@ pub fn snapshot() -> Vec<SessionSnapshot> {
                 pads: s.controls.pads(),
                 preferred_pad_slot: s.controls.player(),
                 link: s.counters.link.last(),
+                shared_path_with: shared_path(&reg, s.id, s.peer),
             }
         })
         .collect()
@@ -1049,11 +1079,20 @@ mod tests {
             chroma: ChromaFormat::Yuv420,
             end_reason,
             counters,
+            peer: None,
         });
         (guard, stop, quit)
     }
 
     fn fake_joiner(client: &str, join: bool) -> (LiveSessionGuard, SessionControls) {
+        fake_at(client, join, None)
+    }
+
+    fn fake_at(
+        client: &str,
+        join: bool,
+        peer: Option<std::net::IpAddr>,
+    ) -> (LiveSessionGuard, SessionControls) {
         let controls = SessionControls::open();
         let guard = register(Registration {
             mode: Arc::new(AtomicU64::new(0)),
@@ -1075,8 +1114,38 @@ mod tests {
             chroma: ChromaFormat::Yuv420,
             end_reason: Arc::new(AtomicU8::new(0)),
             counters: Arc::new(SessionCounters::default()),
+            peer,
         });
         (guard, controls)
+    }
+
+    /// One address is one NAT or tunnel: each session names the others there, and an
+    /// IPv4-mapped IPv6 peer is the same address.
+    #[test]
+    fn sessions_from_one_address_name_each_other() {
+        let v4: std::net::IpAddr = "203.0.113.77".parse().unwrap();
+        let mapped: std::net::IpAddr = "::ffff:203.0.113.77".parse().unwrap();
+        let (a, _) = fake_at("phone", false, Some(v4));
+        let (b, _) = fake_at("pc", false, Some(mapped));
+        let (c, _) = fake_at("tv", false, Some("203.0.113.78".parse().unwrap()));
+        let rows = snapshot();
+        let with = |id| {
+            rows.iter()
+                .find(|s| s.id == id)
+                .unwrap()
+                .shared_path_with
+                .clone()
+        };
+        assert_eq!(with(a.id), vec![b.id]);
+        assert_eq!(with(b.id), vec![a.id]);
+        assert!(with(c.id).is_empty());
+        drop(b);
+        assert!(snapshot()
+            .iter()
+            .find(|s| s.id == a.id)
+            .unwrap()
+            .shared_path_with
+            .is_empty());
     }
 
     #[test]

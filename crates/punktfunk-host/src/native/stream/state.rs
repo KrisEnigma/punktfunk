@@ -845,6 +845,7 @@ impl StreamState {
             chroma: plan.chroma,
             end_reason: end_reason.clone(),
             counters: counters.clone(),
+            peer: Some(conn.remote_address().ip()),
         });
 
         // Replaced by `spawn_session_watcher` inside the session span; disconnected until then.
