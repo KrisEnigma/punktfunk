@@ -832,6 +832,10 @@ in
           # the home and points ExecStart at it. Every path is '-' because none is guaranteed.
           BindReadOnlyPaths = [
             "-%h/.config/punktfunk/plugin-token"
+            # What the supervisor hands each sandbox: that plugin's own minted token, and the roots
+            # `plugins grant` added. Without them no plugin with a manifest starts at all.
+            "-%h/.config/punktfunk/plugin-tokens.json"
+            "-%h/.config/punktfunk/plugin-grants.json"
             "-%h/.config/punktfunk/native-cert.pem"
             "-%h/.config/punktfunk/cert.pem"
             "-%h/.config/punktfunk/mgmt-endpoint"
