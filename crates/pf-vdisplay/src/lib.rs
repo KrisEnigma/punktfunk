@@ -602,6 +602,18 @@ pub fn gamescope_splash_client() -> anyhow::Result<()> {
     gamescope::splash_run()
 }
 
+/// Where this session's virtual pads must be exposed for its seat's Steam to see them, or
+/// `None` when that Steam sees every pad on the box as it always has.
+///
+/// The spawn wraps the seat's nested command in a `bwrap` whose `/dev/input` is this directory,
+/// so `pf-inject` writing one symlink here is the whole of "the seat has a controller". Same
+/// decision both sides ask (`vdisplay/linux/gamescope/sandbox.rs`); `pf-inject` never learns
+/// what a seat is.
+#[cfg(target_os = "linux")]
+pub fn seat_device_dir(iso: &SessionIsolation) -> Option<std::path::PathBuf> {
+    gamescope::sandbox::plan(Some(iso), iso.steam_home.is_some()).dev()
+}
+
 /// Can a gamescope session on this host stream 10-bit BT.2020 PQ?
 ///
 /// Settled **before spawn** — punktfunk/1 Welcome fixes bit depth and cannot
