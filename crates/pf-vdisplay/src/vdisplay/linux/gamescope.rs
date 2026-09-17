@@ -20,6 +20,8 @@ use std::time::{Duration, Instant};
 mod discovery;
 #[path = "gamescope/heads.rs"]
 mod heads;
+#[path = "gamescope/seat.rs"]
+mod seat;
 #[path = "gamescope/splash.rs"]
 mod splash;
 use discovery::{
@@ -434,8 +436,12 @@ impl VirtualDisplay for GamescopeDisplay {
     }
 
     fn isolation_key(&self) -> Option<String> {
-        // Reuse key: a kept isolated spawn has this session's relay and Pulse env baked in.
-        self.isolation.as_ref().map(|i| i.id.clone())
+        // Reuse key: a kept isolated spawn has this session's relay, Pulse and Steam-home env
+        // baked in, and the seat home is a knob the operator can turn off between sessions.
+        self.isolation.as_ref().map(|i| match &i.steam_home {
+            Some(home) => format!("{}@{}", i.id, home.display()),
+            None => i.id.clone(),
+        })
     }
 
     fn take_topology_restore(&mut self) -> Option<Box<dyn FnOnce() + Send>> {
@@ -547,12 +553,23 @@ impl VirtualDisplay for GamescopeDisplay {
                                    // alone while spawn fell back to `PUNKTFUNK_GAMESCOPE_APP` would pass `--steam` with no instance free.
         let app = resolved_spawn_app(self.cmd.as_deref());
         let steam = app.as_deref().is_some_and(is_steam_launch);
+        // This session's own Steam home, provisioned on first use. `None` keeps every path below
+        // on the box's single Steam instance.
+        let seat_home = self
+            .isolation
+            .as_ref()
+            .filter(|_| steam)
+            .and_then(|i| i.steam_home.as_deref())
+            .and_then(seat::ensure_home);
         if steam {
             // No attach degrade here: a box without takeover privilege fails with the actionable error.
             stop_autologin_sessions()
                 .context("dedicated Steam launch needs the box's gaming session freed")?;
-            // Desktop Steam holds the instance too; autologin stop cannot see it.
-            free_desktop_steam()?;
+            // Desktop Steam holds the instance too; autologin stop cannot see it. A seat's Steam
+            // locks its own home, so it never contends for `~`'s.
+            if seat_home.is_none() {
+                free_desktop_steam()?;
+            }
         } else if free_box_session_for_exclusive(steam, exclusive) {
             // Best-effort: on Game Mode the autologin session is DRM master, so Exclusive needs it
             // gone. A refusal costs the dark screen, not the game.
@@ -574,6 +591,7 @@ impl VirtualDisplay for GamescopeDisplay {
             &log,
             self.hdr,
             self.isolation.as_ref(),
+            seat_home.as_deref(),
         )?;
         let mut proc = GamescopeProc {
             child,
@@ -897,11 +915,20 @@ fn descends_from(mut pid: u32, ancestor: u32) -> bool {
 /// Run `cmd` inside the live session (managed / SteamOS / attach — [`spawn`]'s nesting does not
 /// apply). Best-effort display env from a process already inside; without it, host env (a
 /// `steam steam://…` still reaches the running Steam over its pipe).
-pub fn launch_into_session(cmd: &str, seat: Option<&str>) -> Result<std::process::Child> {
+pub fn launch_into_session(
+    cmd: &str,
+    seat: Option<&str>,
+    steam_home: Option<&std::path::Path>,
+) -> Result<std::process::Child> {
     let mut c = Command::new("sh");
     c.arg("-c").arg(cmd);
     // Keeps AppImageLauncher's binfmt hook from replacing an .AppImage with its dialog.
     c.env("APPIMAGELAUNCHER_DISABLE", "1");
+    // A kept seat's Steam answers on its own `steam.pipe`; without this the forwarder hands the
+    // launch to the box's Steam instead.
+    if let Some(home) = steam_home {
+        c.envs(seat::env(home));
+    }
     match discover_session_display_env(seat) {
         Some((x11, wayland, _xauth)) => {
             tracing::info!(
@@ -3974,10 +4001,14 @@ const STEAM_UP_MARGIN: Duration = Duration::from_secs(2);
 /// `steam <uri>` hands off over Steam's pipe and exits; a hung forwarder is not worth waiting on.
 const STEAM_URI_BUDGET: Duration = Duration::from_secs(20);
 
-/// Steam's console log, under the `~/.steam/steam` link a native install keeps.
-fn steam_console_log() -> Option<std::path::PathBuf> {
-    let home = std::env::var_os("HOME")?;
-    Some(std::path::PathBuf::from(home).join(".steam/steam/logs/console_log.txt"))
+/// Steam's console log, under the `.steam/steam` link a native install keeps in its home — the
+/// seat's when this session has one, else the box's.
+fn steam_console_log(steam_home: Option<&std::path::Path>) -> Option<std::path::PathBuf> {
+    let home = match steam_home {
+        Some(h) => h.to_path_buf(),
+        None => std::path::PathBuf::from(std::env::var_os("HOME")?),
+    };
+    Some(home.join(".steam/steam/logs/console_log.txt"))
 }
 
 /// Has Steam logged [`STEAM_UP_MARKER`] past `from`? `from` resets on a log Steam truncated.
@@ -4000,14 +4031,18 @@ fn steam_up_since(path: &std::path::Path, from: &mut u64) -> bool {
 
 /// Give the session's Steam `uri` once it is up ([`deferred_shortcut_uri`]).
 ///
-/// The forwarder reaches the nested client over `~/.steam/steam.pipe`, so it needs none of the
-/// session's env. `gamescope` is this spawn's pid: with the session gone there is nothing left
-/// to launch into, and the URI would land in whatever Steam the box has instead.
-fn hand_launch_to_steam_when_up(uri: String, gamescope: u32) {
+/// The forwarder reaches the nested client over its home's `steam.pipe`, so it needs that home
+/// and none of the rest of the session's env. `gamescope` is this spawn's pid: with the session
+/// gone there is nothing left to launch into, and the URI would land in the box's Steam instead.
+fn hand_launch_to_steam_when_up(
+    uri: String,
+    gamescope: u32,
+    steam_home: Option<std::path::PathBuf>,
+) {
     let spawned = std::thread::Builder::new()
         .name("pf1-steamuri".into())
         .spawn(move || {
-            let log = steam_console_log();
+            let log = steam_console_log(steam_home.as_deref());
             let mut from = log
                 .as_ref()
                 .and_then(|p| std::fs::metadata(p).ok())
@@ -4040,13 +4075,12 @@ fn hand_launch_to_steam_when_up(uri: String, gamescope: u32) {
                 );
             }
             tracing::info!(%uri, steam_up = up, "gamescope: handing the launch to the nested Steam");
-            if let Err(e) = crate::proc::status_within(
-                Command::new("steam")
-                    .arg(&uri)
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null()),
-                STEAM_URI_BUDGET,
-            ) {
+            let mut forward = Command::new("steam");
+            forward.arg(&uri).stdout(Stdio::null()).stderr(Stdio::null());
+            if let Some(home) = &steam_home {
+                forward.envs(seat::env(home));
+            }
+            if let Err(e) = crate::proc::status_within(&mut forward, STEAM_URI_BUDGET) {
                 tracing::warn!(%uri, error = %format!("{e:#}"), "gamescope: launch not handed to Steam");
             }
         });
@@ -4226,6 +4260,7 @@ fn resolved_spawn_app(cmd: Option<&str>) -> Option<String> {
 /// `None` app is `sleep infinity`. The wrapper relays `LIBEI_SOCKET`, applies the
 /// nested environment, and runs the launch value as the shell command its source promises.
 /// The WSI layer stays out of gamescope's own Vulkan process.
+#[allow(clippy::too_many_arguments)] // one cohesive spawn spec, one call site
 fn spawn(
     w: u32,
     h: u32,
@@ -4234,6 +4269,7 @@ fn spawn(
     log: &std::path::Path,
     hdr: bool,
     iso: Option<&crate::SessionIsolation>,
+    seat_home: Option<&std::path::Path>,
 ) -> Result<Child> {
     // Real app vs `sleep infinity` keep-alive: scopes the game-only cursor-grab flag below.
     let game_launch = app.is_some();
@@ -4277,7 +4313,13 @@ fn spawn(
              an HDR10 swapchain. The punktfunk-gamescope package ships a matching layer."
         );
     }
-    let script = nested_wrapper_script(&relay, splash_exe.is_some(), &wsi.env());
+    // The seat home is the NESTED command's, never gamescope's: the compositor keeps the box's
+    // runtime dir, where PipeWire, Wayland and the EIS relay live.
+    let mut nested_env = wsi.env();
+    if let Some(home) = seat_home.filter(|_| is_steam_launch(&app)) {
+        nested_env.extend(seat::env(home));
+    }
+    let script = nested_wrapper_script(&relay, splash_exe.is_some(), &nested_env);
     cmd.args(["sh", "-c", &script, "sh"]);
     if let Some(exe) = &splash_exe {
         cmd.arg(exe);
@@ -4322,7 +4364,7 @@ fn spawn(
         .spawn()
         .context("spawn gamescope (is it installed? `apt install gamescope`)")?;
     if let Some(uri) = deferred {
-        hand_launch_to_steam_when_up(uri, child.id());
+        hand_launch_to_steam_when_up(uri, child.id(), seat_home.map(std::path::Path::to_path_buf));
     }
     Ok(child)
 }

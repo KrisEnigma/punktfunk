@@ -1776,17 +1776,21 @@ pub(crate) async fn run_admitted(
             .map(|_| {
                 // `--open` has no fingerprint; a per-accept sequence isolates at the cost of keep-alive.
                 static ANON_SEQ: AtomicU64 = AtomicU64::new(0);
-                let id = session_fp_hex
+                let paired = session_fp_hex
                     .as_deref()
-                    .map(|fp| fp[..fp.len().min(8)].to_string())
+                    .map(|fp| fp[..fp.len().min(8)].to_string());
+                let id = paired
+                    .clone()
                     .unwrap_or_else(|| format!("anon{}", ANON_SEQ.fetch_add(1, Ordering::Relaxed)));
                 // Monitor-mode has no per-session sink — audio stays shared; input/mic still isolate.
                 let sink = crate::audio::per_session_sink_possible()
                     .then(|| format!("punktfunk-speaker-iso-{id}"));
                 let mic_source = Some(format!("punktfunk-mic-{id}"));
+                let steam_home =
+                    seat_home_for(paired.as_deref(), pf_host_config::config().steam_seat_home);
                 tracing::info!(%id, sink = sink.as_deref().unwrap_or("-"),
                 "isolated gamescope session — per-session input/audio/mic planes");
-                crate::vdisplay::SessionIsolation::new(id, sink, mic_source)
+                crate::vdisplay::SessionIsolation::new(id, sink, mic_source, steam_home)
             }),
     };
     // Pinned injector + swappable route. Drop at session end closes the EIS connection.
@@ -2562,9 +2566,28 @@ fn delivered_mode(
     }
 }
 
+/// This session's Steam home, or `None` for the box's own.
+///
+/// A seat is a fingerprint: an `anon<seq>` id is minted per accept, so a Steam signed in under
+/// one would never be found again.
+#[cfg(target_os = "linux")]
+fn seat_home_for(paired: Option<&str>, on: bool) -> Option<std::path::PathBuf> {
+    paired.filter(|_| on).map(pf_paths::seat_home)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The knob is the only way in, and an unpaired session never gets a seat home.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn only_a_paired_client_with_the_knob_on_gets_a_seat_home() {
+        let seat = seat_home_for(Some("cafe0123"), true).expect("a paired seat has a home");
+        assert!(seat.ends_with("seats/cafe0123"), "{}", seat.display());
+        assert_eq!(seat_home_for(Some("cafe0123"), false), None, "knob off");
+        assert_eq!(seat_home_for(None, true), None, "anon<seq> has no identity");
+    }
 
     /// The accept loop's address-validation gate. A first contact is unvalidated; a Retry turns
     /// it into a second, validated arrival, and the client completes anyway. Pins the quinn

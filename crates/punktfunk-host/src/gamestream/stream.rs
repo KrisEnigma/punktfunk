@@ -339,7 +339,7 @@ fn run(
             }
             Some(cmd) => {
                 let own = target.as_ref().is_some_and(|t| t.own_workspace);
-                match crate::library::launch_session_command(compositor, cmd, None, own) {
+                match crate::library::launch_session_command(compositor, cmd, None, own, None) {
                     Ok(mut spawned) => {
                         spawned_now = true;
                         launch_workspace = spawned.workspace.take();

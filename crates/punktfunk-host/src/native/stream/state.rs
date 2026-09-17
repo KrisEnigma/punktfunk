@@ -610,8 +610,16 @@ impl StreamState {
             }
             Some(cmd) => {
                 let own = launch_target.as_ref().is_some_and(|t| t.own_workspace);
-                match crate::library::launch_session_command(compositor, cmd, seat.as_deref(), own)
-                {
+                // A reuse spawned nothing, so the launch goes to the live session — under this
+                // seat's Steam home when it has one.
+                let seat_steam = isolation.as_ref().and_then(|i| i.steam_home.as_deref());
+                match crate::library::launch_session_command(
+                    compositor,
+                    cmd,
+                    seat.as_deref(),
+                    own,
+                    seat_steam,
+                ) {
                     Ok(mut spawned) => {
                         spawned_now = true;
                         launch_workspace = spawned.workspace.take();

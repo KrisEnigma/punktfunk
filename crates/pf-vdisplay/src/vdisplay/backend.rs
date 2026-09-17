@@ -45,19 +45,28 @@ pub struct SessionIsolation {
     pub sink: Option<String>,
     /// Nested apps' `PULSE_SOURCE` `node.name`.
     pub mic_source: Option<String>,
+    /// `HOME` a nested Steam launch runs under (`pf_paths::seat_home`), so it neither
+    /// contends with the box's Steam nor shares its account. `None` = the box's own home.
+    pub steam_home: Option<std::path::PathBuf>,
 }
 
 #[cfg(target_os = "linux")]
 impl SessionIsolation {
     /// Build the identity, computing the relay path under the session env lock: the producer-side
     /// `XDG_RUNTIME_DIR` read must not race a concurrent handshake's `apply_session_env`.
-    pub fn new(id: String, sink: Option<String>, mic_source: Option<String>) -> SessionIsolation {
+    pub fn new(
+        id: String,
+        sink: Option<String>,
+        mic_source: Option<String>,
+        steam_home: Option<std::path::PathBuf>,
+    ) -> SessionIsolation {
         let ei_relay = crate::with_env_lock(|| pf_paths::gamescope_ei_socket_file_for(&id));
         SessionIsolation {
             id,
             ei_relay,
             sink,
             mic_source,
+            steam_home,
         }
     }
 }

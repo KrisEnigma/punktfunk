@@ -243,11 +243,15 @@ pub fn launch_is_nested(compositor: Compositor, route: Option<&GamescopeRoute>) 
     compositor == Compositor::Gamescope && matches!(route, Some(GamescopeRoute::Spawn))
 }
 
-/// Launch `cmd` into a live managed/attach session. Spawn nests instead
-/// ([`launch_is_nested`]).
+/// Launch `cmd` into a live managed/attach session, or into a kept bare spawn. A fresh spawn
+/// nests instead ([`launch_is_nested`]). `steam_home` is that seat's ([`crate::SessionIsolation`]).
 #[cfg(target_os = "linux")]
-pub fn launch_into_gamescope_session(cmd: &str, seat: Option<&str>) -> Result<std::process::Child> {
-    gamescope::launch_into_session(cmd, seat)
+pub fn launch_into_gamescope_session(
+    cmd: &str,
+    seat: Option<&str>,
+    steam_home: Option<&std::path::Path>,
+) -> Result<std::process::Child> {
+    gamescope::launch_into_session(cmd, seat, steam_home)
 }
 
 /// Put compositor focus on streamed head `name` so a window mapping now lands
