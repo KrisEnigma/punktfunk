@@ -309,6 +309,7 @@ fn handle_request(req: &Request, state: &Arc<AppState>, peer: Option<SocketAddr>
                         state.force_idr.clone(),
                         state.rfi_range.clone(),
                         state.loss_stats.clone(),
+                        state.video_hdr.clone(),
                         // Rikey reaches the video plane only when `SS_ENC_VIDEO` was negotiated.
                         cfg.encrypt_video.then_some(ls.gcm_key),
                         state.video_cap.clone(),

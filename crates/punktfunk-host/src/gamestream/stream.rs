@@ -83,6 +83,7 @@ pub fn start(
     force_idr: Arc<AtomicBool>,
     rfi_range: RfiSlot,
     loss: Arc<super::GsLossStats>,
+    video_hdr: super::VideoHdr,
     // Session rikey, only when `cfg.encrypt_video`. Not a `StreamConfig` field: that
     // struct is `Debug`-logged at stream start.
     gcm_key: Option<[u8; 16]>,
@@ -129,6 +130,7 @@ pub fn start(
                 &force_idr,
                 &rfi_range,
                 &loss,
+                &video_hdr,
                 gcm_key,
                 &video_cap,
                 &stats,
@@ -144,6 +146,7 @@ pub fn start(
                 tracing::error!(error = %format!("{e:#}"), "video stream failed");
             }
             running.store(false, Ordering::SeqCst);
+            *video_hdr.lock().unwrap() = None;
             // Before `client.disconnected` — native loop event order.
             drop(stream_marker);
             crate::events::emit(crate::events::EventKind::ClientDisconnected {
@@ -164,6 +167,7 @@ fn run(
     force_idr: &AtomicBool,
     rfi_range: &std::sync::Mutex<Option<(i64, i64)>>,
     loss: &super::GsLossStats,
+    video_hdr: &std::sync::Mutex<Option<pf_frame::HdrMeta>>,
     gcm_key: Option<[u8; 16]>,
     video_cap: &std::sync::Mutex<Option<PooledCapturer>>,
     stats: &Arc<crate::stats_recorder::StatsRecorder>,
@@ -447,6 +451,7 @@ fn run(
             force_idr,
             rfi_range,
             loss,
+            video_hdr,
             gcm_key,
             stats,
             &client_label,
@@ -529,6 +534,7 @@ fn run(
         force_idr,
         rfi_range,
         loss,
+        video_hdr,
         gcm_key,
         stats,
         &client_label,
@@ -794,6 +800,7 @@ fn gs_open_encoder(
             cfg.fps,
             enc_bps,
             gs_bit_depth(frame.format),
+            None,
             wire_seq_base,
         );
     }
@@ -1068,6 +1075,8 @@ fn stream_body(
     rfi_range: &std::sync::Mutex<Option<(i64, i64)>>,
     // Client 0x0201 loss counters — 1 Hz adaptation reads deltas.
     loss: &super::GsLossStats,
+    // What this loop encodes, for the control thread's HDR-mode cue.
+    video_hdr: &std::sync::Mutex<Option<pf_frame::HdrMeta>>,
     gcm_key: Option<[u8; 16]>,
     stats: &Arc<crate::stats_recorder::StatsRecorder>,
     client_label: &str,
@@ -1210,6 +1219,7 @@ fn stream_body(
     // invalidate is never rate-limited.
     let keyframe_coalesce = keyframe_coalesce_window(frame_interval);
     let mut last_keyframe: Option<Instant> = None;
+    let mut published_hdr: Option<pf_frame::HdrMeta> = None;
     // A pipeline-head drop consumes no frameIndex; the client cannot see the gap. Arm an IDR
     // through the same coalesce gate so a burst of drops cannot become an IDR storm.
     let mut recover_after_drop = false;
@@ -1379,7 +1389,14 @@ fn stream_body(
             }
         }
         // Stock Moonlight tone-maps from in-band mastering/CLL SEI on keyframes. `None` is a no-op.
-        enc.set_hdr_meta(capturer.hdr_meta());
+        let hdr_meta = capturer
+            .hdr_meta()
+            .filter(|_| gs_bit_depth(frame.format) == 10);
+        enc.set_hdr_meta(hdr_meta);
+        if hdr_meta != published_hdr {
+            published_hdr = hdr_meta;
+            *video_hdr.lock().unwrap() = hdr_meta;
+        }
         // An encoder the loop does not feed (the Windows driver) already holds the access units
         // it owes — waited for after a fresh frame, never on a repeat; every other backend
         // takes this tick's frame.
