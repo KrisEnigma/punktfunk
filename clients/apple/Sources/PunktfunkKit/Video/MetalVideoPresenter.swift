@@ -1269,10 +1269,10 @@ public final class MetalVideoPresenter {
                 surfacePool.removeAll()
                 return
             }
-            if hdr, let name = CGColorSpace(name: CGColorSpace.itur_2100_PQ)?.name {
-                // Tag the surface BT.2100 PQ so the compositor interprets the half-float
-                // samples as PQ-encoded HDR (the CALayer-contents analogue of the metal
-                // layer's colorspace).
+            // Tag the surface like the metal layer (BT.2100 PQ, or `sdrColorspace`), so the
+            // compositor colour-matches the contents instead of drawing them in the panel's space.
+            let space = hdr ? CGColorSpace(name: CGColorSpace.itur_2100_PQ) : sdrColorspace
+            if let name = space?.name {
                 IOSurfaceSetValue(surface, "IOSurfaceColorSpace" as CFString, name)
             }
             surfacePool.append(SurfaceSlot(surface: surface, texture: texture))
