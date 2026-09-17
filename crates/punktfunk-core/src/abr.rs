@@ -342,6 +342,11 @@ pub(crate) struct BitrateController {
     /// Last [`request`](Self::request). Taken (not kept) by the ack, so one
     /// request is judged at most once.
     last_requested_kbps: Option<u32>,
+    /// What made the latest bad window bad. A backoff can fire on a quiet
+    /// window after the streak, so the cause is kept from the bad one.
+    streak_cut: Option<crate::hud::RateCut>,
+    /// Why the last backoff happened; cleared by the next acked climb.
+    last_cut: Option<crate::hud::RateCut>,
     /// Two identical short acks latch [`host_cap_kbps`](Self::host_cap_kbps).
     /// One can be a failed rebuild keeping the old rate.
     short_ack_kbps: u32,
@@ -426,6 +431,8 @@ impl BitrateController {
             encode_rearmed: false,
             host_cap_kbps: None,
             last_requested_kbps: None,
+            streak_cut: None,
+            last_cut: None,
             short_ack_kbps: 0,
             short_acks: 0,
             cap_probe_windows: 0,
@@ -730,6 +737,7 @@ impl BitrateController {
                 // Rate rose: next choke is at a climbed-to rate. An acked
                 // decrease does not arm this — drain is not a knee encounter.
                 self.climb_since_backoff = true;
+                self.last_cut = None;
             }
             self.current_kbps = kbps;
             // Unsolicited `BitrateChanged` can sit above our ceiling (host
@@ -892,6 +900,12 @@ impl BitrateController {
         }
         if bad {
             self.bad_windows += 1;
+            self.streak_cut = Some(cut_cause(
+                dropped > 0 || flushed || loss_ppm >= HEAVY_LOSS_PPM,
+                recovery_kf >= RECOVERY_KF_BAD,
+                decode_bad || decode_severe,
+                encode_bad || encode_severe,
+            ));
             if decode_bad {
                 // Counted here: backoff only sees the final window, and the
                 // cooldown eats the first ordinary-bad window.
@@ -1116,6 +1130,7 @@ impl BitrateController {
             }
             self.bad_windows = 0;
             self.streak_decode_windows = 0;
+            self.last_cut = self.streak_cut;
             return self.request(next, now);
         }
         // Decode headroom: a clean, loaded, full-rate window with the signal.
@@ -1213,6 +1228,11 @@ impl BitrateController {
         Some(kbps)
     }
 
+    /// Why the rate was last cut, while it has not climbed since.
+    pub(crate) fn last_cut(&self) -> Option<crate::hud::RateCut> {
+        self.last_cut
+    }
+
     /// Control queue was full: undo request bookkeeping. [`MAX_UNACKED`]
     /// detects a host that doesn't answer; counting a message never sent
     /// retires the controller. Also keeps a later unsolicited ack from being
@@ -1220,6 +1240,23 @@ impl BitrateController {
     pub(crate) fn on_request_dropped(&mut self) {
         self.unacked = self.unacked.saturating_sub(1);
         self.last_requested_kbps = None;
+    }
+}
+
+/// A bad window's cause, most concrete first: loss and repairs are visible
+/// damage, decode and encode are an end's own limit, delay is what remains.
+fn cut_cause(loss: bool, repairs: bool, decode: bool, encode: bool) -> crate::hud::RateCut {
+    use crate::hud::RateCut;
+    if loss {
+        RateCut::Loss
+    } else if repairs {
+        RateCut::Repairs
+    } else if decode {
+        RateCut::Decoder
+    } else if encode {
+        RateCut::Encoder
+    } else {
+        RateCut::Delay
     }
 }
 
@@ -1403,6 +1440,7 @@ mod tests {
             ),
             Some(14_000)
         );
+        assert_eq!(c.last_cut(), Some(crate::hud::RateCut::Loss));
     }
 
     #[test]
@@ -1821,6 +1859,12 @@ mod tests {
             ),
             Some(14_000)
         );
+        assert_eq!(c.last_cut(), Some(crate::hud::RateCut::Delay));
+        // A climb the host grants clears it; a cut it grants does not.
+        c.on_ack(14_000);
+        assert_eq!(c.last_cut(), Some(crate::hud::RateCut::Delay));
+        c.on_ack(15_000);
+        assert_eq!(c.last_cut(), None);
     }
 
     #[test]
