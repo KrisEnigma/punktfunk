@@ -563,7 +563,7 @@ impl Presenter {
             hdr_metadata = has_hdr_metadata,
             "swapchain config"
         );
-        let overlay_pipe = OverlayPipe::new(&device, format.format)?;
+        let overlay_pipe = OverlayPipe::new(&device, format.format, false)?;
         let scale = crate::scale::ScalePass::new(&device, format.format)?;
 
         // SAFETY: CREATE — CreateInfo is a local; the pool is owned by the Presenter being built.
