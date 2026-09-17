@@ -236,7 +236,10 @@ host would drop.
 
 On Android, iPhone and iPad a **two-finger twist** on the stream opens a dial of six buttons under
 your fingers: about 10° starts it opening, 30° commits it, and lifting short of that winds it back
-in and sends nothing. The centre button opens a sheet with the whole catalogue and the resolution
+in and sends nothing. In the **Touch** model on iPhone and iPad the twist is gone — every finger
+belongs to the host there — so the dial opens on a **two-finger pull from either side edge**
+instead: both fingers land on the bezel and come inward together. It takes nothing from the game
+until the pull finishes, and a pull that stops short was simply two touches. The centre button opens a sheet with the whole catalogue and the resolution
 presets. On Android the **Back** gesture opens the same dial at the screen centre instead of ending
 the session; on iPhone and iPad the corner disc does; on Apple TV a short press of the remote's
 Back; on Android, macOS, Linux and Windows **Ctrl+Alt+Shift+O** (**⌃⌥⇧O** on a Mac, also the
