@@ -2094,6 +2094,19 @@ impl NvencCudaEncoder {
         }
     }
 
+    /// AV1 keyframes carry the HDR volume as metadata OBUs after the sequence header; NVENC
+    /// writes none itself.
+    fn av1_hdr_obus(&self, mut data: Vec<u8>, keyframe: bool) -> Vec<u8> {
+        if let Some(m) = self
+            .hdr_meta
+            .filter(|_| keyframe && self.hdr && self.codec == Codec::Av1)
+        {
+            let obus = pf_frame::hdr::av1_hdr_metadata_obus(&m);
+            pf_frame::hdr::av1_insert_before_frame(&mut data, &obus);
+        }
+        data
+    }
+
     /// Absorb one retrieve completion: FIFO-check, unmap on the encode thread (retrieve never
     /// touches input resources), queue the AU.
     fn absorb_done(&mut self, done: RetrieveDone) -> Result<()> {
@@ -2111,6 +2124,7 @@ impl NvencCudaEncoder {
             }
         }
         let (data, keyframe) = done.result.map_err(|e| anyhow!("{e}"))?;
+        let data = self.av1_hdr_obus(data, keyframe);
         self.async_rt
             .as_mut()
             .expect("absorb_done is only reachable in two-thread mode")
@@ -2798,6 +2812,7 @@ impl Encoder for NvencCudaEncoder {
             if let Some(us) = encode_us {
                 self.feed_split_arbiter(us);
             }
+            let data = self.av1_hdr_obus(data, keyframe);
             Ok(Some(EncodedFrame {
                 data,
                 pts_ns,

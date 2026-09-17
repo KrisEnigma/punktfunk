@@ -617,6 +617,8 @@ pub struct VulkanVideoEncoder {
     header: Vec<u8>,
     // Empty for HEVC; AV1 = a temporal-delimiter OBU (Vulkan emits only the frame OBU).
     frame_prefix: Vec<u8>,
+    // HDR10 static metadata keyframes carry in-band (HEVC SEI, AV1 metadata OBUs).
+    hdr_meta: Option<pf_frame::HdrMeta>,
 
     dpb_image: vk::Image,
     dpb_mem: vk::DeviceMemory,
@@ -1588,6 +1590,7 @@ impl VulkanVideoEncoder {
             params,
             header,
             frame_prefix,
+            hdr_meta: None,
             dpb_image,
             dpb_mem,
             dpb_views,
@@ -3745,6 +3748,13 @@ impl VulkanVideoEncoder {
         };
         let mut data = Vec::with_capacity(prefix.len() + len);
         data.extend_from_slice(prefix);
+        // Parameter sets / sequence header first, then the HDR volume, then the picture.
+        if let Some(m) = self.hdr_meta.filter(|_| f.keyframe && self.is_hdr) {
+            match self.codec {
+                Codec::Av1 => data.extend_from_slice(&pf_frame::hdr::av1_hdr_metadata_obus(&m)),
+                _ => data.extend_from_slice(&pf_frame::hdr::hevc_hdr_sei_nal(&m)),
+            }
+        }
         data.extend_from_slice(std::slice::from_raw_parts(p.add(off), len));
         Ok(EncodedFrame {
             data,
@@ -3824,6 +3834,10 @@ impl Encoder for VulkanVideoEncoder {
 
     fn request_keyframe(&mut self) {
         self.force_kf = true;
+    }
+
+    fn set_hdr_meta(&mut self, meta: Option<pf_frame::HdrMeta>) {
+        self.hdr_meta = meta;
     }
 
     fn invalidate_ref_frames(&mut self, first_frame: i64, last_frame: i64) -> bool {

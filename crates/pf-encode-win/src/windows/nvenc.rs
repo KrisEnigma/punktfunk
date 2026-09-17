@@ -1471,6 +1471,19 @@ impl NvencD3d11Encoder {
         }
     }
 
+    /// AV1 keyframes carry the HDR volume as metadata OBUs after the sequence header; NVENC
+    /// writes none itself.
+    fn av1_hdr_obus(&self, mut data: Vec<u8>, keyframe: bool) -> Vec<u8> {
+        if let Some(m) = self
+            .hdr_meta
+            .filter(|_| keyframe && self.hdr && self.codec == Codec::Av1)
+        {
+            let obus = pf_frame::hdr::av1_hdr_metadata_obus(&m);
+            pf_frame::hdr::av1_insert_before_frame(&mut data, &obus);
+        }
+        data
+    }
+
     /// Fold one retrieve-thread completion into encoder state on the encode thread: pop the
     /// oldest `pending` (FIFO), verify bitstream pairing, unmap, queue the AU. A retrieve error
     /// surfaces after the unmap so the rebuild path starts from clean state.
@@ -1490,6 +1503,7 @@ impl NvencD3d11Encoder {
             }
         }
         let (data, keyframe) = done.result.map_err(|e| anyhow!("{e}"))?;
+        let data = self.av1_hdr_obus(data, keyframe);
         self.async_rt
             .as_mut()
             .expect("absorb_done is only reachable in async mode")
@@ -1999,6 +2013,7 @@ impl Encoder for NvencD3d11Encoder {
             if let Some(us) = encode_us {
                 self.feed_split_arbiter(us);
             }
+            let data = self.av1_hdr_obus(data, keyframe);
             Ok(Some(EncodedFrame {
                 data,
                 pts_ns,
