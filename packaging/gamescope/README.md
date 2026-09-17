@@ -27,6 +27,7 @@ The patches here add the missing half, and nothing else. See
 | `0014-pipewire-pace-the-capture-push-to-the-consumer-s-max.patch` | `paint_pipewire` pushes at most `maxFramerate` frames a second — the consumer's wire rate — and leaves a skipped change pending for the next vblank, so a game at 190 fps no longer costs two 4K composites per wire frame under adaptive sync | **Yes** — upstream pushes on every commit whatever the consumer negotiated |
 | `0015-pipewire-offer-a-P010-capture-format-BT.2020-PQ-4-2-0.patch` | Offer SPA `P010_10LE` (MANDATORY BT.2020 + PQ, MANDATORY BT.2020 limited matrix) after the packed 10-bit formats, and write it with a new `cs_rgb_to_p010` pass: the PQ codes through the BT.2020 matrix into R16/RG16 plane views. An HDR consumer whose encoder takes 4:2:0 (VAAPI Main 10, Vulkan Video) then pays no conversion of its own | **Yes** — the 10-bit twin of the NV12 offer upstream already has |
 | `0016-headless-report-HDR10-under-hdr-debug-force-support.patch` | With `--hdr-debug-force-support`, `CHeadlessConnector` reports an HDR10 connector (`bExposeHDRSupport`, PQ encoding, `SupportsHDR()` = `IsHDR10()`), so `GAMESCOPE_DISPLAY_SUPPORTS_HDR` and the `gamescope_control` HDR flag reach Steam. Without it Steam shows HDR as unavailable and games that follow Steam's setting cannot enable it. The composite is unchanged | **Yes** — the flag forces the WSI feedback but leaves Steam told there is no HDR |
+| `0017-wlserver-bound-the-pointer-by-the-X-window-not-its-s.patch` | Bound the pointer by the input focus window's X geometry, which steamcompmgr reports on every focus pass, instead of the WSI override surface's extent. Pointer coordinates are the X window's; the override is the game's swapchain, so a swapchain smaller than the window fenced the pointer into its top-left and the right and bottom of the picture could not be reached | **Yes** — upstream bounded by window geometry before its 2024 cursor rework |
 
 ### Why the headless patch matters
 
@@ -117,6 +118,7 @@ The number is a **monotonic patch-set revision**, so one probe answers every cap
 | `+pfhdr12` | …and the capture push honours the consumer's `maxFramerate` |
 | `+pfhdr13` | …and a `P010` capture format (BT.2020 PQ, 4:2:0) |
 | `+pfhdr14` | …and the headless connector reports HDR10 under `--hdr-debug-force-support`, so Steam's HDR setting can be turned on |
+| `+pfhdr15` | …and the pointer reaches the whole window of a game whose swapchain is smaller (no new capability) |
 
 Require `+pfhdr10` for headless `--adaptive-sync` with a CLI cap: `+pfhdr9` clears that cap
 on the first paint unless Steam or a control command supplies an override. The Arch package is
