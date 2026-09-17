@@ -438,10 +438,7 @@ impl VirtualDisplay for GamescopeDisplay {
     fn isolation_key(&self) -> Option<String> {
         // Reuse key: a kept isolated spawn has this session's relay, Pulse and Steam-home env
         // baked in, and the seat home is a knob the operator can turn off between sessions.
-        self.isolation.as_ref().map(|i| match &i.steam_home {
-            Some(home) => format!("{}@{}", i.id, home.display()),
-            None => i.id.clone(),
-        })
+        self.isolation.as_ref().map(crate::SessionIsolation::key)
     }
 
     fn take_topology_restore(&mut self) -> Option<Box<dyn FnOnce() + Send>> {

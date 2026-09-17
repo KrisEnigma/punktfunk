@@ -69,6 +69,16 @@ impl SessionIsolation {
             steam_home,
         }
     }
+
+    /// The registry's reuse key. A kept spawn has this id's planes and this home baked into its
+    /// env, so only a session asking for both may be handed it back — and a pre-warm has to
+    /// build the same string, or it parks a display nobody claims.
+    pub fn key(&self) -> String {
+        match &self.steam_home {
+            Some(home) => format!("{}@{}", self.id, home.display()),
+            None => self.id.clone(),
+        }
+    }
 }
 
 /// Capture target plus RAII keepalive; drop releases the compositor resource.

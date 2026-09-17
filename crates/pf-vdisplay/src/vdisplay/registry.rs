@@ -85,7 +85,7 @@ pub fn acquire(
 ) -> Result<super::VirtualOutput> {
     let backend = vd.name();
     #[cfg(target_os = "linux")]
-    let out = linux::acquire(vd, mode, quit, supersedes);
+    let out = linux::acquire(vd, mode, quit, supersedes, false);
     #[cfg(not(target_os = "linux"))]
     let out = {
         // Windows linger/quit is `VirtualDisplay::set_quit_flag` on the backend
@@ -111,6 +111,38 @@ pub fn acquire(
         });
     }
     out
+}
+
+/// Pre-warm a display for a seat and keep it until a session claims it
+/// (`design/steam-seats-warm-launch-implementation-plan.md` WP-S2).
+///
+/// Same create path as [`acquire`], so the entry carries the reuse key a session then asks for.
+/// A parked display outlives the operator's `keep_alive`, does not count against `max_displays`
+/// at admission, and is the first thing a create at the cap evicts.
+///
+/// `false` when this seat holds a display a pre-warm must not take — a live session's, or a kept
+/// one at another mode, colourimetry or cursor mode — and nothing was warmed.
+#[cfg(target_os = "linux")]
+pub fn park(vd: &mut Box<dyn super::VirtualDisplay>, mode: super::Mode) -> Result<bool> {
+    let backend = vd.name();
+    let (width, height, refresh_hz) = (mode.width, mode.height, mode.refresh_hz);
+    let parked = linux::park(vd, mode)?;
+    // Only a fresh compositor is `Created`; adopting a kept display was counted at its create.
+    if parked == Some(true) {
+        crate::emit_display_event(crate::DisplayEvent::Created {
+            backend: backend.to_string(),
+            width,
+            height,
+            refresh_hz,
+        });
+    }
+    Ok(parked.is_some())
+}
+
+/// Isolation keys of the seats parked right now ([`park`]).
+#[cfg(target_os = "linux")]
+pub fn parked_isolations() -> Vec<String> {
+    linux::parked_isolations()
 }
 
 /// Cheap lock-read of the host's managed virtual displays.
@@ -309,6 +341,10 @@ mod pool {
         /// a kept SDR gamescope has no `--hdr-enabled`, and the reverse would
         /// negotiate 8-bit off a PQ composite.
         pub(super) hdr: bool,
+        /// Pre-warmed for a seat, with no session yet ([`super::park`]). It outlives the
+        /// operator's keep-alive policy, counts as spare capacity rather than a held display,
+        /// and is evicted first. Cleared the moment a session claims it.
+        pub(super) parked: bool,
     }
 
     /// Gamescope is the only virtual output that offers HDR. Its teardown ends the compositor
@@ -346,17 +382,20 @@ mod pool {
             .collect()
     }
 
-    /// Displays that count against `max_displays` at admission: everything but Lingering.
+    /// Displays that count against `max_displays` at admission: everything but Lingering and
+    /// parked. Both are spare capacity — [`super::linux::acquire`] reuses one or evicts it, so
+    /// neither holds a new session out.
     pub(super) fn budget_count(entries: &[Entry]) -> u32 {
         entries
             .iter()
-            .filter(|e| !matches!(e.life, lifecycle::State::Lingering { .. }))
+            .filter(|e| !e.parked && !matches!(e.life, lifecycle::State::Lingering { .. }))
             .count() as u32
     }
 
-    /// Lingering display a create evicts so the pool stays within `max`: the one nearest
-    /// expiry. `None` below the cap. `supersedes` does not count; its successor replaces it.
-    pub(super) fn lingering_to_evict(
+    /// Kept display a create evicts so the pool stays within `max`: a parked seat first — it has
+    /// no session behind it — else the lingering one nearest expiry. `None` below the cap.
+    /// `supersedes` does not count; its successor replaces it.
+    pub(super) fn kept_to_evict(
         entries: &[Entry],
         max: u32,
         supersedes: Option<u64>,
@@ -368,14 +407,26 @@ mod pool {
         if counted < max {
             return None;
         }
+        let kept = |e: &Entry| {
+            matches!(
+                e.life,
+                lifecycle::State::Lingering { .. } | lifecycle::State::Pinned
+            )
+        };
         entries
             .iter()
-            .filter_map(|e| match e.life {
-                lifecycle::State::Lingering { until } => Some((until, e.generation)),
-                _ => None,
+            .find(|e| e.parked && kept(e))
+            .map(|e| e.generation)
+            .or_else(|| {
+                entries
+                    .iter()
+                    .filter_map(|e| match e.life {
+                        lifecycle::State::Lingering { until } => Some((until, e.generation)),
+                        _ => None,
+                    })
+                    .min()
+                    .map(|(_, generation)| generation)
             })
-            .min()
-            .map(|(_, generation)| generation)
     }
 
     /// Live display a `mode_conflict: join` session shares: Active, same backend, mode,
@@ -497,10 +548,21 @@ mod pool {
         (expired, restores)
     }
 
+    /// Linger a release applies. A parked seat has no owner yet, so it outlives a `keep_alive`
+    /// that may be Off — the budget, `/display/release`, a dead compositor or the host stopping
+    /// are what end it.
+    pub(super) fn release_linger(parked: bool, force_immediate: bool, policy: Linger) -> Linger {
+        if parked {
+            Linger::Forever
+        } else {
+            effective_linger(force_immediate, policy)
+        }
+    }
+
     /// Linger applied on release. A deliberate quit (`force_immediate`) turns a
     /// linger window into Immediate. `Forever` outranks quit: the screen stays
     /// until `/display/release`.
-    pub(super) fn effective_linger(force_immediate: bool, policy: Linger) -> Linger {
+    fn effective_linger(force_immediate: bool, policy: Linger) -> Linger {
         match (force_immediate, policy) {
             (true, Linger::Forever) => Linger::Forever,
             (true, _) => Linger::Immediate,
@@ -645,6 +707,7 @@ mod pool {
                 generation,
                 hw_cursor: false,
                 hdr: false,
+                parked: false,
             }
         }
 
@@ -697,6 +760,22 @@ mod pool {
                 Linger::For(Duration::from_secs(10))
             );
             assert_eq!(effective_linger(false, Linger::Forever), Linger::Forever);
+        }
+
+        /// A parked seat survives `keep_alive: off`, which is what every other display on that
+        /// host tears down on. Once a session claims it the policy applies again.
+        #[test]
+        fn a_parked_seat_outlives_a_keep_alive_that_is_off() {
+            for quit in [false, true] {
+                assert_eq!(
+                    release_linger(true, quit, Linger::Immediate),
+                    Linger::Forever
+                );
+            }
+            assert_eq!(
+                release_linger(false, false, Linger::Immediate),
+                Linger::Immediate
+            );
         }
 
         #[test]
@@ -845,16 +924,45 @@ mod pool {
             };
             let pool = vec![live, late, soon];
             assert_eq!(budget_count(&pool), 1);
-            assert_eq!(lingering_to_evict(&pool, 4, None), None);
-            assert_eq!(lingering_to_evict(&pool, 3, None), Some(3));
+            assert_eq!(kept_to_evict(&pool, 4, None), None);
+            assert_eq!(kept_to_evict(&pool, 3, None), Some(3));
             // A mode switch replacing gen 1 does not push the pool to the cap.
-            assert_eq!(lingering_to_evict(&pool, 3, Some(1)), None);
+            assert_eq!(kept_to_evict(&pool, 3, Some(1)), None);
 
             let mut pinned = test_entry("hyprland", 4, None);
             pinned.life = lifecycle::State::Pinned;
             let full = vec![pool.into_iter().next().unwrap(), pinned];
             assert_eq!(budget_count(&full), 2);
-            assert_eq!(lingering_to_evict(&full, 2, None), None);
+            assert_eq!(kept_to_evict(&full, 2, None), None);
+        }
+
+        /// A parked seat is spare capacity: it holds no session out at admission, and a create
+        /// at the cap takes it before any lingering display.
+        #[test]
+        fn a_create_at_the_cap_evicts_a_parked_seat_first() {
+            use std::time::Duration;
+            let mut live = test_entry("gamescope", 1, None);
+            live.life.acquire();
+            let mut lingering = test_entry("gamescope", 2, None);
+            lingering.life = lifecycle::State::Lingering {
+                until: Instant::now() + Duration::from_secs(5),
+            };
+            let mut parked = test_entry("gamescope", 3, None);
+            parked.life = lifecycle::State::Pinned;
+            parked.parked = true;
+            let pool = vec![live, lingering, parked];
+            assert_eq!(budget_count(&pool), 1, "only the live session is held");
+            assert_eq!(kept_to_evict(&pool, 3, None), Some(3));
+            // Parked but not yet released by its own acquire: the force-release would refuse
+            // it, so the lingering display is what a create at the cap can actually take.
+            let mut warming = test_entry("gamescope", 4, None);
+            warming.life.acquire();
+            warming.parked = true;
+            let pool = vec![
+                pool.into_iter().nth(1).expect("the lingering entry"),
+                warming,
+            ];
+            assert_eq!(kept_to_evict(&pool, 2, None), Some(2));
         }
 
         /// Isolated multi-user spawns are deliberately concurrent: the singleton is per
@@ -1074,9 +1182,9 @@ mod linux {
     use anyhow::Result;
 
     use super::pool::{
-        assemble_displays, assign_group_ids, budget_count, effective_linger, epoch_matches,
-        group_key, hand_off_restore, in_group, join_target, kept_to_retire, lingering_to_evict,
-        position_for_new, take_expired, Entry, Restore, Row,
+        assemble_displays, assign_group_ids, budget_count, epoch_matches, group_key,
+        hand_off_restore, in_group, join_target, kept_to_evict, kept_to_retire, position_for_new,
+        release_linger, take_expired, Entry, Restore, Row,
     };
     use super::DisplayInfo;
     use crate::lifecycle::{self, Release};
@@ -1103,6 +1211,48 @@ mod linux {
             entries: Mutex::new(Vec::new()),
             generation: AtomicU64::new(1),
         })
+    }
+
+    /// Pre-warm `vd` at `mode` and keep it until a session claims it. `Some(true)` created the
+    /// compositor; `Some(false)` adopted a display already kept.
+    ///
+    /// `None` when this seat holds a display a pre-warm must not take: a live session's, whose
+    /// compositor a second spawn would fight for the socket lock and Steam, or a kept one this
+    /// `mode` would retire — trading a warm Steam for a colder one. Its own linger ends that.
+    pub(super) fn park(vd: &mut Box<dyn VirtualDisplay>, mode: Mode) -> Result<Option<bool>> {
+        let (backend, isolation) = (vd.name(), vd.isolation_key());
+        let key = (mode, vd.hdr(), vd.hw_cursor());
+        // Under the pool lock, so a session that already registered its display wins the race.
+        let held = REG.get().is_some_and(|r| {
+            r.entries.lock().unwrap().iter().any(|e| {
+                e.backend == backend
+                    && e.isolation == isolation
+                    && (matches!(e.life, lifecycle::State::Active { .. })
+                        || (e.mode, e.hdr, e.hw_cursor) != key)
+            })
+        });
+        if held {
+            return Ok(None);
+        }
+        let out = acquire(vd, mode, Arc::new(AtomicBool::new(false)), None, true)?;
+        let created = out.reused_gen.is_none();
+        // Dropping the output releases the lease, which parks the entry; the compositor
+        // keepalive stays in the pool.
+        drop(out);
+        Ok(Some(created))
+    }
+
+    /// Isolation keys of the seats parked right now — the pre-warm's own cap and its
+    /// already-parked check.
+    pub(super) fn parked_isolations() -> Vec<String> {
+        let Some(r) = REG.get() else {
+            return Vec::new();
+        };
+        let es = r.entries.lock().unwrap();
+        es.iter()
+            .filter(|e| e.parked)
+            .filter_map(|e| e.isolation.clone())
+            .collect()
     }
 
     /// Identity slots currently in the pool. Takes the pool lock — never call
@@ -1218,11 +1368,14 @@ mod linux {
         out
     }
 
+    /// `park` marks what this acquire creates as pre-warmed: it is a display with no session
+    /// behind it, so the lease drop keeps it instead of applying the keep-alive policy.
     pub(super) fn acquire(
         vd: &mut Box<dyn VirtualDisplay>,
         mode: Mode,
         quit: Arc<AtomicBool>,
         supersedes: Option<u64>,
+        park: bool,
     ) -> Result<VirtualOutput> {
         ensure_timer();
         let backend = vd.name();
@@ -1304,6 +1457,10 @@ mod linux {
                             es[idx].life.acquire();
                             let generation = r.generation.fetch_add(1, Ordering::Relaxed);
                             es[idx].generation = generation;
+                            // A session claiming a parked seat makes it an ordinary display,
+                            // ending by the linger rules. A re-park keeps it parked.
+                            let claimed = es[idx].parked && !park;
+                            es[idx].parked = park;
                             let preferred_mode = es[idx].preferred_mode;
                             let names = (es[idx].output_name.clone(), es[idx].input_output.clone());
                             let seat = es[idx].seat.clone();
@@ -1313,6 +1470,15 @@ mod linux {
                                 seat = seat.as_deref().unwrap_or("-"),
                                 "virtual display reused (keep-alive reconnect)"
                             );
+                            if claimed {
+                                tracing::info!(
+                                    backend,
+                                    node_id,
+                                    isolation = isolation.as_deref().unwrap_or("-"),
+                                    "virtual display: this session claimed its parked seat — its \
+                                     Steam is already up"
+                                );
+                            }
                             ReuseOutcome::Reused(output_for(
                                 node_id,
                                 preferred_mode,
@@ -1377,7 +1543,7 @@ mod linux {
         // Never refuse on `max_displays` here: `acquire` reruns on rebuild while the old lease
         // still counts. Admission skips lingering displays, so at the cap this create evicts one.
         let max = policy::prefs().get().effective().max_displays;
-        let evict = lingering_to_evict(&r.entries.lock().unwrap(), max, supersedes);
+        let evict = kept_to_evict(&r.entries.lock().unwrap(), max, supersedes);
         if let Some(g) = evict {
             release_kept(Some(g), "evicted (max_displays reached)");
         }
@@ -1455,6 +1621,7 @@ mod linux {
             generation,
             hw_cursor: vd.hw_cursor(),
             hdr: vd.hdr(),
+            parked: park,
         };
 
         // Position then push under the same lock (I/O-free). Apply is below,
@@ -1611,7 +1778,11 @@ mod linux {
             };
             // Resolved here, not before the lookup: the answer belongs to the display's
             // OWNER, and the entry is what names it.
-            let linger = effective_linger(force_immediate, linger_for(es[idx].identity_slot));
+            let linger = release_linger(
+                es[idx].parked,
+                force_immediate,
+                linger_for(es[idx].identity_slot),
+            );
             match es[idx].life.release(Instant::now(), linger) {
                 Release::Teardown => {
                     let mut e = es.remove(idx);
@@ -1627,6 +1798,17 @@ mod linux {
                     tracing::info!(
                         backend = es[idx].backend,
                         "virtual display: last session left — lingering (keep-alive)"
+                    );
+                    (None, None)
+                }
+                Release::Pin if es[idx].parked => {
+                    tracing::info!(
+                        backend = es[idx].backend,
+                        isolation = es[idx].isolation.as_deref().unwrap_or("-"),
+                        w = es[idx].mode.width,
+                        h = es[idx].mode.height,
+                        hz = es[idx].mode.refresh_hz,
+                        "virtual display: parked for its seat until a session claims it"
                     );
                     (None, None)
                 }
