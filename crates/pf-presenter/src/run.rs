@@ -25,7 +25,7 @@ use crate::present_pace::{
 use crate::touch::{Abs, Act};
 use crate::vk::{FrameInput, Presenter};
 use anyhow::{Context as _, Result};
-use pf_client_core::gamepad::GamepadService;
+use pf_client_core::gamepad::{GamepadService, SelectChord};
 use pf_client_core::session::{self, DecodeFacts, SessionEvent, SessionHandle, SessionParams};
 use pf_client_core::trust::{MouseMode, PresentPriority, StatsVerbosity, TouchMode};
 use pf_client_core::video::VulkanDecodeDevice;
@@ -643,7 +643,10 @@ fn run_inner(mut opts: SessionOpts, mut mode: ModeCtl) -> Result<Option<Outcome>
     let gamepad_subsystem = sdl.gamepad().context("SDL gamepad")?;
     let (gamepad, mut pump) = GamepadService::pumped(gamepad_subsystem);
     let escape_rx = gamepad.escape_events();
-    let ring_rx = gamepad.ring_events();
+    let chord_rx = gamepad.chord_events();
+    // A Select chord eats the button pressed with Select, so it is only worth claiming where
+    // the overlay it drives exists — a build without the console UI leaves A and X to the game.
+    gamepad.set_chords_live(overlay.is_some());
     // Ring pad ownership, edge-tracked: open masks the pads (a held trigger is released
     // on the host) and polls them into menu events; close re-adopts them.
     let mut ring_was_open = false;
@@ -1283,16 +1286,28 @@ fn run_inner(mut opts: SessionOpts, mut mode: ModeCtl) -> Result<Option<Outcome>
             }
         }
 
-        // `Select+A` on a pad: the ring at the window centre. The pad highlight starts
-        // on the centre, so `Select+A` then `A` opens the sheet.
-        while let Ok(pad) = ring_rx.try_recv() {
-            if let (Some(o), true) = (overlay.as_mut(), stream.is_some()) {
-                ring_opener = Some(pad);
-                let (pw, ph) = window.size_in_pixels();
-                o.ring_input(RingInput::Toggle {
-                    x: pw as f32 / 2.0,
-                    y: ph as f32 / 2.0,
-                });
+        // Select chords on a pad. `Select+A` puts the ring at the window centre, where its
+        // highlight starts on the centre so `Select+A` then `A` opens the sheet; `Select+X`
+        // steps the stats tier, the same move the keyboard chord and the dial's own slot make.
+        while let Ok((pad, chord)) = chord_rx.try_recv() {
+            if overlay.is_none() || stream.is_none() {
+                continue;
+            }
+            match chord {
+                SelectChord::Ring => {
+                    if let Some(o) = overlay.as_mut() {
+                        ring_opener = Some(pad);
+                        let (pw, ph) = window.size_in_pixels();
+                        o.ring_input(RingInput::Toggle {
+                            x: pw as f32 / 2.0,
+                            y: ph as f32 / 2.0,
+                        });
+                    }
+                }
+                SelectChord::Stats => {
+                    bump_stats_tier(&mut stats_verbosity, &mut stream);
+                    tracing::info!(tier = ?stats_verbosity, "chord: stats verbosity");
+                }
             }
         }
         // While the ring is up, or the console holds a launch over the live stream, the
