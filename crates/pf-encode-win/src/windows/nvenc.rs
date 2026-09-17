@@ -986,6 +986,7 @@ impl NvencD3d11Encoder {
                 bit_depth: self.bit_depth,
                 av1_input_depth_minus8: if ten_bit_in { 2 } else { 0 },
                 hdr: self.hdr,
+                full_range: false,
                 rfi_supported: self.rfi_supported,
                 intra_refresh_cnt: self.wave_cycle(),
                 // Latched at open so a later reconfigure re-presents the same slicing.

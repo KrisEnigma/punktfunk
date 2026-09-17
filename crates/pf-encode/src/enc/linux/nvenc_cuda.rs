@@ -1318,6 +1318,7 @@ impl NvencCudaEncoder {
                     0
                 },
                 hdr: self.hdr,
+                full_range: yuv444_input && pf_zerocopy::egl::yuv444_full_range(),
                 rfi_supported: self.rfi_supported,
                 intra_refresh_cnt: self.wave_cycle(),
                 slices: self.slices,
