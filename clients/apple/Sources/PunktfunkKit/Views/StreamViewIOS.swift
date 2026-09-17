@@ -1199,11 +1199,14 @@ final class StreamLayerUIView: UIView {
     /// Trackpad two-finger / wheel scroll (no lock) → host scroll deltas, WHEEL(120)-scaled.
     /// `precise` = a continuous (trackpad) device, not a notched wheel.
     var onScroll: ((_ dx: Float, _ dy: Float, _ precise: Bool) -> Void)?
-    /// The two-finger twist turning the quick-action ring.
+    /// The two-finger twist turning the quick-action ring, or the passthrough edge pull.
     var onDial: ((DialEvent) -> Void)?
 
     /// Wire touch ids per active direct UITouch; ids are reused after the touch ends.
     private var touchIDs: [ObjectIdentifier: UInt32] = [:]
+    /// Live fingers that landed on a side bezel, for the passthrough dial opener
+    /// ([`EdgeDial`]). Only in the `touch` model — every other model has the twist.
+    private var edgeTracks: [ObjectIdentifier: EdgeTrack] = [:]
     /// GameStream button held per active indirect-pointer touch (one click/drag session);
     /// released when that touch ends.
     private var pointerButtons: [ObjectIdentifier: UInt32] = [:]
@@ -1347,6 +1350,10 @@ final class StreamLayerUIView: UIView {
             // A cancellation lifts the wire touch like a normal up — the host just sees the
             // contact end.
             forwardTouches(touches, kind: kind == .cancel ? .up : kind)
+            // …then read the same fingers for the edge pull, which is this model's only way to
+            // the dial. Forwarding first is deliberate: a pull that never completes must not
+            // have cost the host a contact.
+            trackEdgePull(touches, kind: kind)
         case .trackpad, .pointer:
             switch kind {
             case .down: touchMouse.began(touches, in: self, trackpad: mode == .trackpad)
@@ -1403,6 +1410,55 @@ final class StreamLayerUIView: UIView {
                     ? .touchDown(id: id, x: h.x, y: h.y, surfaceWidth: h.w, surfaceHeight: h.h)
                     : .touchMove(id: id, x: h.x, y: h.y, surfaceWidth: h.w, surfaceHeight: h.h))
         }
+    }
+
+    /// The passthrough dial opener: follow fingers that landed on a side bezel, and when two of
+    /// them have been pulled in together, lift those contacts on the host and open the dial.
+    ///
+    /// The lift is what keeps the host honest — it already saw the touches go down, so ending
+    /// them is the difference between a stray tap and two fingers stuck at the edge of the game.
+    private func trackEdgePull(_ touches: Set<UITouch>, kind: TouchKind) {
+        guard onDial != nil else { return }
+        switch kind {
+        case .down:
+            let width = bounds.width
+            for touch in touches {
+                let p = touch.location(in: self)
+                guard let edge = EdgeDial.edge(of: p, width: width) else { continue }
+                edgeTracks[ObjectIdentifier(touch)] = EdgeTrack(edge: edge, start: p, now: p)
+            }
+        case .move:
+            for touch in touches {
+                let key = ObjectIdentifier(touch)
+                guard var track = edgeTracks[key] else { continue }
+                track.now = touch.location(in: self)
+                edgeTracks[key] = track
+            }
+            guard let (a, b) = firstCompletedPull() else { return }
+            // End the pull's own contacts, by the wire ids they were given. Dropping them from
+            // `touchIDs` is also what makes the rest of this gesture invisible: `forwardTouches`
+            // skips a touch it has no id for, so the later moves and the real lift send nothing.
+            for key in edgeTracks.keys {
+                if let id = touchIDs.removeValue(forKey: key) {
+                    onTouchEvent?(.touchUp(id: id))
+                }
+            }
+            edgeTracks.removeAll()
+            onDial?(.open(at: EdgeDial.centre(a, b)))
+        case .up, .cancel:
+            for touch in touches { edgeTracks.removeValue(forKey: ObjectIdentifier(touch)) }
+        }
+    }
+
+    /// The first pair of tracked fingers that satisfies [`EdgeDial.completes`].
+    private func firstCompletedPull() -> (EdgeTrack, EdgeTrack)? {
+        let tracks = Array(edgeTracks.values)
+        for i in tracks.indices {
+            for j in (i + 1)..<tracks.count where EdgeDial.completes(tracks[i], tracks[j]) {
+                return (tracks[i], tracks[j])
+            }
+        }
+        return nil
     }
 
     /// Button-less mouse/trackpad movement (no lock) → absolute cursor move — unless it is a
