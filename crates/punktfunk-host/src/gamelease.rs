@@ -262,6 +262,18 @@ impl Drop for GameLease {
     }
 }
 
+/// The process tree a lease may narrow its scan to ([`LeaseRequest::scope_pid`]).
+///
+/// Only where the game is guaranteed to descend from `gamescope`: the launch is that
+/// compositor's own primary child, or it goes through the Steam running inside it. Anything else
+/// a keep-alive reuse starts is spawned by the host, beside gamescope rather than under it, and a
+/// scoped scan would never find it.
+pub fn scan_scope(nested_spawn: bool, steam_launch: bool, gamescope: Option<u32>) -> Option<u32> {
+    (nested_spawn || steam_launch)
+        .then_some(gamescope)
+        .flatten()
+}
+
 /// Inputs for [`open`]. Only the launch site has all of them.
 pub struct LeaseRequest {
     pub game: GameRef,
@@ -272,6 +284,7 @@ pub struct LeaseRequest {
     pub nested: bool,
     /// That gamescope's pid, so recognition stays inside this seat's process tree
     /// ([`crate::procscan::under`]). `None` scans the whole uid, as every other lease does.
+    /// [`scan_scope`] owns when it may be set.
     pub scope_pid: Option<u32>,
     /// Opens a launcher, not a game: always [`LeaseKind::Untracked`].
     ///
@@ -1802,6 +1815,18 @@ mod tests {
             window: None,
             outcome: None,
         }
+    }
+
+    /// Scoping is safe only where the game must descend from that gamescope.
+    #[test]
+    fn only_a_nested_spawn_or_a_steam_launch_narrows_the_scan() {
+        // gamescope's own primary child, and anything Steam starts inside it.
+        assert_eq!(scan_scope(true, false, Some(42)), Some(42));
+        assert_eq!(scan_scope(false, true, Some(42)), Some(42));
+        // A kept session's Lutris/Heroic/custom launch is the host's child, beside gamescope.
+        assert_eq!(scan_scope(false, false, Some(42)), None);
+        // No compositor of ours: every other backend keeps the scan it has today.
+        assert_eq!(scan_scope(true, true, None), None);
     }
 
     /// A launcher entry is Untracked regardless of how it was started.

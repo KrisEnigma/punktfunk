@@ -87,7 +87,7 @@ pub use routing::{
 pub use routing::{
     claim_workspace, dedicated_game_exited, focus_streamed_output, gamescope_presenting,
     gamescope_xwayland_cursor_targets, launch_into_gamescope_session, launch_is_nested,
-    steam_appid_from_launch, watch_steam_game_exit, WorkspaceClaim,
+    launch_is_steam, steam_appid_from_launch, watch_steam_game_exit, WorkspaceClaim,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

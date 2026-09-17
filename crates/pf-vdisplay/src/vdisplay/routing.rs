@@ -455,6 +455,13 @@ pub fn dedicated_game_exited(_node_id: u32) -> bool {
     false
 }
 
+/// Does this launch go through Steam? Steam owns what it starts, so the game lands under
+/// whichever gamescope that Steam runs in, reuse included.
+#[cfg(target_os = "linux")]
+pub fn launch_is_steam(cmd: &str) -> bool {
+    gamescope::is_steam_launch(cmd)
+}
+
 /// Steam appid a dedicated launch targets, for the exit watcher. `None` for a
 /// non-Steam launch — those use [`dedicated_game_exited`]: gamescope's nested
 /// child *is* the game.

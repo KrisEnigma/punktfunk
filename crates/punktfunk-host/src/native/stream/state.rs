@@ -581,6 +581,11 @@ impl StreamState {
         // releases it when the game is done.
         #[cfg(target_os = "linux")]
         let mut launch_workspace: Option<crate::vdisplay::WorkspaceClaim> = None;
+        // This acquire spawned gamescope itself, so the launch is its primary child. A keep-alive
+        // reuse spawned nothing and launches into the live session instead.
+        #[cfg(target_os = "linux")]
+        let nested_spawn = crate::vdisplay::launch_is_nested(compositor, gamescope_route.as_ref())
+            && vd.nested_launch_started();
         #[cfg(target_os = "linux")]
         let spawned_launch = match launch.as_deref() {
             Some(cmd) if adopt_launch => {
@@ -600,10 +605,7 @@ impl StreamState {
             // Nested only when this acquire actually spawned gamescope — then `cmd` is already its
             // primary child. A keep-alive reuse spawned nothing, so it falls through and launches
             // into the live session below; without that, a second launch showed an idle session.
-            Some(cmd)
-                if crate::vdisplay::launch_is_nested(compositor, gamescope_route.as_ref())
-                    && vd.nested_launch_started() =>
-            {
+            Some(cmd) if nested_spawn => {
                 tracing::info!(command = %cmd, "launch nested into the per-session gamescope");
                 spawned_now = true;
                 None
@@ -737,14 +739,17 @@ impl StreamState {
                     plane: crate::events::Plane::Native,
                     spec: target.detect.clone(),
                     nested,
-                    // A nested lease recognizes only what runs under its own gamescope: two seats
-                    // can play the same title, and Steam's reaper looks the same in both.
+                    // Two seats can play the same title and Steam's reaper looks the same in both,
+                    // so recognition narrows to this session's gamescope where it may
+                    // ([`crate::gamelease::scan_scope`]).
                     #[cfg(target_os = "linux")]
-                    scope_pid: nested
-                        .then(|| {
-                            cur_display_gen.and_then(crate::vdisplay::registry::compositor_pid_for)
-                        })
-                        .flatten(),
+                    scope_pid: crate::gamelease::scan_scope(
+                        nested_spawn,
+                        launch
+                            .as_deref()
+                            .is_some_and(crate::vdisplay::launch_is_steam),
+                        cur_display_gen.and_then(crate::vdisplay::registry::compositor_pid_for),
+                    ),
                     #[cfg(not(target_os = "linux"))]
                     scope_pid: None,
                     launcher: target.launcher,
