@@ -561,16 +561,14 @@ impl VirtualDisplay for GamescopeDisplay {
             .filter(|_| steam)
             .and_then(|i| i.steam_home.as_deref())
             .and_then(seat::ensure_home);
-        if steam {
+        let box_steam = contends_for_box_steam(steam, seat_home.is_some());
+        if box_steam {
             // No attach degrade here: a box without takeover privilege fails with the actionable error.
             stop_autologin_sessions()
                 .context("dedicated Steam launch needs the box's gaming session freed")?;
-            // Desktop Steam holds the instance too; autologin stop cannot see it. A seat's Steam
-            // locks its own home, so it never contends for `~`'s.
-            if seat_home.is_none() {
-                free_desktop_steam()?;
-            }
-        } else if free_box_session_for_exclusive(steam, exclusive) {
+            // Desktop Steam holds the instance too; autologin stop cannot see it.
+            free_desktop_steam()?;
+        } else if free_box_session_for_exclusive(box_steam, exclusive) {
             // Best-effort: on Game Mode the autologin session is DRM master, so Exclusive needs it
             // gone. A refusal costs the dark screen, not the game.
             if let Err(why) = stop_autologin_sessions() {
@@ -3953,9 +3951,17 @@ fn seat_env_applies(cmd: &str, has_steam: bool) -> bool {
     has_steam && is_steam_launch(cmd)
 }
 
-/// Non-Steam Exclusive: the box session is DRM master. Steam is handled by the failing arm above.
-fn free_box_session_for_exclusive(steam: bool, exclusive: bool) -> bool {
-    !steam && exclusive
+/// Does this launch contend for the box's one Steam? A seat's Steam locks its own home, so it
+/// needs neither the box's gaming session stopped nor the desktop Steam shut down — and on a
+/// multi-seat box that session is somebody else playing on the TV.
+fn contends_for_box_steam(steam: bool, seat_home: bool) -> bool {
+    steam && !seat_home
+}
+
+/// The box session is DRM master, so Exclusive needs it gone. A launch that already stops it
+/// outright ([`contends_for_box_steam`]) is not asked a second time.
+fn free_box_session_for_exclusive(box_steam: bool, exclusive: bool) -> bool {
+    !box_steam && exclusive
 }
 
 /// Steam URI → insert `-gamepadui` so nested Steam is Big Picture. Idempotent. Custom cmds unchanged.
@@ -4442,17 +4448,18 @@ impl Drop for GamescopeProc {
 mod tests {
     use super::{
         any_output_size_is, cancel_pending_restore, cgroup_is_punktfunk_owned,
-        classify_output_size, connected_connector_under, deferred_shortcut_uri,
-        display_manager_unit_under, dm_plan, free_box_session_for_exclusive, game_hz,
-        gamescope_output_size, hdr_args, idle_dropin_body, idle_dropin_path, install_idle_dropin,
-        is_steam_launch, managed_darken_acquire_edge, managed_darken_release_edge, mask_unit,
-        missing_flags, mode_mismatch, nested_wrapper_script, our_wsi_layer_dir, parse_listed_units,
-        plan_bind, refresh_rate_list, release_autologin_mask, remove_idle_dropin,
-        script_hardcodes_gamescope, seat_env_applies, sentinel_advanced, shape_dedicated_command,
-        shell_word, switch_ends_mask_window, takeover_state_is_live, unmask_unit, without_uri,
-        xwayland_refusal_marker, BindOff, BindPlan, BoxOutputSize, DmHelperError, SessionBind,
-        TakeoverState, WsiPlan, AUTOLOGIN_MASKED, DISTRO_GAMESCOPE_PATH, PENDING_RESTORE,
-        RESTORE_FLIGHT, STOPPED_AUTOLOGIN, WSI_OFF_ENV, X11_SOCKET_DIR,
+        classify_output_size, connected_connector_under, contends_for_box_steam,
+        deferred_shortcut_uri, display_manager_unit_under, dm_plan, free_box_session_for_exclusive,
+        game_hz, gamescope_output_size, hdr_args, idle_dropin_body, idle_dropin_path,
+        install_idle_dropin, is_steam_launch, managed_darken_acquire_edge,
+        managed_darken_release_edge, mask_unit, missing_flags, mode_mismatch,
+        nested_wrapper_script, our_wsi_layer_dir, parse_listed_units, plan_bind, refresh_rate_list,
+        release_autologin_mask, remove_idle_dropin, script_hardcodes_gamescope, seat_env_applies,
+        sentinel_advanced, shape_dedicated_command, shell_word, switch_ends_mask_window,
+        takeover_state_is_live, unmask_unit, without_uri, xwayland_refusal_marker, BindOff,
+        BindPlan, BoxOutputSize, DmHelperError, SessionBind, TakeoverState, WsiPlan,
+        AUTOLOGIN_MASKED, DISTRO_GAMESCOPE_PATH, PENDING_RESTORE, RESTORE_FLIGHT,
+        STOPPED_AUTOLOGIN, WSI_OFF_ENV, X11_SOCKET_DIR,
     };
     use std::time::{Duration, Instant};
 
@@ -4911,6 +4918,27 @@ mod tests {
         ] {
             assert!(!seat_env_applies(other, true), "{other}");
         }
+    }
+
+    /// A seat's Steam is not the box's. Stopping the box's gaming session for it would end the
+    /// game on the TV, which is the whole point of seats.
+    #[test]
+    fn a_seat_steam_launch_leaves_the_box_session_alone_unless_exclusive() {
+        assert!(
+            contends_for_box_steam(true, false),
+            "no seat home, one Steam"
+        );
+        assert!(!contends_for_box_steam(true, true));
+        assert!(!contends_for_box_steam(false, true));
+        // A seat Steam takes the non-Steam arm, where only Exclusive frees the box session.
+        let seat = contends_for_box_steam(true, true);
+        assert!(free_box_session_for_exclusive(seat, true));
+        assert!(!free_box_session_for_exclusive(seat, false));
+        // Without a seat home the failing arm above still owns it, exactly as before.
+        assert!(!free_box_session_for_exclusive(
+            contends_for_box_steam(true, false),
+            true
+        ));
     }
 
     #[test]
