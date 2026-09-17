@@ -506,26 +506,44 @@ impl Shell {
             fonts.leading(canvas, text, W::Regular, size * k, fg(alpha * a), dx, y, dw);
             y += (size + 7.0) * k;
         }
-        crate::theme::spinner(canvas, dx + 8.0 * k, y + 30.0 * k, 8.0 * k, t);
-        fonts.leading(
-            canvas,
-            if l.window_wait {
-                "Waiting for the game's window\u{2026}"
-            } else if l.connected {
-                "Starting the game\u{2026}"
-            } else {
-                "Connecting\u{2026}"
-            },
-            W::Regular,
-            12.5 * k,
-            fg(0.5 * a),
-            dx + 24.0 * k,
-            y + 22.0 * k,
-            dw,
-        );
+        match l.failed.as_deref() {
+            // Where the spinner was, because the wait is what ended. Brighter than the status
+            // line it replaces: this is the one thing on screen the player has to read.
+            Some(why) => fonts.leading(
+                canvas,
+                why,
+                W::Regular,
+                12.5 * k,
+                fg(0.85 * a),
+                dx,
+                y + 26.0 * k,
+                dw,
+            ),
+            None => {
+                crate::theme::spinner(canvas, dx + 8.0 * k, y + 30.0 * k, 8.0 * k, t);
+                fonts.leading(
+                    canvas,
+                    if l.window_wait {
+                        "Waiting for the game's window\u{2026}"
+                    } else if l.connected {
+                        "Starting the game\u{2026}"
+                    } else {
+                        "Connecting\u{2026}"
+                    },
+                    W::Regular,
+                    12.5 * k,
+                    fg(0.5 * a),
+                    dx + 24.0 * k,
+                    y + 22.0 * k,
+                    dw,
+                );
+            }
+        }
         // Before the dial lands B cancels it, exactly as it does on the connect card;
         // after, the only thing left to ask for is the picture.
-        let hint = if l.connected {
+        let hint = if l.failed.is_some() {
+            Hint::new(HintKey::Confirm, "Show the desktop anyway")
+        } else if l.connected {
             Hint::new(HintKey::Confirm, "Show stream")
         } else {
             Hint::new(HintKey::Back, "Cancel")

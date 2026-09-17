@@ -2255,7 +2255,7 @@ mod launch_hold {
     }
 
     #[test]
-    fn the_hold_ignores_state_read_before_the_launch_and_gives_up_without_a_lease() {
+    fn the_hold_ignores_state_read_before_the_launch_and_says_so_without_a_lease() {
         let (mut s, library, _bus) = on_shelf();
         // The shelf's own refresh, from before this launch: the previous copy exited.
         library.set_running(&running("steam:570", "exited"));
@@ -2268,10 +2268,42 @@ mod launch_hold {
         );
         at(&mut s, 100.0 + LAUNCH_NO_LEASE);
         s.sync();
+        // Sliding away here is what #1072 calls the silence: the player lands on a desktop
+        // they did not ask for and cannot tell a refusal from a slow start.
         assert!(
-            s.in_stream,
-            "the host never listed it — nothing to wait for"
+            !s.in_stream && s.holds_stream(),
+            "the hold keeps the screen"
         );
+        assert_eq!(
+            s.launching.as_ref().and_then(|l| l.failed.as_deref()),
+            Some("The host didn't start Dota 2 — nothing is running for it.")
+        );
+        s.handle_menu(MenuEvent::Confirm);
+        assert!(s.in_stream, "and a press is \"show the desktop anyway\"");
+    }
+
+    /// The three sentences, against the host's own `games[]` words. The touch shell's
+    /// `launchGaveUp` answers the same way; a report quotes one line either way.
+    #[test]
+    fn the_hold_gives_up_on_the_states_that_produced_no_game() {
+        let long = LAUNCH_HOLD_MAX + 1.0;
+        assert_eq!(
+            crate::shell::launch_gave_up("Eden", Some("exited"), 0.5).as_deref(),
+            Some("Eden closed right after starting.")
+        );
+        assert_eq!(
+            crate::shell::launch_gave_up("Eden", Some("launching"), long).as_deref(),
+            Some("Eden is still starting after 2 minutes.")
+        );
+        assert!(crate::shell::launch_gave_up("Eden", Some("launching"), 1.0).is_none());
+        assert!(crate::shell::launch_gave_up("Eden", None, 1.0).is_none());
+        // A launch that worked never produces a sentence, whatever it is doing.
+        for word in ["running", "window", "untracked", "grace"] {
+            assert!(
+                crate::shell::launch_gave_up("Eden", Some(word), long).is_none(),
+                "{word} is a launch that worked"
+            );
+        }
     }
 
     /// A host that can see windows keeps the hold up past `running` until `window`, and a
