@@ -98,6 +98,8 @@ impl UserData {
     /// `None` (pool too shallow, or `PUNKTFUNK_ZEROCOPY_HOLD=0`) requeues at `.process` return —
     /// the producer may then rewrite the dmabuf while encode still reads it.
     /// Every hold out with an untaken frame in the slot: that frame gives its hold to this one.
+    /// A buffer the book already lists was re-sent by the producer: no hold, and the capture is
+    /// flagged for a rebuild.
     fn try_defer(
         &mut self,
         pw_buf: *mut pw::sys::pw_buffer,
@@ -107,6 +109,14 @@ impl UserData {
             return None;
         }
         let buf = pw_buf as usize;
+        // An async link lets the producer reclaim a buffer before this side marked it busy, so a
+        // late loop can be sent one it still holds. It cannot be given back twice.
+        if self.defer.book.lock().ok()?.contains(buf) {
+            if !self.signals.resent.swap(true, Ordering::Relaxed) {
+                tracing::warn!("producer re-sent a buffer this capture still holds");
+            }
+            return None;
+        }
         let pool_live = self.pool.live;
         let mut generation = self.defer.book.lock().ok()?.try_hold(buf, pool_live);
         if generation.is_none() && self.release_unconsumed(stream) {
