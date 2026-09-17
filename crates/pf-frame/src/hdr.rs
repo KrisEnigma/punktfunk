@@ -8,7 +8,7 @@
 //! - MaxCLL/MaxFALL in cd/m² (nits).
 //!
 //! SEI and AV1 metadata builders feed the NVENC and Vulkan Video encoders; display
-//! conversion the Windows capturers.
+//! conversion the Windows capturers; the PQ cursor re-encode the Linux HDR blends.
 
 /// SMPTE ST.2086 mastering volume + CEA-861.3 content light level, in HDR10
 /// SEI fixed-point units. Field-for-field the wire `punktfunk_core::quic::HdrMeta`;
@@ -234,6 +234,51 @@ pub fn av1_insert_before_frame(au: &mut Vec<u8>, obus: &[u8]) -> bool {
     false
 }
 
+/// Straight-alpha sRGB RGBA re-encoded for a BT.2020 PQ frame: linearised, converted to BT.2020
+/// (BT.2087), put at 203-nit SDR white and PQ-encoded to 8 bits. Alpha is unchanged, so the
+/// blend over PQ codes shows the pointer at UI white instead of the display's peak.
+pub fn srgb_rgba_to_pq(rgba: &[u8]) -> Vec<u8> {
+    fn linear(v: u8) -> f64 {
+        let c = f64::from(v) / 255.0;
+        if c <= 0.04045 {
+            c / 12.92
+        } else {
+            ((c + 0.055) / 1.055).powf(2.4)
+        }
+    }
+    fn pq8(nits: f64) -> u8 {
+        let y = (nits / 10000.0).clamp(0.0, 1.0).powf(0.159_301_757_812_5);
+        let e = ((0.835_937_5 + 18.851_562_5 * y) / (1.0 + 18.6875 * y)).powf(78.843_75);
+        (e * 255.0).round() as u8
+    }
+    let mut out = rgba.to_vec();
+    for px in out.chunks_exact_mut(4) {
+        let (r, g, b) = (linear(px[0]), linear(px[1]), linear(px[2]));
+        px[0] = pq8(203.0 * (0.6274 * r + 0.3293 * g + 0.0433 * b));
+        px[1] = pq8(203.0 * (0.0691 * r + 0.9195 * g + 0.0114 * b));
+        px[2] = pq8(203.0 * (0.0164 * r + 0.0880 * g + 0.8956 * b));
+    }
+    out
+}
+
+/// [`srgb_rgba_to_pq`] of `rgba`, recomputed only when the bitmap changes. One slot: a
+/// session has one pointer bitmap at a time.
+pub fn pq_rgba_cached(rgba: &std::sync::Arc<Vec<u8>>) -> std::sync::Arc<Vec<u8>> {
+    use std::sync::{Arc, Mutex, Weak};
+    type Cached = Option<(Weak<Vec<u8>>, Arc<Vec<u8>>)>;
+    static LAST: Mutex<Cached> = Mutex::new(None);
+    let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((src, pq)) = last.as_ref() {
+        // A live Weak cannot alias a freed bitmap reallocated at the same address.
+        if src.upgrade().is_some_and(|s| Arc::ptr_eq(&s, rgba)) {
+            return pq.clone();
+        }
+    }
+    let pq = Arc::new(srgb_rgba_to_pq(rgba));
+    *last = Some((Arc::downgrade(rgba), pq.clone()));
+    pq
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -298,6 +343,22 @@ mod tests {
         );
         let mut no_frame = vec![0x12, 0x00];
         assert!(!av1_insert_before_frame(&mut no_frame, &[0xaa]));
+    }
+
+    #[test]
+    fn cursor_bitmap_lands_at_sdr_white_in_pq() {
+        let px = [255, 255, 255, 255, 0, 0, 0, 128, 255, 0, 0, 200];
+        let pq = srgb_rgba_to_pq(&px);
+        // PQ(203 nits) = 0.5807 -> 148; black stays 0; alpha untouched.
+        assert_eq!(&pq[0..4], &[148, 148, 148, 255]);
+        assert_eq!(&pq[4..8], &[0, 0, 0, 128]);
+        // sRGB red on the BT.709 primary inside BT.2020: PQ (0.5325, 0.3270, 0.2201).
+        assert_eq!(&pq[8..12], &[136, 83, 56, 200]);
+
+        let src = std::sync::Arc::new(px.to_vec());
+        let a = pq_rgba_cached(&src);
+        assert!(std::sync::Arc::ptr_eq(&a, &pq_rgba_cached(&src)));
+        assert_eq!(*a, pq);
     }
 
     #[test]

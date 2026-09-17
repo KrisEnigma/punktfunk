@@ -1690,15 +1690,21 @@ impl VulkanVideoEncoder {
                 let cw = c.w.min(CURSOR_MAX);
                 let ch = c.h.min(CURSOR_MAX);
                 if self.frames[slot].cursor_serial != c.serial {
+                    // A PQ session blends the cursor re-encoded as PQ, not its sRGB bytes.
+                    let rgba = if self.is_hdr {
+                        c.pq_rgba()
+                    } else {
+                        c.rgba.clone()
+                    };
                     let stage = self.frames[slot].cursor_stage;
                     let stage_mem = self.frames[slot].cursor_stage_mem;
                     let bytes = (cw as usize) * (ch as usize) * 4;
                     let ptr =
                         dev.map_memory(stage_mem, 0, bytes as u64, vk::MemoryMapFlags::empty())?;
                     std::ptr::copy_nonoverlapping(
-                        c.rgba.as_ptr(),
+                        rgba.as_ptr(),
                         ptr as *mut u8,
-                        bytes.min(c.rgba.len()),
+                        bytes.min(rgba.len()),
                     );
                     dev.unmap_memory(stage_mem);
                     let old = if ready {

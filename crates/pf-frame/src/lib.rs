@@ -194,6 +194,13 @@ pub struct CursorOverlay {
     pub visible: bool,
 }
 
+impl CursorOverlay {
+    /// The bitmap to blend into a BT.2020 PQ frame ([`hdr::srgb_rgba_to_pq`]), cached per bitmap.
+    pub fn pq_rgba(&self) -> std::sync::Arc<Vec<u8>> {
+        hdr::pq_rgba_cached(&self.rgba)
+    }
+}
+
 /// Where a captured frame's pixels came from. Host wall-clock PTS advances on every delivered
 /// frame — repeats and cursor regenerations included — so it can never prove the SOURCE
 /// (compositor/DWM presentation) made progress; this can. Only [`Source`](Self::Source) may feed

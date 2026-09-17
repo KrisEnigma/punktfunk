@@ -40,9 +40,7 @@ const float CODE10 = 64.0 / 65535.0;
 float lumaY(vec3 c) { return 64.0 + 230.1252*c.r + 593.9280*c.g + 51.9468*c.b; }
 
 // Blend the cursor over `col` at frame pixel `p`, when `p` falls inside the cursor rectangle.
-// The cursor bitmap is 8-bit sRGB and the frame is PQ, so this is a display-referred
-// approximation — the same one the CPU path (`pw_cursor.rs::composite_cursor_rgb10`) and the
-// CUDA path (`cursor_blend.comp` MODE 3/4) already make. Fine for a pointer.
+// The host uploads the cursor PQ-encoded (`CursorOverlay::pq_rgba`), so this mixes PQ codes.
 vec3 withCursor(ivec2 p, vec3 col) {
     if (pc.curSize.x <= 0) return col;
     ivec2 cp = p - pc.curOrigin;
