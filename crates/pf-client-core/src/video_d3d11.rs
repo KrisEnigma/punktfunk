@@ -1095,8 +1095,8 @@ impl HandoffRing {
             })?
             .clone();
         // Per-frame CICP → DXGI (host flips PQ in-band). Matrix 5/6 is BT.601; mapping
-        // it to P709 is a hue error (NVENC's RGB→YUV is BT.601). DXGI has no full-range
-        // G2084 YCbCr enum, so PQ is studio regardless of range.
+        // it to P709 is a hue error. DXGI has no full-range G2084 YCbCr enum, so PQ is
+        // studio regardless of range.
         let in_cs = match (color.transfer, color.matrix, color.full_range) {
             (16, _, _) => DXGI_COLOR_SPACE_YCBCR_STUDIO_G2084_LEFT_P2020,
             (_, 9 | 10, false) => DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P2020,
