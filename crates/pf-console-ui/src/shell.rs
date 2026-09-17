@@ -366,6 +366,9 @@ pub(crate) struct Shell {
     /// (left, top) inset of the last layout. Pointer coords arrive in surface
     /// pixels; hit boxes were published in this space.
     last_insets: (f32, f32),
+    /// Full surface of the last layout, insets included. A backdrop paints here,
+    /// not in the safe rect, or it seams at the cutout edge.
+    last_full: (f32, f32),
     /// Design-unit scale of the last frame. Touch slop and drag ticks grow with it.
     last_k: f64,
     gesture: Option<TouchGesture>,
@@ -447,6 +450,7 @@ impl Shell {
             pads: Vec::new(),
             hint_rects: Vec::new(),
             last_insets: (0.0, 0.0),
+            last_full: (0.0, 0.0),
             last_k: 1.0,
             gesture: None,
             gpu_cache_bytes: opts.gpu_cache_bytes,

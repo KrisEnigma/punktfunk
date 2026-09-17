@@ -327,14 +327,23 @@ impl Shell {
     /// The takeover's ground: an opaque aurora — the home field, so this reads as the
     /// console taking over — with a shade pool under the centre so text separates from a
     /// bright field.
+    ///
+    /// Painted in SURFACE space, like the base aurora it covers: a backdrop that stops at
+    /// the safe rect leaves the cutout strip carrying the frame's first aurora with no
+    /// vignette over it, which reads as a lighter band with a hard edge. The pool still
+    /// centres on the safe rect, because that is where the text it separates sits.
     fn draw_takeover_field(&self, canvas: &Canvas, w: f64, h: f64, t: f64) {
-        self.draw_aurora(canvas, w, h, t, 0.0);
+        let (left, top) = self.last_insets;
+        let (fw, fh) = (f64::from(self.last_full.0), f64::from(self.last_full.1));
+        canvas.save();
+        canvas.translate((-left, -top));
+        self.draw_aurora(canvas, fw, fh, t, 0.0);
         let mut vignette = crate::theme::shaded();
         let shades = [crate::theme::shade(0.5), crate::theme::shade(0.0)];
         vignette.set_shader(gradient::shaders::radial_gradient(
             (
-                Point::new((w / 2.0) as f32, (h / 2.0) as f32),
-                (w.max(h) * 0.42) as f32,
+                Point::new(left + (w / 2.0) as f32, top + (h / 2.0) as f32),
+                (fw.max(fh) * 0.42) as f32,
             ),
             &gradient::Gradient::new(
                 gradient::Colors::new_evenly_spaced(&shades, TileMode::Clamp, None),
@@ -342,7 +351,8 @@ impl Shell {
             ),
             None,
         ));
-        canvas.draw_rect(Rect::from_wh(w as f32, h as f32), &vignette);
+        canvas.draw_rect(Rect::from_wh(fw as f32, fh as f32), &vignette);
+        canvas.restore();
     }
 
     /// The takeover's legend, centered where every console screen's sits.
