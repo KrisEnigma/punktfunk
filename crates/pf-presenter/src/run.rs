@@ -649,6 +649,9 @@ fn run_inner(mut opts: SessionOpts, mut mode: ModeCtl) -> Result<Option<Outcome>
     let mut ring_was_open = false;
     // The pad whose Select+A opened the ring; `None` for a keyboard, touch or closed ring.
     let mut ring_opener: Option<u8> = None;
+    // Last audio-mute mask drawn and when it changed: a local mute's badge is timed off it.
+    let mut audio_mute_seen: u8 = 0;
+    let mut audio_mute_at = Instant::now();
     let disconnect_rx = gamepad.disconnect_events();
     let menu_rx = gamepad.menu_events();
     if matches!(mode, ModeCtl::Browse(_)) {
@@ -1819,10 +1822,19 @@ fn run_inner(mut opts: SessionOpts, mut mode: ModeCtl) -> Result<Option<Outcome>
             // the pump knows whether an uplink exists, and a mirrored copy would go stale
             // at session end.
             let mic_muted = stream.as_ref().is_some_and(|st| st.handle.mic.muted());
+            // The badge clears itself once a local mute has been read; the mask's own clock
+            // lives here because only the frame loop knows when it last moved.
             let audio_mute = stream
                 .as_ref()
                 .and_then(|st| st.connector.as_ref())
-                .and_then(|c| punktfunk_core::client::audio_mute_label(c.audio_mute()));
+                .and_then(|c| {
+                    let mask = c.audio_mute();
+                    if mask != audio_mute_seen {
+                        audio_mute_seen = mask;
+                        audio_mute_at = Instant::now();
+                    }
+                    punktfunk_core::client::audio_mute_notice(mask, audio_mute_at.elapsed())
+                });
             let ring_facts = stream
                 .as_ref()
                 .filter(|st| st.connector.is_some())
