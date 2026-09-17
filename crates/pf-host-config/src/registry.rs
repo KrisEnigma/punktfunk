@@ -458,6 +458,7 @@ pub static SETTINGS: &[Setting] = &[
     row("gamescope_isolate", "PUNKTFUNK_GAMESCOPE_ISOLATE", Kind::Bool, D::Bool(true), GameMode, NextSession, "Per-session isolation", "gamescope").advanced().only(LINUX),
     row("gamescope_grab_cursor", "PUNKTFUNK_GAMESCOPE_GRAB_CURSOR", Kind::Bool, D::Bool(false), GameMode, NextSession, "Grab the cursor", "gamescope").advanced().only(LINUX),
     row("steam_seat_home", "PUNKTFUNK_STEAM_SEAT_HOME", Kind::Bool, D::Bool(false), GameMode, NextSession, "Steam per seat", "gamescope").advanced().only(LINUX),
+    row("steam_seat_sandbox", "PUNKTFUNK_STEAM_SEAT_SANDBOX", Kind::Bool, D::Bool(false), GameMode, NextSession, "Pads per seat", "gamescope").advanced().only(LINUX),
     row("steam_prewarm", "PUNKTFUNK_STEAM_PREWARM", Kind::Int { min: 0, max: 8, unit: "seats" }, D::Int(1), GameMode, Restart, "Seats kept warm", "gamescope").advanced().only(LINUX),
     row("gamescope_bind", "PUNKTFUNK_GAMESCOPE_BIND", TRI, D::Str("auto"), GameMode, NextSession, "Bind patched gamescope", "gamescope")
         .advanced()
@@ -610,6 +611,15 @@ mod tests {
         assert_eq!(s.default.to_value(), Value::Bool(false));
         assert_eq!(s.apply, Apply::NextSession);
         assert_eq!(s.env, "PUNKTFUNK_STEAM_SEAT_HOME");
+    }
+
+    /// The pad filter rides a seat home, so it is off until an operator asks for both.
+    #[test]
+    fn a_seat_pad_filter_is_off_until_an_operator_asks_for_it() {
+        let s = find("steam_seat_sandbox").expect("the row exists");
+        assert_eq!(s.default.to_value(), Value::Bool(false));
+        assert_eq!(s.apply, Apply::NextSession);
+        assert_eq!(s.env, "PUNKTFUNK_STEAM_SEAT_SANDBOX");
     }
 
     #[test]
