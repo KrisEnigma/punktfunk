@@ -1359,9 +1359,7 @@ impl Shell {
         }
     }
 
-    /// Push a command with no screen (in-stream ring host actions). The Vulkan overlay's
-    /// only; every GL host draws the ring as the settings editor.
-    #[cfg_attr(not(feature = "vulkan-overlay"), allow(dead_code))]
+    /// Push a command with no screen: in-stream ring host actions, a re-rooted shelf's fetch.
     pub(crate) fn send_cmd(&self, cmd: ConsoleCmd) {
         self.bus.send(cmd);
     }
