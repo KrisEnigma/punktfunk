@@ -16,6 +16,11 @@ use std::time::Duration;
 /// Steam's install under a seat home, which is also what `XDG_DATA_HOME` points at.
 const STEAM_REL: &str = ".local/share/Steam";
 
+/// Steam's own launcher script. A clone carries it and so does a Steam that downloaded itself,
+/// while the library file below creates the directory without putting a Steam in it — so this,
+/// not the directory, is what says a seat is provisioned.
+const STEAM_MARKER: &str = ".local/share/Steam/steam.sh";
+
 /// What a seat must not inherit: the box's account, its library, and state that names either.
 /// Top-level `*.vdf` (`local.vdf`, `loginusers.vdf`) goes with them.
 const CLONE_SKIP: &[&str] = &["config", "userdata", "appcache", "steamapps", "logs"];
@@ -38,7 +43,7 @@ pub(super) fn has_steam(home: &Path) -> bool {
 pub(super) fn ensure_home(home: &Path) -> Option<PathBuf> {
     let steam = home.join(STEAM_REL);
     let mut provisioned = false;
-    if !steam.exists() {
+    if !home.join(STEAM_MARKER).exists() {
         let Some(src) = box_steam_root() else {
             tracing::info!(
                 "gamescope: this box has no native Steam install to clone (a Flatpak Steam keeps \
@@ -52,14 +57,7 @@ pub(super) fn ensure_home(home: &Path) -> Option<PathBuf> {
             return None;
         }
         match clone_install(&src, &steam) {
-            Ok(()) => {
-                provisioned = true;
-                if let Err(e) = write_library_folders(&src, &steam) {
-                    tracing::warn!(error = %format!("{e:#}"),
-                        "gamescope: the seat did not inherit the box's library folders — its Steam \
-                         offers to download games the box already has");
-                }
-            }
+            Ok(()) => provisioned = true,
             Err(e) => {
                 // A half-copied tree would read as an install. Empty, Steam downloads itself once.
                 let _ = std::fs::remove_dir_all(&steam);
@@ -67,6 +65,12 @@ pub(super) fn ensure_home(home: &Path) -> Option<PathBuf> {
                     "gamescope: the box's Steam was not cloned into the seat, so the seat downloads \
                      Steam once by itself — a filesystem without reflink support always does");
             }
+        }
+        // Either way: a seat that downloads its own Steam must still find the box's games.
+        if let Err(e) = write_library_folders(&src, &steam) {
+            tracing::warn!(error = %format!("{e:#}"),
+                "gamescope: the seat did not inherit the box's library folders — its Steam offers \
+                 to download games the box already has");
         }
     }
     tracing::info!(seat_home = %home.display(), provisioned,
@@ -139,21 +143,32 @@ fn clone_install(src: &Path, dst: &Path) -> Result<()> {
 }
 
 /// Hand the seat the box's library folders, so its Steam finds the installed games instead of
-/// offering to download them again. Only ever written once; Steam owns the file afterwards.
+/// offering to download them again. Written once; Steam owns the file afterwards.
 fn write_library_folders(src: &Path, dst: &Path) -> Result<()> {
     let dir = dst.join("steamapps");
     let seat = dir.join("libraryfolders.vdf");
     if seat.exists() {
         return Ok(());
     }
-    let text = std::fs::read_to_string(src.join("steamapps/libraryfolders.vdf"))
-        .context("read the box's library folders")?;
-    let folders = library_folder_paths(&text);
-    if folders.is_empty() {
-        return Ok(());
-    }
+    // A box with no list of its own is not a failure: the seat still gets its own root.
+    let listed =
+        std::fs::read_to_string(src.join("steamapps/libraryfolders.vdf")).unwrap_or_default();
+    let folders = seat_library_folders(dst, &listed, |p| Path::new(p).join("steamapps").is_dir());
     std::fs::create_dir_all(&dir).context("create the seat's steamapps directory")?;
     std::fs::write(&seat, library_folders_vdf(&folders)).context("write the seat's library folders")
+}
+
+/// The seat's own Steam root first — Steam reads entry `0` as its own install — then each folder
+/// the box lists that is mounted now. An absent drive would otherwise read as a library whose
+/// games vanished, and Steam offers to download them again.
+fn seat_library_folders(dst: &Path, listed: &str, mounted: impl Fn(&str) -> bool) -> Vec<String> {
+    let mut out = vec![dst.to_string_lossy().into_owned()];
+    for path in library_folder_paths(listed) {
+        if !out.contains(&path) && mounted(&path) {
+            out.push(path);
+        }
+    }
+    out
 }
 
 /// Every `"path"` value of a text-VDF `libraryfolders`, in file order and without duplicates.
@@ -240,20 +255,27 @@ mod tests {
         );
     }
 
-    /// Round-trip: what the box lists is what the seat is handed.
+    /// Entry `0` is the seat's own root, and an unmounted drive never becomes a library.
     #[test]
-    fn the_seat_inherits_every_library_folder_the_box_lists() {
-        let box_vdf = "\"libraryfolders\"\n{\n\t\"0\"\n\t{\n\t\t\"path\"\t\t\"/home/u/.local/share/Steam\"\n\t\t\"label\"\t\t\"\"\n\t\t\"totalsize\"\t\t\"0\"\n\t}\n\t\"1\"\n\t{\n\t\t\"path\"\t\t\"/mnt/games/SteamLibrary\"\n\t}\n}\n";
-        let folders = library_folder_paths(box_vdf);
+    fn the_seat_lists_its_own_root_first_then_the_box_folders_that_are_mounted() {
+        let box_vdf = "\"libraryfolders\"\n{\n\t\"0\"\n\t{\n\t\t\"path\"\t\t\"/home/u/.local/share/Steam\"\n\t\t\"label\"\t\t\"\"\n\t}\n\t\"1\"\n\t{\n\t\t\"path\"\t\t\"/mnt/games/SteamLibrary\"\n\t}\n\t\"2\"\n\t{\n\t\t\"path\"\t\t\"/run/media/gone\"\n\t}\n}\n";
+        let seat = Path::new("/seats/cafe0123").join(STEAM_REL);
+        let folders = seat_library_folders(&seat, box_vdf, |p| p != "/run/media/gone");
         assert_eq!(
             folders,
-            ["/home/u/.local/share/Steam", "/mnt/games/SteamLibrary"]
+            [
+                "/seats/cafe0123/.local/share/Steam",
+                "/home/u/.local/share/Steam",
+                "/mnt/games/SteamLibrary"
+            ]
         );
         assert_eq!(
             library_folder_paths(&library_folders_vdf(&folders)),
             folders,
             "what we write must parse back"
         );
+        // A box with no list of its own still leaves the seat pointed at itself.
+        assert_eq!(seat_library_folders(&seat, "", |_| true).len(), 1);
         assert!(library_folder_paths("\"libraryfolders\"\n{\n}\n").is_empty());
         assert!(
             library_folder_paths("\t\t\"pathological\"\t\t\"/nope\"\n").is_empty(),
