@@ -36,13 +36,26 @@ fn gamescope_ei_relay(name: &str) -> PathBuf {
     }
 }
 
+/// `$XDG_DATA_HOME/punktfunk/seats` — every seat's home and record. Path only.
+#[cfg(target_os = "linux")]
+pub fn seats_dir() -> PathBuf {
+    data_dir().join("seats")
+}
+
 /// `$XDG_DATA_HOME/punktfunk/seats/<id>` — the `HOME` a seat's nested Steam runs
 /// under (`design/gamescope-multiuser.md` D1). `id` is `pf-vdisplay`'s
 /// `SessionIsolation`. Path only; the caller creates it 0700
 /// ([`create_private_dir`]).
 #[cfg(target_os = "linux")]
 pub fn seat_home(id: &str) -> PathBuf {
-    data_dir().join("seats").join(id)
+    seats_dir().join(id)
+}
+
+/// `…/seats/<id>.json` — what pre-warming that seat needs, beside its home rather than inside
+/// it: the home is a `HOME` Steam owns, and a file of ours in it is one Steam may clean up.
+#[cfg(target_os = "linux")]
+pub fn seat_record(id: &str) -> PathBuf {
+    seats_dir().join(format!("{id}.json"))
 }
 
 /// `$XDG_DATA_HOME/punktfunk`, else `~/.local/share/punktfunk`. Separate from
@@ -418,6 +431,10 @@ mod tests {
             seat.display()
         );
         assert_ne!(seat, seat_home("anon0"), "two seats never share a home");
+        // The record sits beside the home, never inside the `HOME` Steam owns.
+        let record = seat_record("cafe0123");
+        assert_eq!(record.parent(), seat.parent());
+        assert!(!record.starts_with(&seat), "{}", record.display());
     }
 
     #[test]
