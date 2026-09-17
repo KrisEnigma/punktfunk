@@ -5537,6 +5537,10 @@
             ],
             "description": "Store-qualified library id (`steam:570`); matches `GET /library`. Absent for a typed GameStream command."
           },
+          "awaiting_window": {
+            "type": "boolean",
+            "description": "Present and true while `running` on a host that will report `window` next. A launch hold\nwaits for that instead of revealing a game that is still loading."
+          },
           "client": {
             "type": "string",
             "description": "Client-supplied device name of the session that launched it; may be empty."
@@ -5562,7 +5566,7 @@
           },
           "state": {
             "type": "string",
-            "description": "`launching` | `running` | `exited` | `untracked` (exit will never be seen) | `grace` (reconnect window).",
+            "description": "`launching` | `running` | `window` (its window is on the streamed screen) | `exited` |\n`untracked` (exit will never be seen) | `grace` (reconnect window).",
             "example": "running"
           },
           "store": {
@@ -7533,7 +7537,7 @@
             "properties": {
               "app_id": {
                 "type": "string",
-                "description": "Wayland `app_id`, or the X11 class on an Xwayland window."
+                "description": "Wayland `app_id` or X11 class; `steam_app_<id>` under gamescope; empty on Windows."
               },
               "game": {
                 "$ref": "#/components/schemas/GameRefPayload"
@@ -7546,7 +7550,7 @@
               },
               "title": {
                 "type": "string",
-                "description": "Title the compositor reports for that window."
+                "description": "Title the compositor or the desktop reports for that window."
               }
             }
           },

@@ -784,9 +784,11 @@ pub struct GameSnapshot {
     pub title: String,
     pub store: Option<String>,
     pub plane: crate::events::Plane,
-    /// `launching` / `running` / `exited` / `untracked`, or `grace` on the
-    /// reconnect window.
+    /// `launching` / `running` / `window` / `exited` / `untracked`, or `grace`
+    /// on the reconnect window.
     pub state: &'static str,
+    /// `running`, and `window` will follow once the game's window is up.
+    pub awaiting_window: bool,
     /// Seconds left before the game is ended. Set only on a `grace` row.
     pub grace_remaining_s: Option<u64>,
 }
@@ -838,6 +840,7 @@ pub fn games() -> Vec<GameSnapshot> {
                 store: g.game.store.clone(),
                 plane: g.plane,
                 state: g.state().as_str(),
+                awaiting_window: g.awaits_window(),
                 grace_remaining_s: None,
             })
         })
@@ -857,6 +860,7 @@ pub fn games() -> Vec<GameSnapshot> {
                 store: g.game.store.clone(),
                 plane: g.plane,
                 state: g.state().as_str(),
+                awaiting_window: g.awaits_window(),
                 grace_remaining_s: None,
             }),
     );
@@ -871,6 +875,7 @@ pub fn games() -> Vec<GameSnapshot> {
                 store: g.game.store.clone(),
                 plane: g.plane,
                 state: "grace",
+                awaiting_window: false,
                 grace_remaining_s: Some(remaining),
             }),
     );
@@ -1180,8 +1185,7 @@ mod tests {
                 procs: None,
                 #[cfg(target_os = "linux")]
                 workspace: None,
-                #[cfg(target_os = "linux")]
-                window_stage: None,
+                window: None,
                 outcome: None,
             },
             Box::new(|| {}),

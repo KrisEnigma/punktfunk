@@ -104,7 +104,7 @@ pub(crate) fn wait_for_steam_game_exit(
 }
 
 /// The gamescope Xwayland presenting `appid` on this seat, when one is.
-fn display_presenting(appid: u32, seat: Option<&str>) -> Option<String> {
+pub(crate) fn display_presenting(appid: u32, seat: Option<&str>) -> Option<String> {
     xwayland_cursor_targets(seat)
         .into_iter()
         .map(|(d, _xauth)| d)

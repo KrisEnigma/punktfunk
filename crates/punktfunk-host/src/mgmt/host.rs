@@ -350,9 +350,15 @@ pub(crate) struct ActiveGame {
     store: Option<String>,
     /// `native` or `gamestream`.
     plane: crate::events::Plane,
-    /// `launching` | `running` | `exited` | `untracked` (exit will never be seen) | `grace` (reconnect window).
+    /// `launching` | `running` | `window` (its window is on the streamed screen) | `exited` |
+    /// `untracked` (exit will never be seen) | `grace` (reconnect window).
     #[schema(example = "running")]
     state: String,
+    /// Present and true while `running` on a host that will report `window` next. A launch hold
+    /// waits for that instead of revealing a game that is still loading.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    #[schema(required = false)]
+    awaiting_window: bool,
     /// Seconds until this game is ended — only present on a `grace` row.
     #[serde(skip_serializing_if = "Option::is_none")]
     grace_remaining_s: Option<u64>,
@@ -728,6 +734,7 @@ pub(crate) async fn get_status(State(st): State<Arc<MgmtState>>) -> Json<Runtime
                 store: g.store,
                 plane: g.plane,
                 state: g.state.to_string(),
+                awaiting_window: g.awaiting_window,
                 grace_remaining_s: g.grace_remaining_s,
             })
             .collect(),

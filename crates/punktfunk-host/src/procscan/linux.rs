@@ -130,6 +130,38 @@ impl Scanner {
             .collect()
     }
 
+    /// `(pid, parent)` for every own process, from `stat`.
+    pub fn parents(&self) -> Vec<(u32, u32)> {
+        let Ok(entries) = std::fs::read_dir(&self.root) else {
+            return Vec::new();
+        };
+        entries
+            .flatten()
+            .filter_map(|e| {
+                let pid = e.file_name().to_str()?.parse::<u32>().ok()?;
+                if let Some(uid) = self.uid {
+                    use std::os::unix::fs::MetadataExt;
+                    if std::fs::metadata(e.path()).ok()?.uid() != uid {
+                        return None;
+                    }
+                }
+                let stat = std::fs::read_to_string(e.path().join("stat")).ok()?;
+                let tail = &stat[stat.rfind(')')? + 1..];
+                let ppid = tail.split_whitespace().nth(1)?.parse().ok()?;
+                Some((pid, ppid))
+            })
+            .collect()
+    }
+
+    /// Whether `pid` runs under Proton, Wine or a Steam launch, by the variable each one sets.
+    pub fn x11_launch(&self, pid: u32) -> bool {
+        const MARKERS: [&[u8]; 3] = [b"STEAM_COMPAT_DATA_PATH=", b"WINEPREFIX=", b"SteamAppId="];
+        read_capped(&self.root.join(pid.to_string()).join("environ")).is_some_and(|env| {
+            env.split(|&b| b == 0)
+                .any(|kv| MARKERS.iter().any(|m| kv.starts_with(m)))
+        })
+    }
+
     fn matches(
         &self,
         dir_path: &Path,
@@ -351,6 +383,25 @@ mod tests {
     fn pids(mut v: Vec<ProcRef>) -> Vec<u32> {
         v.sort_by_key(|p| p.pid);
         v.into_iter().map(|p| p.pid).collect()
+    }
+
+    /// Proton, Wine and a Steam launch each leave their variable; a native emulator carries none,
+    /// and a variable that merely contains a marker's name does not count.
+    #[test]
+    fn x11_launch_reads_the_proton_wine_and_steam_markers() {
+        let td = fake_proc_root(
+            100.0,
+            &[
+                FakeProc::new(10, 1).environ(&["HOME=/home/p", "STEAM_COMPAT_DATA_PATH=/c/570"]),
+                FakeProc::new(11, 1).environ(&["WINEPREFIX=/home/p/.wine"]),
+                FakeProc::new(12, 1).environ(&["SteamAppId=570"]),
+                FakeProc::new(13, 1).environ(&["QT_QPA_PLATFORM=wayland", "MY_WINEPREFIX=/x"]),
+            ],
+        );
+        let s = scanner(td.path());
+        assert!(s.x11_launch(10) && s.x11_launch(11) && s.x11_launch(12));
+        assert!(!s.x11_launch(13));
+        assert!(!s.x11_launch(99), "a gone process is not one");
     }
 
     #[test]

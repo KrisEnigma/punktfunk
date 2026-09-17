@@ -737,15 +737,15 @@ impl StreamState {
                     outcome: Some(launch_outcome.clone()),
                     #[cfg(target_os = "linux")]
                     workspace: launch_workspace,
-                    // Absent on a backend that names no head: the lease then
-                    // runs exactly as it did before the window stage.
-                    #[cfg(target_os = "linux")]
-                    window_stage: streamed_head
-                        .clone()
-                        .map(|head| crate::gamelease::WindowStage {
-                            head,
-                            on_window: target.on_window,
-                        }),
+                    window: window_source(
+                        #[cfg(target_os = "linux")]
+                        compositor,
+                        #[cfg(target_os = "linux")]
+                        streamed_head.clone(),
+                        #[cfg(target_os = "linux")]
+                        seat.clone(),
+                        target.on_window,
+                    ),
                 },
                 on_exit,
             )
@@ -1121,6 +1121,47 @@ pub(super) fn announce_pipeline_gap(gap: &tokio::sync::mpsc::UnboundedSender<u32
         return;
     }
     let _ = gap.send(gap_ms);
+}
+
+/// Where this session's lease looks for the game's window: the compositor's own toplevel list
+/// where it has one, gamescope's atoms and Xwaylands, the desktop session's Xwayland, or the
+/// Windows desktop. `None` when none can be reached.
+fn window_source(
+    #[cfg(target_os = "linux")] compositor: crate::vdisplay::Compositor,
+    #[cfg(target_os = "linux")] head: Option<crate::session_status::StreamedHead>,
+    #[cfg(target_os = "linux")] seat: Option<String>,
+    on_window: crate::library::OnWindow,
+) -> Option<crate::gamelease::WindowSource> {
+    #[cfg(target_os = "linux")]
+    {
+        use crate::gamelease::WindowSource;
+        use crate::vdisplay::Compositor;
+        match compositor {
+            Compositor::Hyprland | Compositor::Wlroots => head.map(|head| {
+                WindowSource::Toplevels(crate::gamelease::WindowStage { head, on_window })
+            }),
+            Compositor::Gamescope => Some(WindowSource::Gamescope { seat }),
+            Compositor::Kwin | Compositor::Mutter => {
+                crate::vdisplay::session_x11_env().map(|(display, xauthority)| {
+                    WindowSource::Xwayland {
+                        display,
+                        xauthority,
+                    }
+                })
+            }
+            Compositor::Windows => None,
+        }
+    }
+    #[cfg(windows)]
+    {
+        let _ = on_window;
+        Some(crate::gamelease::WindowSource::Desktop)
+    }
+    #[cfg(not(any(target_os = "linux", windows)))]
+    {
+        let _ = on_window;
+        None
+    }
 }
 
 #[cfg(test)]

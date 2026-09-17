@@ -70,6 +70,7 @@ pub(crate) mod toplevels;
 #[cfg(target_os = "linux")]
 pub use toplevels::{
     list_all_toplevels, list_toplevels, move_toplevel_to_output, toplevels_token, window_action,
+    x11_game_window,
 };
 pub use toplevels::{Toplevel, WindowVerb};
 
@@ -84,7 +85,7 @@ pub use routing::{
 };
 #[cfg(target_os = "linux")]
 pub use routing::{
-    claim_workspace, dedicated_game_exited, focus_streamed_output,
+    claim_workspace, dedicated_game_exited, focus_streamed_output, gamescope_presenting,
     gamescope_xwayland_cursor_targets, launch_into_gamescope_session, launch_is_nested,
     steam_appid_from_launch, watch_steam_game_exit, WorkspaceClaim,
 };

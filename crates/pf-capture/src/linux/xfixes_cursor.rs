@@ -222,6 +222,12 @@ fn connect(dpy: &str, xauthority: Option<&str>) -> Result<Connected, String> {
     Ok((conn, root, root_size, atoms))
 }
 
+/// [`connect_conn`] for callers outside the cursor source: the host's window watch reads the same
+/// Xwaylands.
+pub fn x11_connect(dpy: &str, xauthority: Option<&str>) -> Result<(RustConnection, usize), String> {
+    connect_conn(dpy, xauthority)
+}
+
 /// Open `dpy` with `xauthority`'s cookie without touching this process's
 /// environment.
 ///
