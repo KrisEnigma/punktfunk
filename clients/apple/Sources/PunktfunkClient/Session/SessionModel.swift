@@ -94,9 +94,9 @@ enum LaunchedEntry {
     }
 }
 
-/// How long the launch hold waits on a title the host still calls `launching` (a cold Steam boot
-/// with shader work runs to minutes), and on one the host never lists at all (the launch did not
-/// resolve; the host logs it and streams on).
+/// How long the launch hold waits on a title the host still calls `launching`, or `running` without
+/// its window (a cold Steam boot with shader work runs to minutes), and on one the host never lists
+/// at all (the launch did not resolve; the host logs it and streams on).
 private let launchHoldMax: TimeInterval = 120
 private let launchNoLease: TimeInterval = 15
 /// The demo host's pretend start: the cover's 0.75 s flight, its details, then a beat of
@@ -126,6 +126,8 @@ final class SessionModel: ObservableObject {
     /// the only moment the cover has somewhere to fly FROM, and holding from there means one
     /// unbroken screen from the tap to the game rather than a stream of the launcher in between.
     @Published private(set) var launchHold: LaunchHoldTarget?
+    /// The launched game is up and the host is waiting for its window.
+    @Published private(set) var launchWindowWait = false
     private var launchWatch: Task<Void, Never>?
     /// Counts launches, so each hold is a view of its own — see `LaunchHoldTarget.seq`.
     private var launchSeq = 0
@@ -388,6 +390,7 @@ final class SessionModel: ObservableObject {
         // The host never tracks a launcher tile, so there is nothing to wait for.
         launchSeq += 1
         launchHold = launchID.flatMap { LaunchedEntry.take($0, seq: launchSeq) }
+        launchWindowWait = false
             .flatMap { $0.entry.isLauncher ? nil : $0 }
         errorMessage = nil
         settings = effective
@@ -1064,6 +1067,7 @@ final class SessionModel: ObservableObject {
         launchWatch?.cancel()
         launchWatch = nil
         launchHold = nil
+        launchWindowWait = false
     }
 
     /// Poll the host once a second for the launched title's state, and reveal when it has
@@ -1093,12 +1097,16 @@ final class SessionModel: ObservableObject {
                     address: host.address, port: port,
                     certPEM: identity.certPEM, keyPEM: identity.keyPEM,
                     hostFingerprint: host.pinnedSHA256)
-                let state = games.first { $0.appID == hold.id }?.state
+                let game = games.first { $0.appID == hold.id }
+                let state = game?.state
                 let elapsed = Date().timeIntervalSince(began)
+                let windowWait = state == "running" && game?.awaitingWindow == true
                 let done: Bool
                 switch state {
                 case "launching": done = elapsed >= launchHoldMax
-                // running, exited, untracked, grace: the host has said all it will.
+                // A Proton prefix or a splash can sit behind a running process for a minute.
+                case "running" where windowWait: done = elapsed >= launchHoldMax
+                // window, running, exited, untracked, grace: the host has said all it will.
                 case .some: done = true
                 case nil: done = elapsed >= launchNoLease
                 }
@@ -1106,6 +1114,7 @@ final class SessionModel: ObservableObject {
                     self?.revealStream()
                     return
                 }
+                self?.launchWindowWait = windowWait
                 try? await Task.sleep(nanoseconds: NSEC_PER_SEC)
             }
         }
