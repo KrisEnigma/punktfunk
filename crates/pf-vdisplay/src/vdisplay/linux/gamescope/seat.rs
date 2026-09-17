@@ -24,6 +24,13 @@ const CLONE_SKIP: &[&str] = &["config", "userdata", "appcache", "steamapps", "lo
 /// where `cp` refuses outright and Steam bootstraps itself instead.
 const CLONE_BUDGET: Duration = Duration::from_secs(60);
 
+/// Is there a Steam under this seat home for a launch to reach? A home nothing ever provisioned
+/// (no native Steam on the box) has none, and a forwarder pointed at it would cold-start a second
+/// Steam in an empty directory instead of talking to the one the session is showing.
+pub(super) fn has_steam(home: &Path) -> bool {
+    home.join(STEAM_REL).is_dir()
+}
+
 /// The seat's `HOME`, provisioned from the box's Steam the first time it is used.
 ///
 /// `None` when the box has no native Steam to clone (Flatpak keeps its own root): the launch then

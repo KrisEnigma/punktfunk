@@ -925,8 +925,8 @@ pub fn launch_into_session(
     // Keeps AppImageLauncher's binfmt hook from replacing an .AppImage with its dialog.
     c.env("APPIMAGELAUNCHER_DISABLE", "1");
     // A kept seat's Steam answers on its own `steam.pipe`; without this the forwarder hands the
-    // launch to the box's Steam instead.
-    if let Some(home) = steam_home {
+    // launch to the box's Steam instead. Nothing else in the session takes that home.
+    if let Some(home) = steam_home.filter(|h| seat_env_applies(cmd, seat::has_steam(h))) {
         c.envs(seat::env(home));
     }
     match discover_session_display_env(seat) {
@@ -3942,8 +3942,15 @@ pub fn ei_socket_file() -> std::path::PathBuf {
 }
 
 /// First token, not a `steam://` URI: a bare `steam -gamepadui` needs the instance free more, not less.
-fn is_steam_launch(cmd: &str) -> bool {
+pub(crate) fn is_steam_launch(cmd: &str) -> bool {
     cmd.split_whitespace().next() == Some("steam")
+}
+
+/// May `cmd` take the seat's env? Only a launch that talks to that seat's own Steam. A Lutris,
+/// Heroic or operator command would otherwise lose its config to a `HOME` holding one Steam and
+/// nothing else. `has_steam` is [`seat::has_steam`].
+fn seat_env_applies(cmd: &str, has_steam: bool) -> bool {
+    has_steam && is_steam_launch(cmd)
 }
 
 /// Non-Steam Exclusive: the box session is DRM master. Steam is handled by the failing arm above.
@@ -4314,9 +4321,11 @@ fn spawn(
         );
     }
     // The seat home is the NESTED command's, never gamescope's: the compositor keeps the box's
-    // runtime dir, where PipeWire, Wayland and the EIS relay live.
+    // runtime dir, where PipeWire, Wayland and the EIS relay live. A seat we are about to fill
+    // holds no Steam yet, so this is the launch's shape alone.
+    let nested_seat_home = seat_home.filter(|_| is_steam_launch(&app));
     let mut nested_env = wsi.env();
-    if let Some(home) = seat_home.filter(|_| is_steam_launch(&app)) {
+    if let Some(home) = nested_seat_home {
         nested_env.extend(seat::env(home));
     }
     let script = nested_wrapper_script(&relay, splash_exe.is_some(), &nested_env);
@@ -4364,7 +4373,12 @@ fn spawn(
         .spawn()
         .context("spawn gamescope (is it installed? `apt install gamescope`)")?;
     if let Some(uri) = deferred {
-        hand_launch_to_steam_when_up(uri, child.id(), seat_home.map(std::path::Path::to_path_buf));
+        // The home the nested Steam just took, so the forwarder reaches that one's pipe.
+        hand_launch_to_steam_when_up(
+            uri,
+            child.id(),
+            nested_seat_home.map(std::path::Path::to_path_buf),
+        );
     }
     Ok(child)
 }
@@ -4434,8 +4448,8 @@ mod tests {
         is_steam_launch, managed_darken_acquire_edge, managed_darken_release_edge, mask_unit,
         missing_flags, mode_mismatch, nested_wrapper_script, our_wsi_layer_dir, parse_listed_units,
         plan_bind, refresh_rate_list, release_autologin_mask, remove_idle_dropin,
-        script_hardcodes_gamescope, sentinel_advanced, shape_dedicated_command, shell_word,
-        switch_ends_mask_window, takeover_state_is_live, unmask_unit, without_uri,
+        script_hardcodes_gamescope, seat_env_applies, sentinel_advanced, shape_dedicated_command,
+        shell_word, switch_ends_mask_window, takeover_state_is_live, unmask_unit, without_uri,
         xwayland_refusal_marker, BindOff, BindPlan, BoxOutputSize, DmHelperError, SessionBind,
         TakeoverState, WsiPlan, AUTOLOGIN_MASKED, DISTRO_GAMESCOPE_PATH, PENDING_RESTORE,
         RESTORE_FLIGHT, STOPPED_AUTOLOGIN, WSI_OFF_ENV, X11_SOCKET_DIR,
@@ -4873,6 +4887,30 @@ mod tests {
         // and the `SharedDesktop` preset ("never blank the real monitors") mean what they say.
         assert!(!free_box_session_for_exclusive(false, false));
         assert!(!free_box_session_for_exclusive(true, false));
+    }
+
+    /// A session's other launchers keep their own home: only Steam talks to the seat's Steam.
+    #[test]
+    fn only_a_steam_launch_into_a_provisioned_seat_takes_the_seat_env() {
+        assert!(seat_env_applies(
+            "steam -gamepadui steam://rungameid/2379780",
+            true
+        ));
+        assert!(seat_env_applies(
+            "steam steam://rungameid/13843649396736",
+            true
+        ));
+        // A seat home nothing provisioned (Flatpak-only box) holds no Steam to reach.
+        assert!(!seat_env_applies("steam -gamepadui", false));
+        // Everything else a kept session launches keeps the box's home.
+        for other in [
+            "lutris rungameid/3",
+            "heroic://launch/x",
+            "/opt/game/run.sh",
+            "",
+        ] {
+            assert!(!seat_env_applies(other, true), "{other}");
+        }
     }
 
     #[test]
