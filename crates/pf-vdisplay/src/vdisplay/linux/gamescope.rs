@@ -3936,6 +3936,125 @@ fn shape_dedicated_command(app: &str) -> String {
     app.to_string()
 }
 
+const RUNGAMEID: &str = "steam://rungameid/";
+
+/// The `rungameid` URI in `app`, when it names a non-Steam shortcut.
+///
+/// A shortcut's id is 64-bit; a Steam game's is its 32-bit appid. Steam runs a URI off its own
+/// command line the moment it finishes starting, and the UI that answers the launch resolves the
+/// id against an app list it has not filled yet. Anything wider than an appid throws there, and
+/// the launch waits forever for an answer nobody sends — Big Picture and desktop UI alike. Steam
+/// takes the same URI once it is up, which is how Steam's own Game Mode starts a game.
+fn deferred_shortcut_uri(app: &str) -> Option<String> {
+    if !is_steam_launch(app) {
+        return None;
+    }
+    let uri = app.split_whitespace().find(|t| t.starts_with(RUNGAMEID))?;
+    let id: u64 = uri[RUNGAMEID.len()..].parse().ok()?;
+    (id > u64::from(u32::MAX)).then(|| uri.to_string())
+}
+
+/// `app` without `uri`, leaving the command that boots Steam with nothing to run.
+fn without_uri(app: &str, uri: &str) -> String {
+    app.split_whitespace()
+        .filter(|t| *t != uri)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Steam writes this line when its client is up; the UI fills its app list right after.
+const STEAM_UP_MARKER: &str = "System startup time";
+
+/// Covers a cold Steam that updates itself first. A miss sends the launch anyway.
+const STEAM_UP_WAIT: Duration = Duration::from_secs(90);
+
+/// The app list lands just behind the marker, so the launch waits out this much more.
+const STEAM_UP_MARGIN: Duration = Duration::from_secs(2);
+
+/// `steam <uri>` hands off over Steam's pipe and exits; a hung forwarder is not worth waiting on.
+const STEAM_URI_BUDGET: Duration = Duration::from_secs(20);
+
+/// Steam's console log, under the `~/.steam/steam` link a native install keeps.
+fn steam_console_log() -> Option<std::path::PathBuf> {
+    let home = std::env::var_os("HOME")?;
+    Some(std::path::PathBuf::from(home).join(".steam/steam/logs/console_log.txt"))
+}
+
+/// Has Steam logged [`STEAM_UP_MARKER`] past `from`? `from` resets on a log Steam truncated.
+fn steam_up_since(path: &std::path::Path, from: &mut u64) -> bool {
+    use std::io::{Read, Seek, SeekFrom};
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return false;
+    };
+    if f.metadata().map_or(0, |m| m.len()) < *from {
+        *from = 0;
+    }
+    if f.seek(SeekFrom::Start(*from)).is_err() {
+        return false;
+    }
+    let mut tail = String::new();
+    // Bounded read: a cold Steam writes a few hundred KiB before it is up.
+    let _ = f.take(4 << 20).read_to_string(&mut tail);
+    tail.contains(STEAM_UP_MARKER)
+}
+
+/// Give the session's Steam `uri` once it is up ([`deferred_shortcut_uri`]).
+///
+/// The forwarder reaches the nested client over `~/.steam/steam.pipe`, so it needs none of the
+/// session's env. `gamescope` is this spawn's pid: with the session gone there is nothing left
+/// to launch into, and the URI would land in whatever Steam the box has instead.
+fn hand_launch_to_steam_when_up(uri: String, gamescope: u32) {
+    let spawned = std::thread::Builder::new()
+        .name("pf1-steamuri".into())
+        .spawn(move || {
+            let log = steam_console_log();
+            let mut from = log
+                .as_ref()
+                .and_then(|p| std::fs::metadata(p).ok())
+                .map_or(0, |m| m.len());
+            let deadline = Instant::now() + STEAM_UP_WAIT;
+            let mut up = false;
+            while Instant::now() < deadline {
+                if !pid_running(gamescope) {
+                    tracing::info!(
+                        %uri,
+                        "gamescope: the session ended before its Steam was up — launch not sent"
+                    );
+                    return;
+                }
+                if log.as_ref().is_some_and(|p| steam_up_since(p, &mut from)) {
+                    up = true;
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(250));
+            }
+            if up {
+                std::thread::sleep(STEAM_UP_MARGIN);
+            } else {
+                tracing::warn!(
+                    %uri,
+                    secs = STEAM_UP_WAIT.as_secs(),
+                    "gamescope: the nested Steam never logged that it was up — handing it the \
+                     launch anyway. A Steam that is still starting drops it, and Big Picture is \
+                     then all this session shows"
+                );
+            }
+            tracing::info!(%uri, steam_up = up, "gamescope: handing the launch to the nested Steam");
+            if let Err(e) = crate::proc::status_within(
+                Command::new("steam")
+                    .arg(&uri)
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null()),
+                STEAM_URI_BUDGET,
+            ) {
+                tracing::warn!(%uri, error = %format!("{e:#}"), "gamescope: launch not handed to Steam");
+            }
+        });
+    if let Err(e) = spawned {
+        tracing::warn!(error = %e, "gamescope: deferred Steam launch thread not started");
+    }
+}
+
 /// Add the compositor-side arguments shared by every bare gamescope spawn. `steam_mode` belongs
 /// before the `--` terminator; [`PUNKTFUNK_GAMESCOPE_APP`](spawn) configures the nested command
 /// after it and therefore cannot enable gamescope's Steam integration itself.
@@ -4120,6 +4239,12 @@ fn spawn(
     let game_launch = app.is_some();
     let app = app.unwrap_or_else(|| "sleep infinity".to_string());
     let app = shape_dedicated_command(&app);
+    // A shortcut's launch never rides Steam's command line ([`deferred_shortcut_uri`]).
+    let deferred = deferred_shortcut_uri(&app);
+    let app = match deferred.as_deref() {
+        Some(uri) => without_uri(&app, uri),
+        None => app,
+    };
     // Isolated: per-session relay so a concurrent spawn cannot overwrite the injector's socket.
     let relay = iso
         .map(|i| i.ei_relay.clone())
@@ -4189,11 +4314,17 @@ fn spawn(
         bin = %gamescope_bin(),
         splash = splash_exe.is_some(),
         %app,
+        held_launch = deferred.as_deref().unwrap_or("-"),
         log = %log.display(),
         "spawning gamescope (headless)"
     );
-    cmd.spawn()
-        .context("spawn gamescope (is it installed? `apt install gamescope`)")
+    let child = cmd
+        .spawn()
+        .context("spawn gamescope (is it installed? `apt install gamescope`)")?;
+    if let Some(uri) = deferred {
+        hand_launch_to_steam_when_up(uri, child.id());
+    }
+    Ok(child)
 }
 
 /// Builds the nested wrapper. Its first remaining argument is one shell command,
@@ -4255,16 +4386,17 @@ impl Drop for GamescopeProc {
 mod tests {
     use super::{
         any_output_size_is, cancel_pending_restore, cgroup_is_punktfunk_owned,
-        classify_output_size, connected_connector_under, display_manager_unit_under, dm_plan,
-        free_box_session_for_exclusive, game_hz, gamescope_output_size, hdr_args, idle_dropin_body,
-        idle_dropin_path, install_idle_dropin, is_steam_launch, managed_darken_acquire_edge,
-        managed_darken_release_edge, mask_unit, missing_flags, mode_mismatch,
-        nested_wrapper_script, our_wsi_layer_dir, parse_listed_units, plan_bind, refresh_rate_list,
-        release_autologin_mask, remove_idle_dropin, script_hardcodes_gamescope, sentinel_advanced,
-        shape_dedicated_command, shell_word, switch_ends_mask_window, takeover_state_is_live,
-        unmask_unit, xwayland_refusal_marker, BindOff, BindPlan, BoxOutputSize, DmHelperError,
-        SessionBind, TakeoverState, WsiPlan, AUTOLOGIN_MASKED, DISTRO_GAMESCOPE_PATH,
-        PENDING_RESTORE, RESTORE_FLIGHT, STOPPED_AUTOLOGIN, WSI_OFF_ENV, X11_SOCKET_DIR,
+        classify_output_size, connected_connector_under, deferred_shortcut_uri,
+        display_manager_unit_under, dm_plan, free_box_session_for_exclusive, game_hz,
+        gamescope_output_size, hdr_args, idle_dropin_body, idle_dropin_path, install_idle_dropin,
+        is_steam_launch, managed_darken_acquire_edge, managed_darken_release_edge, mask_unit,
+        missing_flags, mode_mismatch, nested_wrapper_script, our_wsi_layer_dir, parse_listed_units,
+        plan_bind, refresh_rate_list, release_autologin_mask, remove_idle_dropin,
+        script_hardcodes_gamescope, sentinel_advanced, shape_dedicated_command, shell_word,
+        switch_ends_mask_window, takeover_state_is_live, unmask_unit, without_uri,
+        xwayland_refusal_marker, BindOff, BindPlan, BoxOutputSize, DmHelperError, SessionBind,
+        TakeoverState, WsiPlan, AUTOLOGIN_MASKED, DISTRO_GAMESCOPE_PATH, PENDING_RESTORE,
+        RESTORE_FLIGHT, STOPPED_AUTOLOGIN, WSI_OFF_ENV, X11_SOCKET_DIR,
     };
     use std::time::{Duration, Instant};
 
@@ -4939,6 +5071,39 @@ mod tests {
             "steam -gamepadui"
         );
         assert_eq!(shape_dedicated_command("steam"), "steam");
+    }
+
+    #[test]
+    fn only_a_shortcut_launch_is_held_back_from_steams_command_line() {
+        // 64-bit `rungameid` (appid << 32 | the shortcut marker) — the id Steam's UI cannot
+        // resolve while it is still starting.
+        let shortcut = "steam -gamepadui steam://rungameid/15155503380618543104";
+        assert_eq!(
+            deferred_shortcut_uri(shortcut).as_deref(),
+            Some("steam://rungameid/15155503380618543104")
+        );
+        assert_eq!(
+            without_uri(shortcut, "steam://rungameid/15155503380618543104"),
+            "steam -gamepadui"
+        );
+        // A Steam game's id IS its appid: it survives that lookup, so it keeps riding the spawn.
+        assert_eq!(
+            deferred_shortcut_uri("steam -gamepadui steam://rungameid/570"),
+            None
+        );
+        // Highest appid that still fits, and the first that does not.
+        assert_eq!(
+            deferred_shortcut_uri("steam steam://rungameid/4294967295"),
+            None
+        );
+        assert!(deferred_shortcut_uri("steam steam://rungameid/4294967296").is_some());
+        // Other launchers and a Steam client with nothing to run carry no launch to hold.
+        assert_eq!(deferred_shortcut_uri("steam -gamepadui"), None);
+        assert_eq!(deferred_shortcut_uri("lutris lutris:rungameid/2"), None);
+        assert_eq!(
+            deferred_shortcut_uri("heroic --no-gui steam://rungameid/15155503380618543104"),
+            None
+        );
     }
 
     #[test]
