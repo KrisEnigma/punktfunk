@@ -915,8 +915,24 @@ pub fn launch_into_session(
     seat: Option<&str>,
     steam_home: Option<&std::path::Path>,
 ) -> Result<std::process::Child> {
+    // A seat pre-warmed moments ago may still be booting Steam, and a shortcut's URI handed to a
+    // Steam that has not finished starting is never answered. Held in the launch process itself,
+    // so the caller still gets one child and the session thread waits on nothing.
+    let held = steam_home
+        .filter(|h| seat_env_applies(cmd, seat::has_steam(h)))
+        .and_then(seat_steam_log_mark)
+        .and_then(|(log, at)| {
+            let mut from = at; // `steam_up_since` rewinds a log Steam truncated on its own start
+            let up = steam_up_since(&log, &mut from);
+            let uri = reuse_holds_shortcut(cmd, up)?;
+            tracing::info!(
+                %uri,
+                "gamescope: holding this launch until the seat's Steam says it is up"
+            );
+            Some(hold_launch_until_steam_up(&uri, &log, from))
+        });
     let mut c = Command::new("sh");
-    c.arg("-c").arg(cmd);
+    c.arg("-c").arg(held.as_deref().unwrap_or(cmd));
     // Keeps AppImageLauncher's binfmt hook from replacing an .AppImage with its dialog.
     c.env("APPIMAGELAUNCHER_DISABLE", "1");
     // A kept seat's Steam answers on its own `steam.pipe`; without this the forwarder hands the
@@ -4021,6 +4037,36 @@ fn steam_console_log(steam_home: Option<&std::path::Path>) -> Option<std::path::
     Some(home.join(".steam/steam/logs/console_log.txt"))
 }
 
+/// Console-log length of each seat's Steam when that seat's gamescope was spawned, so a later
+/// launch into the kept session can tell this Steam's `System startup time` from the last one's.
+/// One entry per seat home; a box with no seat homes never gets one.
+static SEAT_STEAM_LOG_MARK: std::sync::Mutex<Vec<(std::path::PathBuf, u64)>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// Mark where this seat's Steam log stands as its gamescope starts.
+fn mark_seat_steam_log(home: &std::path::Path) {
+    let Some(log) = steam_console_log(Some(home)) else {
+        return;
+    };
+    let at = std::fs::metadata(&log).map_or(0, |m| m.len());
+    let mut marks = SEAT_STEAM_LOG_MARK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    match marks.iter_mut().find(|(h, _)| h == home) {
+        Some((_, mark)) => *mark = at,
+        None => marks.push((home.to_path_buf(), at)),
+    }
+}
+
+/// `(console log, offset)` of the seat's Steam at spawn. `None` for a home no spawn marked.
+fn seat_steam_log_mark(home: &std::path::Path) -> Option<(std::path::PathBuf, u64)> {
+    let marks = SEAT_STEAM_LOG_MARK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let at = marks.iter().find(|(h, _)| h == home).map(|(_, at)| *at)?;
+    Some((steam_console_log(Some(home))?, at))
+}
+
 /// Has Steam logged [`STEAM_UP_MARKER`] past `from`? `from` resets on a log Steam truncated.
 fn steam_up_since(path: &std::path::Path, from: &mut u64) -> bool {
     use std::io::{Read, Seek, SeekFrom};
@@ -4097,6 +4143,30 @@ fn hand_launch_to_steam_when_up(
     if let Err(e) = spawned {
         tracing::warn!(error = %e, "gamescope: deferred Steam launch thread not started");
     }
+}
+
+/// The launch a kept seat must hold back: a shortcut's URI ([`deferred_shortcut_uri`]) whose
+/// Steam has not said it is up. A pre-warmed seat is claimed while its Steam may still be
+/// starting, and a shortcut handed to that Steam waits forever. An appid, a launch with no URI,
+/// or a Steam already up goes straight through.
+fn reuse_holds_shortcut(cmd: &str, steam_up: bool) -> Option<String> {
+    deferred_shortcut_uri(cmd).filter(|_| !steam_up)
+}
+
+/// Shell that holds `uri` until this seat's Steam logs [`STEAM_UP_MARKER`] past `from`, then
+/// hands it over — the wait [`hand_launch_to_steam_when_up`] does for a cold spawn, in the one
+/// process the caller gets back as its launch. A timeout forwards anyway, as that wait does.
+fn hold_launch_until_steam_up(uri: &str, log: &std::path::Path, from: u64) -> String {
+    format!(
+        "n=0; while [ $n -lt {tries} ]; do tail -c +{at} {log} 2>/dev/null | grep -q {marker} \
+         && break; n=$((n+1)); sleep 1; done; sleep {margin}; exec steam {uri}",
+        tries = STEAM_UP_WAIT.as_secs(),
+        at = from + 1,
+        log = shell_word(&log.to_string_lossy()),
+        marker = shell_word(STEAM_UP_MARKER),
+        margin = STEAM_UP_MARGIN.as_secs(),
+        uri = shell_word(uri),
+    )
 }
 
 /// Add the compositor-side arguments shared by every bare gamescope spawn. `steam_mode` belongs
@@ -4327,6 +4397,11 @@ fn spawn(
     // runtime dir, where PipeWire, Wayland and the EIS relay live. A seat we are about to fill
     // holds no Steam yet, so this is the launch's shape alone.
     let nested_seat_home = seat_home.filter(|_| is_steam_launch(&app));
+    // Before the Steam under it writes a line: a later launch into this kept session reads the
+    // marker past this offset to tell that Steam is up.
+    if let Some(home) = nested_seat_home {
+        mark_seat_steam_log(home);
+    }
     let mut nested_env = wsi.env();
     if let Some(home) = nested_seat_home {
         nested_env.extend(seat::env(home));
@@ -4447,16 +4522,17 @@ mod tests {
         any_output_size_is, cancel_pending_restore, cgroup_is_punktfunk_owned,
         classify_output_size, connected_connector_under, contends_for_box_steam,
         deferred_shortcut_uri, display_manager_unit_under, dm_plan, free_box_session_for_exclusive,
-        game_hz, gamescope_output_size, hdr_args, idle_dropin_body, idle_dropin_path,
-        install_idle_dropin, is_steam_launch, managed_darken_acquire_edge,
+        game_hz, gamescope_output_size, hdr_args, hold_launch_until_steam_up, idle_dropin_body,
+        idle_dropin_path, install_idle_dropin, is_steam_launch, managed_darken_acquire_edge,
         managed_darken_release_edge, mask_unit, missing_flags, mode_mismatch,
         nested_wrapper_script, our_wsi_layer_dir, parse_listed_units, plan_bind, refresh_rate_list,
-        release_autologin_mask, remove_idle_dropin, script_hardcodes_gamescope, seat_env_applies,
-        sentinel_advanced, shape_dedicated_command, shell_word, switch_ends_mask_window,
-        takeover_state_is_live, unmask_unit, without_uri, xwayland_refusal_marker, BindOff,
-        BindPlan, BoxOutputSize, DmHelperError, SessionBind, TakeoverState, WsiPlan,
-        AUTOLOGIN_MASKED, DISTRO_GAMESCOPE_PATH, PENDING_RESTORE, RESTORE_FLIGHT,
-        STOPPED_AUTOLOGIN, WSI_OFF_ENV, X11_SOCKET_DIR,
+        release_autologin_mask, remove_idle_dropin, reuse_holds_shortcut,
+        script_hardcodes_gamescope, seat_env_applies, sentinel_advanced, shape_dedicated_command,
+        shell_word, switch_ends_mask_window, takeover_state_is_live, unmask_unit, without_uri,
+        xwayland_refusal_marker, BindOff, BindPlan, BoxOutputSize, DmHelperError, SessionBind,
+        TakeoverState, WsiPlan, AUTOLOGIN_MASKED, DISTRO_GAMESCOPE_PATH, PENDING_RESTORE,
+        RESTORE_FLIGHT, STEAM_UP_MARKER, STEAM_UP_WAIT, STOPPED_AUTOLOGIN, WSI_OFF_ENV,
+        X11_SOCKET_DIR,
     };
     use std::time::{Duration, Instant};
 
@@ -5208,6 +5284,40 @@ mod tests {
         assert_eq!(
             deferred_shortcut_uri("heroic --no-gui steam://rungameid/15155503380618543104"),
             None
+        );
+    }
+
+    /// A launch into a kept seat waits on the same condition a cold spawn does, and only for a
+    /// shortcut: everything else, and a Steam already up, is forwarded the moment it arrives.
+    #[test]
+    fn a_kept_seat_holds_only_a_shortcut_and_only_while_its_steam_is_starting() {
+        let shortcut = "steam steam://rungameid/15155503380618543104";
+        assert_eq!(
+            reuse_holds_shortcut(shortcut, false).as_deref(),
+            Some("steam://rungameid/15155503380618543104")
+        );
+        assert_eq!(reuse_holds_shortcut(shortcut, true), None, "Steam is up");
+        assert_eq!(
+            reuse_holds_shortcut("steam steam://rungameid/570", false),
+            None
+        );
+        assert_eq!(reuse_holds_shortcut("steam -gamepadui", false), None);
+
+        let held = hold_launch_until_steam_up(
+            "steam://rungameid/15155503380618543104",
+            std::path::Path::new("/seats/cafe0123/.steam/steam/logs/console_log.txt"),
+            4096,
+        );
+        // Reads past what the log held at spawn, waits out the same bound, forwards either way.
+        assert!(held.contains("tail -c +4097"), "{held}");
+        assert!(
+            held.contains(&format!("$n -lt {}", STEAM_UP_WAIT.as_secs())),
+            "{held}"
+        );
+        assert!(held.contains(STEAM_UP_MARKER), "{held}");
+        assert!(
+            held.ends_with("exec steam 'steam://rungameid/15155503380618543104'"),
+            "{held}"
         );
     }
 
