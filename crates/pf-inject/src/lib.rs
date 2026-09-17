@@ -613,6 +613,13 @@ pub mod pad_pool;
 /// everywhere or nowhere.
 #[path = "inject/pad_slots.rs"]
 pub mod pad_slots;
+/// Per-seat device visibility ([`seat_dev::SeatDev`]): the symlinks a sandboxed seat's Steam
+/// resolves its pads through, and the host-wide lock every create takes.
+///
+/// Built on every target like [`pad_gate`]: only a Linux seat ever sets a directory, but the
+/// window arithmetic and the cross-seat rule are what a test pins, everywhere or nowhere.
+#[path = "inject/seat_dev.rs"]
+pub mod seat_dev;
 /// `sensor_timestamp` every virtual Sony pad stamps into its input reports
 /// ([`sensor_clock::SensorClock`]) — elapsed time in DualSense 1/3 µs and DualShock 4
 /// 5.33 µs units, shared by all four backends.
