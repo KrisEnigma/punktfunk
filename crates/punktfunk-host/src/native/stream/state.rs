@@ -494,6 +494,7 @@ impl StreamState {
                     None,
                     8,
                     Some(bringup.as_ref()),
+                    client_hdr,
                     0,
                 )?;
                 (vd, pipe)

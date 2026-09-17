@@ -794,6 +794,7 @@ fn gs_open_encoder(
             cfg.fps,
             enc_bps,
             gs_bit_depth(frame.format),
+            None,
             wire_seq_base,
         );
     }
