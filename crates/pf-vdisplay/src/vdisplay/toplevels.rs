@@ -116,19 +116,35 @@ pub fn list_toplevels(compositor: Compositor, output: &str) -> Vec<Toplevel> {
     }
 }
 
-/// Every window on every head, for the host's own placement decisions.
+/// Every window on every head, for the host's own window stage. `None` when
+/// this compositor cannot list its windows at all right now: KWin has not
+/// granted the protocol, GNOME has not loaded punktfunk's extension, or it is
+/// gamescope or Windows. An empty list means it can, and nothing is open.
 ///
 /// Never a client's answer: it names the operator's other monitors, which is
-/// what [`list_toplevels`] exists to keep out. The window stage needs it to
-/// notice a game that opened on the wrong screen.
+/// what [`list_toplevels`] exists to keep out. KWin reads it over
+/// `org_kde_plasma_window_management` and GNOME from punktfunk's shell
+/// extension; neither names a window's head.
 #[cfg(target_os = "linux")]
-pub fn list_all_toplevels(compositor: Compositor) -> Vec<Toplevel> {
+pub fn list_all_toplevels(compositor: Compositor) -> Option<Vec<Toplevel>> {
     match compositor {
-        Compositor::Hyprland => hyprland::toplevels(None),
-        Compositor::Wlroots => wlroots::toplevels(None),
-        // No `_` arm; same backends as [`list_toplevels`].
+        Compositor::Hyprland => Some(hyprland::toplevels(None)),
+        Compositor::Wlroots => Some(wlroots::toplevels(None)),
+        Compositor::Kwin => kwin_windows::toplevels(),
+        Compositor::Mutter => gnome_windows::toplevels(),
+        Compositor::Gamescope | Compositor::Windows => None,
+    }
+}
+
+/// Can the host move, focus and fullscreen this compositor's windows
+/// ([`move_toplevel_to_output`], [`window_action`])?
+#[cfg(target_os = "linux")]
+pub fn places_windows(compositor: Compositor) -> bool {
+    match compositor {
+        Compositor::Hyprland | Compositor::Wlroots => true,
+        // No `_` arm; same backends as [`window_action`].
         Compositor::Kwin | Compositor::Mutter | Compositor::Gamescope | Compositor::Windows => {
-            Vec::new()
+            false
         }
     }
 }

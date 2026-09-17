@@ -3806,8 +3806,7 @@ fn a_recorded_launch_credits_its_run_to_the_library_stats() {
             procs: Some(std::sync::Arc::new(std::sync::Mutex::new(Vec::new()))),
             #[cfg(target_os = "linux")]
             workspace: None,
-            #[cfg(target_os = "linux")]
-            window_stage: None,
+            window: None,
             outcome: None,
         },
         Box::new(|| {}),

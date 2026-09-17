@@ -342,7 +342,8 @@ struct ContentView: View {
             if let hold = model.launchHold {
                 LaunchHoldView(
                     entry: hold.entry, host: model.activeHost,
-                    connecting: model.connection == nil, sourceRect: hold.sourceRect,
+                    connecting: model.connection == nil, windowWait: model.launchWindowWait,
+                    sourceRect: hold.sourceRect,
                     onShow: { model.revealStream() })
                     // Its own view per launch — a reused one keeps the last flight's state.
                     .id(hold.seq)

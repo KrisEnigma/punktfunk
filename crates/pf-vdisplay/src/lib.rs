@@ -69,7 +69,8 @@ pub use session::{session_epoch, session_x11_env};
 pub(crate) mod toplevels;
 #[cfg(target_os = "linux")]
 pub use toplevels::{
-    list_all_toplevels, list_toplevels, move_toplevel_to_output, toplevels_token, window_action,
+    list_all_toplevels, list_toplevels, move_toplevel_to_output, places_windows, toplevels_token,
+    window_action,
 };
 pub use toplevels::{Toplevel, WindowVerb};
 
@@ -84,7 +85,7 @@ pub use routing::{
 };
 #[cfg(target_os = "linux")]
 pub use routing::{
-    claim_workspace, dedicated_game_exited, focus_streamed_output,
+    claim_workspace, dedicated_game_exited, focus_streamed_output, gamescope_presenting,
     gamescope_xwayland_cursor_targets, launch_into_gamescope_session, launch_is_nested,
     steam_appid_from_launch, watch_steam_game_exit, WorkspaceClaim,
 };
@@ -709,6 +710,16 @@ mod hyprland;
 #[cfg(target_os = "linux")]
 #[path = "vdisplay/linux/kwin.rs"]
 mod kwin;
+
+// KWin's window list over `org_kde_plasma_window_management`, for the launch window stage.
+#[cfg(target_os = "linux")]
+#[path = "vdisplay/linux/kwin_windows.rs"]
+mod kwin_windows;
+
+// GNOME's window list from punktfunk's shell extension, for the launch window stage.
+#[cfg(target_os = "linux")]
+#[path = "vdisplay/linux/gnome_windows.rs"]
+mod gnome_windows;
 
 // In-process `kde_output_management_v2` topology. Avoids a stuck
 // libkscreen/kscreen-KDED `kscreen-doctor`. `kwin` consumes it, kscreen fallback.

@@ -308,9 +308,9 @@ pub enum EventKind {
     #[serde(rename = "game.window")]
     GameWindow {
         game: GameRefPayload,
-        /// Title the compositor reports for that window.
+        /// Title the compositor or the desktop reports for that window.
         title: String,
-        /// Wayland `app_id`, or the X11 class on an Xwayland window.
+        /// Wayland `app_id` or X11 class; `steam_app_<id>` under gamescope; empty on Windows.
         app_id: String,
     },
     #[serde(rename = "game.exited")]

@@ -202,6 +202,8 @@ struct Launching {
     base_gen: u64,
     /// `status_gen` when the last poll went out — the next waits for it to move.
     poll_gen: u64,
+    /// The game is up and the host is waiting for its window.
+    window_wait: bool,
 }
 
 /// Poll interval for the launch hold, and the retry when an answer never lands.
@@ -210,9 +212,9 @@ const LAUNCH_POLL_STALL: f64 = 5.0;
 /// The host lists nothing for the title: the launch did not resolve
 /// (no recipe, launcher missing). The host logs it and streams on; so do we.
 const LAUNCH_NO_LEASE: f64 = 15.0;
-/// A game the host still calls `launching` this long is one the player wants
-/// to see for themselves — a cold Steam boot with shader work runs to minutes,
-/// and the host waits five for it.
+/// A game still `launching`, or `running` without its window, this long is one
+/// the player wants to see for themselves — a cold Steam boot with shader work
+/// runs to minutes, and the host waits five for it.
 const LAUNCH_HOLD_MAX: f64 = 120.0;
 
 /// Host-supplied construction options.
@@ -759,6 +761,7 @@ impl Shell {
             last_poll: t - LAUNCH_POLL_STALL,
             base_gen: reads,
             poll_gen: reads,
+            window_wait: false,
         })
     }
 
@@ -788,9 +791,12 @@ impl Shell {
             .then(|| self.library.launch_state(&l.host.id))
             .flatten();
         let elapsed = t - l.since;
-        let done = match state.as_deref() {
+        let window_wait = matches!(&state, Some((s, true)) if s == "running");
+        let done = match state.as_ref().map(|(s, _)| s.as_str()) {
             Some("launching") => elapsed >= LAUNCH_HOLD_MAX,
-            // running, exited, untracked, grace: the host has said all it will.
+            // A Proton prefix or a splash can sit behind a running process for a minute.
+            Some("running") if window_wait => elapsed >= LAUNCH_HOLD_MAX,
+            // window, running, exited, untracked, grace: the host has said all it will.
             Some(_) => true,
             None => elapsed >= LAUNCH_NO_LEASE,
         };
@@ -810,6 +816,9 @@ impl Shell {
                 l.poll_gen = reads;
             }
             self.bus.send(poll);
+        }
+        if let Some(l) = &mut self.launching {
+            l.window_wait = window_wait;
         }
     }
 

@@ -2131,6 +2131,7 @@ mod launch_hold {
             app_id: Some(id.into()),
             title: String::new(),
             state: state.into(),
+            awaiting_window: false,
         }]
     }
 
@@ -2271,6 +2272,35 @@ mod launch_hold {
             s.in_stream,
             "the host never listed it — nothing to wait for"
         );
+    }
+
+    /// A host that can see windows keeps the hold up past `running` until `window`, and a
+    /// window that never comes still lets go at the cap.
+    #[test]
+    fn the_hold_waits_for_the_window_where_the_host_reports_one() {
+        let (mut s, library, _bus) = on_shelf();
+        let loading = |state: &str| {
+            let mut g = running("steam:570", state);
+            g[0].awaiting_window = true;
+            g
+        };
+        s.start_connect(intent("steam:570"));
+        s.session_streaming();
+        library.set_running(&loading("running"));
+        s.sync();
+        assert!(s.holds_stream(), "running, with a window still to come");
+        assert!(s.launching.as_ref().is_some_and(|l| l.window_wait));
+        library.set_running(&running("steam:570", "window"));
+        s.sync();
+        assert!(s.in_stream && !s.holds_stream(), "the window is up");
+
+        s.session_ended(None);
+        s.start_connect(intent("steam:570"));
+        s.session_streaming();
+        library.set_running(&loading("running"));
+        at(&mut s, 100.0 + LAUNCH_HOLD_MAX);
+        s.sync();
+        assert!(s.in_stream, "no window by the cap: show what is there");
     }
 
     #[test]

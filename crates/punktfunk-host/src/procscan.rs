@@ -119,3 +119,52 @@ pub fn running_hint(spec: &crate::library::DetectSpec) -> Option<bool> {
         None
     }
 }
+
+/// `roots` and every live process descended from them. A launch command's shell is the root the
+/// host holds; the game, and its window, belong to a child of it.
+pub fn with_descendants(roots: &[u32]) -> Vec<u32> {
+    #[cfg(any(target_os = "linux", windows))]
+    {
+        descend(roots, &Scanner::system().parents())
+    }
+    #[cfg(not(any(target_os = "linux", windows)))]
+    {
+        roots.to_vec()
+    }
+}
+
+/// `roots` first, then each descendant once, from `(pid, parent)` rows.
+fn descend(roots: &[u32], parents: &[(u32, u32)]) -> Vec<u32> {
+    let mut out: Vec<u32> = Vec::new();
+    for &r in roots {
+        if !out.contains(&r) {
+            out.push(r);
+        }
+    }
+    let mut i = 0;
+    while i < out.len() {
+        let parent = out[i];
+        for &(pid, ppid) in parents {
+            // Windows' idle entry is pid 0 and parents itself; never follow it.
+            if ppid == parent && pid != 0 && !out.contains(&pid) {
+                out.push(pid);
+            }
+        }
+        i += 1;
+    }
+    out
+}
+
+#[cfg(test)]
+mod descend_tests {
+    use super::descend;
+
+    #[test]
+    fn a_shells_game_and_its_helpers_are_found_and_strangers_are_not() {
+        // sh 10 → wrapper 11 → game 12 → helper 13; 20 is unrelated.
+        let rows = [(11, 10), (12, 11), (13, 12), (20, 1), (0, 0)];
+        assert_eq!(descend(&[10], &rows), [10, 11, 12, 13]);
+        assert_eq!(descend(&[12, 12], &rows), [12, 13]);
+        assert_eq!(descend(&[99], &rows), [99], "a gone root is still itself");
+    }
+}

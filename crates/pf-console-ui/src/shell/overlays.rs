@@ -499,7 +499,9 @@ impl Shell {
         crate::theme::spinner(canvas, dx + 8.0 * k, y + 30.0 * k, 8.0 * k, t);
         fonts.leading(
             canvas,
-            if l.connected {
+            if l.window_wait {
+                "Waiting for the game's window\u{2026}"
+            } else if l.connected {
                 "Starting the game\u{2026}"
             } else {
                 "Connecting\u{2026}"

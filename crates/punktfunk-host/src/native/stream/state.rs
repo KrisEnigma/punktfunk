@@ -737,15 +737,16 @@ impl StreamState {
                     outcome: Some(launch_outcome.clone()),
                     #[cfg(target_os = "linux")]
                     workspace: launch_workspace,
-                    // Absent on a backend that names no head: the lease then
-                    // runs exactly as it did before the window stage.
-                    #[cfg(target_os = "linux")]
-                    window_stage: streamed_head
-                        .clone()
-                        .map(|head| crate::gamelease::WindowStage {
-                            head,
-                            on_window: target.on_window,
-                        }),
+                    window: window_source(
+                        #[cfg(target_os = "linux")]
+                        compositor,
+                        #[cfg(target_os = "linux")]
+                        streamed_head.clone(),
+                        #[cfg(target_os = "linux")]
+                        seat.clone(),
+                        target.detect.steam_appid,
+                        target.on_window,
+                    ),
                 },
                 on_exit,
             )
@@ -1121,6 +1122,45 @@ pub(super) fn announce_pipeline_gap(gap: &tokio::sync::mpsc::UnboundedSender<u32
         return;
     }
     let _ = gap.send(gap_ms);
+}
+
+/// Where this session's lease looks for the game's window: the compositor's own window list,
+/// gamescope's focused-app atom for a Steam title, or the Windows desktop. `None` when gamescope
+/// runs something other than a Steam title.
+fn window_source(
+    #[cfg(target_os = "linux")] compositor: crate::vdisplay::Compositor,
+    #[cfg(target_os = "linux")] head: Option<crate::session_status::StreamedHead>,
+    #[cfg(target_os = "linux")] seat: Option<String>,
+    steam_appid: Option<u32>,
+    on_window: crate::library::OnWindow,
+) -> Option<crate::gamelease::WindowSource> {
+    #[cfg(target_os = "linux")]
+    {
+        use crate::gamelease::WindowSource;
+        use crate::vdisplay::Compositor;
+        match compositor {
+            Compositor::Hyprland | Compositor::Wlroots | Compositor::Kwin | Compositor::Mutter => {
+                Some(WindowSource::Toplevels {
+                    compositor,
+                    stage: head.map(|head| crate::gamelease::WindowStage { head, on_window }),
+                })
+            }
+            Compositor::Gamescope => {
+                steam_appid.map(|appid| WindowSource::Gamescope { seat, appid })
+            }
+            Compositor::Windows => None,
+        }
+    }
+    #[cfg(windows)]
+    {
+        let _ = (steam_appid, on_window);
+        Some(crate::gamelease::WindowSource::Desktop)
+    }
+    #[cfg(not(any(target_os = "linux", windows)))]
+    {
+        let _ = (steam_appid, on_window);
+        None
+    }
 }
 
 #[cfg(test)]

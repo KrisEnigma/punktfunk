@@ -430,6 +430,13 @@ pub fn gamescope_xwayland_cursor_targets(seat: Option<&str>) -> Vec<(String, Opt
     gamescope::xwayland_cursor_targets(seat)
 }
 
+/// This seat's gamescope is presenting Steam `appid`: its focused-app atom names it. Steam's own
+/// launch screen is its client's appid, so this turns true only once the game is up.
+#[cfg(target_os = "linux")]
+pub fn gamescope_presenting(appid: u32, seat: Option<&str>) -> bool {
+    gamescope::display_presenting(appid, seat).is_some()
+}
+
 /// Dedicated game gone: `node_id` does not reappear shortly after capture loss.
 /// `true` ends the session cleanly instead of a capture-loss rebuild. Scoped
 /// to this session's node so a coexisting gamescope cannot mask the exit.

@@ -29,8 +29,9 @@ use discovery::{
     poll_managed_node, wait_for_node, wayland_name_from_log,
 };
 pub(crate) use discovery::{
-    game_session_exited, gamescope_can_composite_cursor, gamescope_hdr_capable, is_available,
-    note_spawn_flags_lost, steam_appid_from_launch, wait_for_steam_game_exit, SteamGameWatch,
+    display_presenting, game_session_exited, gamescope_can_composite_cursor, gamescope_hdr_capable,
+    is_available, note_spawn_flags_lost, steam_appid_from_launch, wait_for_steam_game_exit,
+    SteamGameWatch,
 };
 pub(crate) use heads::list_monitors;
 pub(crate) use splash::run as splash_run;
