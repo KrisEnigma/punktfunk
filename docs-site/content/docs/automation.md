@@ -28,7 +28,7 @@ and nothing configured here runs anywhere near the streaming path.
 | `game.running` | a launched game's own process is seen running (not merely its launcher) | app id, title, store, client, cert fingerprint, plane |
 | `game.window` | the game's own window reaches the screen — often 5-40 s after `game.running`, while Proton builds a prefix or a splash sits on a black window | the same, plus `title` and `app_id` of that window |
 | `game.exited` | a launched game is gone | the same, plus `reason`: `exited` (the player quit it) or `terminated` (the host closed it, per your [session⇄game settings](/docs/virtual-displays#when-a-game-ends-and-when-a-session-does)) |
-| `pairing.pending` | an unpaired device knocks (once per device, not per retry) | device name, fingerprint, plane |
+| `pairing.pending` | an unpaired device knocks — a native one once per device, not per retry; a Moonlight one when its PIN ceremony parks | device name, fingerprint, plane |
 | `pairing.completed` / `pairing.denied` | a pairing is approved+stored / denied | device name, fingerprint, plane |
 | `display.created` / `display.released` | a virtual display is minted / kept displays are released | backend + mode / count |
 | `library.changed` | the game library is mutated | source: `manual`, or the provider id that reconciled (`PUT /api/v1/library/provider/{p}`) |

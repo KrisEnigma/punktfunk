@@ -123,6 +123,16 @@ impl PinGate {
             }
             w.insert(id.clone(), None);
         }
+        // Parked, so it is a knock the operator can answer: the same event the native side
+        // fires. The name is the client's own identity — Moonlight sends nothing better, and
+        // the operator names the device when they submit the PIN.
+        crate::events::emit(crate::events::EventKind::PairingPending {
+            device: crate::events::DeviceRef {
+                name: crate::native_pairing::sanitize_device_name(&id.uniqueid, &id.fingerprint),
+                fingerprint: id.fingerprint.clone(),
+                plane: crate::events::Plane::Gamestream,
+            },
+        });
         // Drop removes the slot on every exit so an unconsumed PIN cannot outlive this waiter.
         struct WaiterGuard<'a> {
             gate: &'a PinGate,
@@ -483,6 +493,35 @@ mod tests {
             None
         );
         assert!(!pairing.pin.awaiting_pin());
+    }
+
+    /// A parked ceremony is a knock an automation can act on, exactly as a native one is.
+    #[tokio::test]
+    async fn a_parked_ceremony_announces_itself() {
+        let pairing = Arc::new(Pairing::new());
+        let since = crate::events::bus().subscribe(0).catch_up.len() as u64;
+        let waiter = {
+            let p = pairing.clone();
+            tokio::spawn(async move { p.pin.take(Duration::from_millis(200), &cid("dev-a")).await })
+        };
+        while !pairing.pin.awaiting_pin() {
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+        let pending = crate::events::bus()
+            .subscribe(since)
+            .catch_up
+            .into_iter()
+            .find_map(|e| match e.kind {
+                crate::events::EventKind::PairingPending { device }
+                    if device.fingerprint == cid("dev-a").fingerprint =>
+                {
+                    Some(device)
+                }
+                _ => None,
+            })
+            .expect("a parked ceremony fires `pairing.pending`");
+        assert_eq!(pending.plane, crate::events::Plane::Gamestream);
+        assert_eq!(waiter.await.unwrap(), None, "no PIN, so it times out");
     }
 
     /// Moonlight names every client the same, so the name the operator types beside the PIN
