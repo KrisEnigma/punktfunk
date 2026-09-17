@@ -188,6 +188,9 @@ pub fn host_hdr_capable() -> bool {
     }
 }
 
+/// See [`AppState::video_hdr`].
+pub type VideoHdr = std::sync::Arc<std::sync::Mutex<Option<pf_frame::HdrMeta>>>;
+
 /// Cumulative client-loss telemetry from the control stream's periodic `0x0201` loss-stats.
 /// Control thread adds; video thread's 1 Hz step reads deltas — no lock, no reset.
 #[derive(Default)]
@@ -307,6 +310,10 @@ pub struct AppState {
     pub rfi_range: std::sync::Arc<std::sync::Mutex<Option<(i64, i64)>>>,
     /// Cumulative `0x0201` loss-stats from [`control`]. Video thread's 1 Hz step reads window deltas.
     pub loss_stats: std::sync::Arc<GsLossStats>,
+    /// Mastering metadata of the frames the video thread encodes, `None` while they are SDR.
+    /// [`control`] tells the client each change (`0x010e`).
+    #[cfg(feature = "gamestream")]
+    pub video_hdr: VideoHdr,
     /// Persistent screen capturer, reused across streams. The slot's `bool` is whether it was
     /// opened with the HDR offer; a stream whose negotiated `hdr` differs drops it and opens
     /// a fresh session at the right depth.
@@ -423,6 +430,7 @@ impl AppState {
             force_idr: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             rfi_range: std::sync::Arc::new(std::sync::Mutex::new(None)),
             loss_stats: std::sync::Arc::new(GsLossStats::default()),
+            video_hdr: VideoHdr::default(),
             media_exited: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             video_cap: std::sync::Arc::new(std::sync::Mutex::new(None)),
             audio_cap: std::sync::Arc::new(std::sync::Mutex::new(None)),
