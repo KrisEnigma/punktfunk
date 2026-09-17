@@ -103,6 +103,7 @@ mod linux {
             } else {
                 pf_capture::POOL_MIN
             },
+            kwin.then_some(pf_capture::KWIN_POOL_MAX),
             kwin && pf_capture::unpaced_capture(),
         )
         .context("attach the PipeWire capturer")?;

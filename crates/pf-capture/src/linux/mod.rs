@@ -62,6 +62,9 @@ struct CaptureOpts {
     /// Least dmabuf pool depth to ask for: [`crate::POOL_MIN`], or
     /// [`crate::KWIN_POOL_MIN`] so KWin's default of 3 cannot win.
     pool_min: i32,
+    /// Deepest pool the producer serves ([`crate::KWIN_POOL_MAX`]); `None` serves any depth.
+    /// A deeper ask for the raw lane stops here.
+    pool_max: Option<i32>,
     /// Offer `maxFramerate = 0/1` so KWin records on its own frame signal
     /// rather than a millisecond-rounded timer. KWin only; see
     /// [`crate::unpaced_capture`].
@@ -273,6 +276,7 @@ impl PortalCapturer {
                 cursor_id0_hides: false,
                 producer_is_gamescope: false,
                 pool_min: crate::POOL_MIN,
+                pool_max: None,
                 unpaced: false,
                 // A monitor mirror paints on the panel's own vblank; nothing to drive.
                 lazy: false,
@@ -300,6 +304,7 @@ impl PortalCapturer {
         cursor_id0_hides: bool,
         producer_is_gamescope: bool,
         pool_min: i32,
+        pool_max: Option<i32>,
         unpaced: bool,
     ) -> Result<PortalCapturer> {
         tracing::info!(
@@ -311,6 +316,7 @@ impl PortalCapturer {
             cursor_id0_hides,
             producer_is_gamescope,
             pool_min,
+            ?pool_max,
             unpaced,
             "connecting PipeWire to virtual output"
         );
@@ -330,6 +336,7 @@ impl PortalCapturer {
                 cursor_id0_hides,
                 producer_is_gamescope,
                 pool_min,
+                pool_max,
                 unpaced,
                 lazy: crate::lazy_capture(),
             },
