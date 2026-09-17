@@ -4,6 +4,7 @@
 //! without depending on `gamestream`. Std + `tracing` only.
 //!
 //! [`config_dir`] is XDG / `%ProgramData%`, overridable with `PUNKTFUNK_CONFIG_DIR`.
+//! [`seat_home`] is the XDG data dir a seat's nested Steam runs under.
 //! [`create_private_dir`] / [`create_secret_dir`] / [`write_secret_file`] apply
 //! 0700 / 0600 on Unix and a restrictive DACL on Windows. Secret dirs omit the
 //! `BUILTIN\Users` read grant the config dir needs for the tray.
@@ -33,6 +34,27 @@ fn gamescope_ei_relay(name: &str) -> PathBuf {
         Some(rt) => PathBuf::from(rt).join(name),
         None => PathBuf::from("/tmp").join(name),
     }
+}
+
+/// `$XDG_DATA_HOME/punktfunk/seats/<id>` — the `HOME` a seat's nested Steam runs
+/// under (`design/gamescope-multiuser.md` D1). `id` is `pf-vdisplay`'s
+/// `SessionIsolation`. Path only; the caller creates it 0700
+/// ([`create_private_dir`]).
+#[cfg(target_os = "linux")]
+pub fn seat_home(id: &str) -> PathBuf {
+    data_dir().join("seats").join(id)
+}
+
+/// `$XDG_DATA_HOME/punktfunk`, else `~/.local/share/punktfunk`. Separate from
+/// [`config_dir`]: a seat home holds a Steam install, not configuration.
+#[cfg(target_os = "linux")]
+fn data_dir() -> PathBuf {
+    std::env::var_os("XDG_DATA_HOME")
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("punktfunk")
 }
 
 /// Host identity, pairing, mgmt token, library.
@@ -384,6 +406,18 @@ mod tests {
             per.file_name().unwrap().to_str().unwrap(),
             "punktfunk-gamescope-cafe0123-ei"
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_seat_home_is_the_data_dir_plus_the_seat_id() {
+        let seat = seat_home("cafe0123");
+        assert!(
+            seat.ends_with("punktfunk/seats/cafe0123"),
+            "{}",
+            seat.display()
+        );
+        assert_ne!(seat, seat_home("anon0"), "two seats never share a home");
     }
 
     #[test]
