@@ -3884,6 +3884,26 @@ async fn provider_reconcile_validation() {
     assert_eq!(s, StatusCode::BAD_REQUEST);
 }
 
+/// The plugin runner starts every store at once, so their first syncs land together.
+#[test]
+fn concurrent_provider_syncs_keep_every_row() {
+    let _dir = ConfigDirOverride::new();
+    std::thread::scope(|s| {
+        for p in 0..8 {
+            s.spawn(move || {
+                for _ in 0..20 {
+                    let row = serde_json::json!({"external_id": "a", "title": "A"});
+                    let inputs = vec![serde_json::from_value(row).unwrap()];
+                    crate::library::reconcile_provider(&format!("p{p}"), None, inputs)
+                        .expect("sync saved");
+                }
+            });
+        }
+    });
+    let rows = crate::library::load_custom();
+    assert_eq!(rows.len(), 8, "one row per provider: {rows:?}");
+}
+
 /// Unknown titles are counted, not refused: a report races its own reconcile, and 400-ing
 /// the whole report would drop every other running title. Catalog is untouched, so every
 /// id here is unknown by construction.
