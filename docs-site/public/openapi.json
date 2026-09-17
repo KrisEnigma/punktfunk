@@ -11596,6 +11596,14 @@
           "fingerprint": {
             "type": "string"
           },
+          "label": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Name for this device, scrubbed like `PATCH /clients/{fp}` and stored once the pairing\ncompletes. Every Moonlight client names itself the same, so without one the device is\nlisted by fingerprint until somebody renames it.",
+            "example": "Living Room TV"
+          },
           "peer_ip": {
             "type": "string"
           },
