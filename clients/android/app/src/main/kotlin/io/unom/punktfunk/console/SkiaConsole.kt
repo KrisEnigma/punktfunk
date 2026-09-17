@@ -109,6 +109,8 @@ object SkiaConsole {
     private lateinit var presetStore: PresetStore
     private lateinit var settingsStore: SettingsStore
     private var identity: ClientIdentity? = null
+    /** The identity load has ended, with or without one. Main-thread only. */
+    private var identityLoaded = false
     private var discovery: HostDiscovery? = null
     private var discovered: List<DiscoveredHost> = emptyList()
 
@@ -370,17 +372,19 @@ object SkiaConsole {
 
     private fun startServices(app: Context) {
         ioPool.execute {
-            identity = runCatching { obtainIdentity(IdentityStore(app)) }
+            val id = runCatching { obtainIdentity(IdentityStore(app)) }
                 .onFailure { Log.w(TAG, "identity unavailable: ${it.message}") }
                 .getOrNull()
+            main.post { identity = id; identityLoaded = true }
         }
         discovery = HostDiscovery.shared(app).also { it.addNetworkListener(onNetworkChanged) }
         resumeDiscovery()
-        // Commands from the console, drained on a short cadence.
+        // Commands from the console, drained on a short cadence once the identity load ends:
+        // a start entry queues its shelf fetch or desktop dial before that.
         main.post(object : Runnable {
             override fun run() {
                 if (handle == 0L) return
-                drainCommands()
+                if (identityLoaded) drainCommands()
                 main.postDelayed(this, 100)
             }
         })
