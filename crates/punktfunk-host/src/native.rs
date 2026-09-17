@@ -2118,6 +2118,7 @@ pub(crate) async fn run_admitted(
         refresh_hz: mode.refresh_hz,
         hdr: welcome.color.is_hdr(),
         client: client_name.clone().unwrap_or_default(),
+        fingerprint: session_fp_hex.clone(),
         launch: hello.launch.clone(),
         plane: crate::events::Plane::Native,
     });

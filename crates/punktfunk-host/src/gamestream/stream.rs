@@ -102,19 +102,26 @@ pub fn start(
             let _sleep = crate::sleep_inhibit::hold();
             tracing::info!(?cfg, "video stream starting");
             // Before `run`: `run` launches the app, and the title's wrapper keys on this marker.
-            // RTSP carries no device name, so `client` is empty; hooks key on `plane`.
+            // RTSP carries no device name, so the console's label for the paired certificate
+            // is the only name there is; empty for a device nobody has named.
+            let client_label = life
+                .fingerprint
+                .as_deref()
+                .and_then(|fp| crate::gamestream::load_client_labels().get(fp).cloned())
+                .unwrap_or_default();
             let stream_marker = crate::stream_marker::announce(crate::stream_marker::StreamInfo {
                 width: cfg.width,
                 height: cfg.height,
                 refresh_hz: cfg.fps,
                 hdr: cfg.hdr,
-                client: String::new(),
+                client: client_label.clone(),
+                fingerprint: life.fingerprint.clone(),
                 launch: app.as_ref().map(|a| a.title.clone()),
                 plane: crate::events::Plane::Gamestream,
             });
             let event_client = crate::events::ClientRef {
-                name: String::new(),
-                fingerprint: None,
+                name: client_label,
+                fingerprint: life.fingerprint.clone(),
                 plane: crate::events::Plane::Gamestream,
             };
             crate::events::emit(crate::events::EventKind::ClientConnected {
@@ -402,6 +409,7 @@ fn run(
                     game: t.game.clone(),
                     // RTSP carries no device name; peer IP is the stats-capture label too.
                     client: client_label.clone(),
+                    fingerprint: life.fingerprint.clone(),
                     plane: crate::events::Plane::Gamestream,
                     spec: t.detect.clone(),
                     // Native plane only: this one has no per-session head to

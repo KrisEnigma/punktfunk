@@ -8151,6 +8151,13 @@
           "client": {
             "type": "string"
           },
+          "fingerprint": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Stable id of the device that launched it; the filter handle a name cannot be."
+          },
           "plane": {
             "$ref": "#/components/schemas/Plane"
           },
@@ -10719,6 +10726,13 @@
             "type": "string",
             "description": "Cert-fingerprint prefix, or peer IP for an anonymous client — not [`ClientRef::name`]."
           },
+          "fingerprint": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The device's full stable id, for a hook filter. Absent for an anonymous client."
+          },
           "hdr": {
             "type": "boolean"
           },
@@ -11549,6 +11563,13 @@
           },
           "client": {
             "type": "string"
+          },
+          "fingerprint": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The device's stable id — what a hook filter should key on, since a display name is\nneither unique nor fixed. Absent for an anonymous client."
           },
           "hdr": {
             "type": "boolean"

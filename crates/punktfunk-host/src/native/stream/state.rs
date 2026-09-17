@@ -726,6 +726,7 @@ impl StreamState {
                 crate::gamelease::LeaseRequest {
                     game: target.game.clone(),
                     client: client_label.clone(),
+                    fingerprint: controls.fingerprint.clone(),
                     plane: crate::events::Plane::Native,
                     spec: target.detect.clone(),
                     nested,
