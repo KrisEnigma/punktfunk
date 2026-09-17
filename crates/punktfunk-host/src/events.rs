@@ -59,7 +59,8 @@ pub enum DisconnectReason {
 #[derive(Serialize, Deserialize, ToSchema, Clone, Debug)]
 pub struct ClientRef {
     /// Display name: the trust-store name (a console rename wins), else the name the client
-    /// sent. Empty when neither, and always empty on the compat plane.
+    /// sent. On the compat plane it is the name the operator gave the device, since Moonlight
+    /// sends none. Empty when there is no name at all.
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fingerprint: Option<String>,
@@ -78,6 +79,8 @@ pub struct SessionRef {
     /// `WxH@Hz`, e.g. `"3840x2160@120"`.
     pub mode: String,
     pub hdr: bool,
+    /// Which plane serves it, as `stream.*` and `game.*` also report.
+    pub plane: Plane,
 }
 
 /// Why a session ended, in the client's own words
@@ -508,6 +511,9 @@ impl EventKind {
         match self {
             EventKind::ClientConnected { client }
             | EventKind::ClientDisconnected { client, .. } => Some(client.plane),
+            EventKind::SessionStarted { session } | EventKind::SessionEnded { session, .. } => {
+                Some(session.plane)
+            }
             EventKind::StreamStarted { stream } | EventKind::StreamStopped { stream } => {
                 Some(stream.plane)
             }
@@ -879,6 +885,7 @@ mod tests {
                     fingerprint: Some(FP_SNAPSHOT.into()),
                     mode: mode_str(1920, 1080, 30),
                     hdr: false,
+                    plane: Plane::Native,
                 },
                 summary: Box::new(SessionSummary {
                     id: 3,
@@ -926,7 +933,7 @@ mod tests {
         };
         assert_eq!(
             serde_json::to_string(&ev).unwrap(),
-            r#"{"seq":7,"ts_ms":1700000000000,"schema":1,"kind":"session.ended","session":{"id":3,"client":"a1b2c3d4e5f6","fingerprint":"9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08","mode":"1920x1080@30","hdr":false},"summary":{"id":3,"client":"a1b2c3d4e5f6","client_name":"Living Room TV","started_unix":1700000000,"duration_s":2460,"mode":"1920x1080@30","hdr":false,"join":false,"codec":"hevc","bit_depth":8,"chroma":"4:2:0","bitrate_kbps":12400,"bitrate":{"min_kbps":9000,"avg_kbps":12100,"max_kbps":15000,"adaptive_steps":4},"frames_sent":73800,"frames_dropped":0,"input":{"events":7457,"mic":0,"rich":150983,"dropped":0},"gyro":{"samples":150983,"stalls":0},"audio":{"sent":492000,"infilled":12,"late":3,"max_late_ms":11,"reanchors":1},"bringup_ms":603,"path_mtu":1369,"ended":"game_exited"}}"#
+            r#"{"seq":7,"ts_ms":1700000000000,"schema":1,"kind":"session.ended","session":{"id":3,"client":"a1b2c3d4e5f6","fingerprint":"9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08","mode":"1920x1080@30","hdr":false,"plane":"native"},"summary":{"id":3,"client":"a1b2c3d4e5f6","client_name":"Living Room TV","started_unix":1700000000,"duration_s":2460,"mode":"1920x1080@30","hdr":false,"join":false,"codec":"hevc","bit_depth":8,"chroma":"4:2:0","bitrate_kbps":12400,"bitrate":{"min_kbps":9000,"avg_kbps":12100,"max_kbps":15000,"adaptive_steps":4},"frames_sent":73800,"frames_dropped":0,"input":{"events":7457,"mic":0,"rich":150983,"dropped":0},"gyro":{"samples":150983,"stalls":0},"audio":{"sent":492000,"infilled":12,"late":3,"max_late_ms":11,"reanchors":1},"bringup_ms":603,"path_mtu":1369,"ended":"game_exited"}}"#
         );
 
         // A loop that bailed has no totals: every optional one is omitted, never zeroed.
@@ -942,6 +949,7 @@ mod tests {
                     fingerprint: None,
                     mode: mode_str(0, 0, 0),
                     hdr: false,
+                    plane: Plane::Native,
                 },
                 summary: Box::new(SessionSummary {
                     id: 4,
@@ -975,7 +983,7 @@ mod tests {
         };
         assert_eq!(
             serde_json::to_string(&ev).unwrap(),
-            r#"{"seq":8,"ts_ms":1700000000000,"schema":1,"kind":"session.ended","session":{"id":4,"client":"192.0.2.7","mode":"0x0@0","hdr":false},"summary":{"id":4,"client":"192.0.2.7","started_unix":1700000000,"duration_s":1,"mode":"0x0@0","hdr":false,"join":false,"codec":"av1","bit_depth":10,"chroma":"4:4:4","bitrate_kbps":0,"input":{"events":0,"mic":0,"rich":0,"dropped":0},"bringup_ms":0,"ended":"host_error"}}"#
+            r#"{"seq":8,"ts_ms":1700000000000,"schema":1,"kind":"session.ended","session":{"id":4,"client":"192.0.2.7","mode":"0x0@0","hdr":false,"plane":"native"},"summary":{"id":4,"client":"192.0.2.7","started_unix":1700000000,"duration_s":1,"mode":"0x0@0","hdr":false,"join":false,"codec":"av1","bit_depth":10,"chroma":"4:4:4","bitrate_kbps":0,"input":{"events":0,"mic":0,"rich":0,"dropped":0},"bringup_ms":0,"ended":"host_error"}}"#
         );
     }
 

@@ -316,6 +316,7 @@ fn handle_request(req: &Request, state: &Arc<AppState>, peer: Option<SocketAddr>
                         state.stats.clone(),
                         on_lost.clone(),
                         state.media_exited.clone(),
+                        state.counters.clone(),
                         // Game exit is a deliberate end (player finished), not a drop. Same
                         // distinction as the native close code; teardown policy keys off it.
                         stream::GameLifetime {

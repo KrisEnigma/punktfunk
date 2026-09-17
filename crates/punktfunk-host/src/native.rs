@@ -2521,7 +2521,7 @@ impl Drop for GamescopeHold {
 const INJECTOR_REOPEN_BACKOFF: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// Pack `(w, h, hz)` into one atomic word (16|16|16) — one store, not three racy ones.
-fn pack_mode(width: u32, height: u32, refresh_hz: u32) -> u64 {
+pub(crate) fn pack_mode(width: u32, height: u32, refresh_hz: u32) -> u64 {
     ((width as u64 & 0xffff) << 32)
         | ((height as u64 & 0xffff) << 16)
         | (refresh_hz as u64 & 0xffff)

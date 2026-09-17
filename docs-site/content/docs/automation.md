@@ -23,12 +23,12 @@ and nothing configured here runs anywhere near the streaming path.
 | Kind | Fires when | Carries |
 |---|---|---|
 | `client.connected` / `client.disconnected` | a client session is admitted / goes away | device name, cert fingerprint, plane (`native`/`gamestream`); disconnect adds `reason`: `quit` (user stop), `timeout` (vanished), `error` |
-| `session.started` / `session.ended` | an A/V session registers / ends | session id, client label, cert fingerprint, mode (`3840x2160@120`), HDR. `session.ended` adds a `summary`: duration, codec / bit depth / chroma, the bitrate span (min/avg/max + how many times it moved), frames sent and dropped, input datagram counts, gyro cadence, audio egress totals, bring-up ms, path MTU, and `ended` — `local`, `game_exited`, `host_ended`, `host_error`, `lost` or `stopped_by_operator`. The same shape `GET /api/v1/session/last` returns for the last eight |
+| `session.started` / `session.ended` | an A/V session registers / ends | session id, client label, cert fingerprint, plane, mode (`3840x2160@120`), HDR. `session.ended` adds a `summary`: duration, codec / bit depth / chroma, the bitrate span (min/avg/max + how many times it moved), frames sent and dropped, input datagram counts, gyro cadence, audio egress totals, bring-up ms, path MTU, and `ended` — `local`, `game_exited`, `host_ended`, `host_error`, `lost` or `stopped_by_operator`. The same shape `GET /api/v1/session/last` returns for the last eight |
 | `stream.started` / `stream.stopped` | video actually starts / stops | mode, HDR, client name, cert fingerprint, launched app id/title (when one was requested), plane |
 | `game.running` | a launched game's own process is seen running (not merely its launcher) | app id, title, store, client, cert fingerprint, plane |
 | `game.window` | the game's own window reaches the screen — often 5-40 s after `game.running`, while Proton builds a prefix or a splash sits on a black window | the same, plus `title` and `app_id` of that window |
 | `game.exited` | a launched game is gone | the same, plus `reason`: `exited` (the player quit it) or `terminated` (the host closed it, per your [session⇄game settings](/docs/virtual-displays#when-a-game-ends-and-when-a-session-does)) |
-| `pairing.pending` | an unpaired device knocks (once per device, not per retry) | device name, fingerprint, plane |
+| `pairing.pending` | an unpaired device knocks — a native one once per device, not per retry; a Moonlight one when its PIN ceremony parks | device name, fingerprint, plane |
 | `pairing.completed` / `pairing.denied` | a pairing is approved+stored / denied | device name, fingerprint, plane |
 | `display.created` / `display.released` | a virtual display is minted / kept displays are released | backend + mode / count |
 | `library.changed` | the game library is mutated | source: `manual`, or the provider id that reconciled (`PUT /api/v1/library/provider/{p}`) |

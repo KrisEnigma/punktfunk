@@ -835,6 +835,7 @@ impl StreamState {
             force_idr: force_idr.clone(),
             client: client_label,
             client_name,
+            plane: crate::events::Plane::Native,
             hdr: plan.hdr,
             ttff_ms: bringup.total_slot(),
             last_resize_ms: resize_ms.clone(),
