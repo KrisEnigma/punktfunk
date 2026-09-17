@@ -62,6 +62,22 @@ pub fn audio_mute_label(mask: u8) -> Option<&'static str> {
     }
 }
 
+/// How long a mute the player made themselves names itself on screen.
+pub const LOCAL_MUTE_NOTICE: Duration = Duration::from_secs(5);
+
+/// [`audio_mute_label`] with the badge's lifetime applied, `since` the mask last changed.
+///
+/// A host mute stands for the whole session: an operator silencing a client must not be
+/// able to hide behind a local unmute. A local mute is the player's own press from the dial
+/// that still shows its state, so it says so long enough to read and then leaves the picture
+/// alone — a standing badge over the game is the operator's language, not the player's.
+pub fn audio_mute_notice(mask: u8, since: Duration) -> Option<&'static str> {
+    if mask & AUDIO_MUTE_HOST == 0 && since >= LOCAL_MUTE_NOTICE {
+        return None;
+    }
+    audio_mute_label(mask)
+}
+
 /// Set or clear one bit of a mute mask. Read-modify-write on the atomic: the embedder and
 /// the control task own different bits and never wait on each other.
 pub(crate) fn set_mute_bit(cell: &AtomicU8, bit: u8, on: bool) {
@@ -1860,5 +1876,28 @@ mod mute_tests {
 
         set_mute_bit(&m, AUDIO_MUTE_HOST, false);
         assert_eq!(audio_mute_label(m.load(Ordering::Relaxed)), None);
+    }
+
+    /// The badge's lifetime, not its wording: the player's own mute says itself once and
+    /// gets out of the picture; the operator's stands for as long as it does.
+    #[test]
+    fn only_the_players_own_mute_stops_naming_itself() {
+        let old = LOCAL_MUTE_NOTICE + Duration::from_secs(1);
+        assert_eq!(
+            audio_mute_notice(AUDIO_MUTE_LOCAL, Duration::ZERO),
+            Some("Muted on this device")
+        );
+        assert_eq!(audio_mute_notice(AUDIO_MUTE_LOCAL, old), None);
+
+        // Anything the host muted keeps the badge, however long it has stood.
+        assert_eq!(
+            audio_mute_notice(AUDIO_MUTE_HOST, old),
+            Some("Muted by the host")
+        );
+        assert_eq!(
+            audio_mute_notice(AUDIO_MUTE_HOST | AUDIO_MUTE_LOCAL, old),
+            Some("Muted by the host and on this device")
+        );
+        assert_eq!(audio_mute_notice(0, Duration::ZERO), None);
     }
 }

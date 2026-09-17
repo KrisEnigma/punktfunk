@@ -628,6 +628,7 @@ impl Ring {
             SheetRow::Slot(SlotId::PadMouse),
             SheetRow::Slot(SlotId::Stats),
             SheetRow::Slot(SlotId::Mic),
+            SheetRow::Slot(SlotId::StreamMute),
         ];
         rows.extend(
             self.actions()
@@ -1527,6 +1528,44 @@ mod tests {
         assert_eq!(r.highlight(), Some(0));
         r.key(Key::Left);
         assert_eq!(r.highlight(), Some(5));
+    }
+
+    /// The sheet is the whole catalogue, so an action the ring can actually fire must be on
+    /// it. `stream_mute` reached the editor's palette and not this list, which left a JOIN
+    /// client spending one of its six discs to silence itself.
+    #[test]
+    fn the_sheet_offers_every_action_this_platform_can_fire() {
+        let mut r = Ring::new();
+        r.set_facts(&facts());
+        let on_sheet: Vec<String> = r
+            .sheet_rows()
+            .iter()
+            .filter_map(|row| match row {
+                SheetRow::Slot(s) => Some(s.id()),
+                _ => None,
+            })
+            .collect();
+        for group in pf_client_core::overlay_actions::catalogue(&r.cfg, RingPlatform::Desktop) {
+            // Host actions and shortcuts are appended from what this host offers, and the
+            // empty slot is the editor's eraser — none of the three is a fixed row.
+            if matches!(group.title, "Host" | "Shortcuts" | "Empty") {
+                continue;
+            }
+            for entry in group.entries {
+                let Some(slot) = SlotId::parse(&entry.id) else {
+                    continue;
+                };
+                // A platform that cannot serve it says so in the editor; the sheet may skip it.
+                if !r.spec(&slot).enabled {
+                    continue;
+                }
+                assert!(
+                    on_sheet.contains(&entry.id),
+                    "{} is fireable here and the sheet never lists it",
+                    entry.id
+                );
+            }
+        }
     }
 
     #[test]
