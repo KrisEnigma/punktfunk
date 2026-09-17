@@ -28,6 +28,16 @@ pub fn gamescope_ei_socket_file_for(id: &str) -> PathBuf {
     gamescope_ei_relay(&format!("punktfunk-gamescope-{id}-ei"))
 }
 
+/// `$XDG_RUNTIME_DIR/punktfunk-gamescope-{id}-dev` — the device nodes a sandboxed
+/// seat may open. `hostdev/` is where its sandbox mounts the real `/dev`, so the
+/// links under `input/` and `hidraw/` resolve there and nowhere on this side.
+/// `pf-vdisplay` builds the sandbox, `pf-inject` writes the links; path only, the
+/// caller creates it 0700 ([`create_private_dir`]).
+#[cfg(target_os = "linux")]
+pub fn gamescope_seat_dev_dir(id: &str) -> PathBuf {
+    gamescope_ei_relay(&format!("punktfunk-gamescope-{id}-dev"))
+}
+
 #[cfg(target_os = "linux")]
 fn gamescope_ei_relay(name: &str) -> PathBuf {
     match std::env::var_os("XDG_RUNTIME_DIR").filter(|s| !s.is_empty()) {
@@ -419,6 +429,10 @@ mod tests {
             per.file_name().unwrap().to_str().unwrap(),
             "punktfunk-gamescope-cafe0123-ei"
         );
+        // The device directory is that seat's alone, beside its relay.
+        let dev = gamescope_seat_dev_dir("cafe0123");
+        assert_eq!(dev.parent(), global.parent());
+        assert_ne!(dev, gamescope_seat_dev_dir("dead0001"));
     }
 
     #[cfg(target_os = "linux")]
