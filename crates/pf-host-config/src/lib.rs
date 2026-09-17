@@ -285,6 +285,11 @@ pub struct HostConfig {
     /// (`design/steam-seats-warm-launch-implementation-plan.md`). **Default OFF.**
     /// Needs a native Steam to clone; a seat signs in on its own.
     pub steam_seat_home: bool,
+    /// `PUNKTFUNK_STEAM_PREWARM` — how many seats the host may hold a Big Picture Steam up for
+    /// before their clients connect, so a launch skips Steam's 13–30 s cold boot
+    /// (`design/steam-seats-warm-launch-implementation-plan.md` WP-S2). **Default 1**; `0` is
+    /// off. Each parked seat costs about a gigabyte, and only a seat home can be pre-warmed.
+    pub steam_prewarm: u32,
     /// `PUNKTFUNK_GAMESCOPE_HDR` — allow HDR on gamescope. The host probes the
     /// punktfunk build (`packaging/gamescope`) and stays SDR if missing; this only
     /// decides whether HDR is *attempted*. **Default ON**, matching `PUNKTFUNK_10BIT`.
@@ -396,6 +401,10 @@ impl HostConfig {
             gamescope_splash: on("PUNKTFUNK_GAMESCOPE_SPLASH").unwrap_or(true),
             gamescope_isolate: on("PUNKTFUNK_GAMESCOPE_ISOLATE").unwrap_or(true),
             steam_seat_home: on("PUNKTFUNK_STEAM_SEAT_HOME").unwrap_or(false),
+            steam_prewarm: val("PUNKTFUNK_STEAM_PREWARM")
+                .and_then(|s| s.trim().parse::<u32>().ok())
+                .unwrap_or(1)
+                .min(8),
             gamescope_hdr: on("PUNKTFUNK_GAMESCOPE_HDR").unwrap_or(true),
             gamescope_sdr_nits: val("PUNKTFUNK_GAMESCOPE_SDR_NITS")
                 .and_then(|s| s.trim().parse::<u32>().ok())

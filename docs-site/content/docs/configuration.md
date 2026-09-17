@@ -88,6 +88,7 @@ more about some of them.
 | Per-session isolation (Linux) | `PUNKTFUNK_GAMESCOPE_ISOLATE` | `on` · `off` | `on` | next session |
 | Grab the cursor (Linux) | `PUNKTFUNK_GAMESCOPE_GRAB_CURSOR` | `on` · `off` | `off` | next session |
 | Steam per seat (Linux) | `PUNKTFUNK_STEAM_SEAT_HOME` | `on` · `off` | `off` | next session |
+| Seats kept warm (Linux) | `PUNKTFUNK_STEAM_PREWARM` | 0–8 seats | `1` | after a restart |
 | Bind patched gamescope (Linux) | `PUNKTFUNK_GAMESCOPE_BIND` | `auto` · `on` · `off` | `auto` | next session |
 | Follow mode switches (Linux) | `PUNKTFUNK_SESSION_WATCH` | `auto` · `on` · `off` | `auto` | next session |
 | Local discovery | `PUNKTFUNK_MDNS` | `on` · `off` | `on` | after a restart |

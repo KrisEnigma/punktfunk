@@ -458,6 +458,7 @@ pub static SETTINGS: &[Setting] = &[
     row("gamescope_isolate", "PUNKTFUNK_GAMESCOPE_ISOLATE", Kind::Bool, D::Bool(true), GameMode, NextSession, "Per-session isolation", "gamescope").advanced().only(LINUX),
     row("gamescope_grab_cursor", "PUNKTFUNK_GAMESCOPE_GRAB_CURSOR", Kind::Bool, D::Bool(false), GameMode, NextSession, "Grab the cursor", "gamescope").advanced().only(LINUX),
     row("steam_seat_home", "PUNKTFUNK_STEAM_SEAT_HOME", Kind::Bool, D::Bool(false), GameMode, NextSession, "Steam per seat", "gamescope").advanced().only(LINUX),
+    row("steam_prewarm", "PUNKTFUNK_STEAM_PREWARM", Kind::Int { min: 0, max: 8, unit: "seats" }, D::Int(1), GameMode, Restart, "Seats kept warm", "gamescope").advanced().only(LINUX),
     row("gamescope_bind", "PUNKTFUNK_GAMESCOPE_BIND", TRI, D::Str("auto"), GameMode, NextSession, "Bind patched gamescope", "gamescope")
         .advanced()
         .only(LINUX)
@@ -586,6 +587,19 @@ mod tests {
             &doc[start..start + len],
             want,
             "the settings table in configuration.md is stale — rerun with UPDATE_SETTINGS_DOCS=1"
+        );
+    }
+
+    /// Pre-warming only ever runs under a seat home, so its own default costs a box nothing
+    /// until the seat-home knob is on.
+    #[test]
+    fn seats_are_kept_warm_one_at_a_time() {
+        let s = find("steam_prewarm").expect("the row exists");
+        assert_eq!(s.default.to_value(), Value::Number(1.into()));
+        assert_eq!(s.env, "PUNKTFUNK_STEAM_PREWARM");
+        assert!(
+            s.validate(&Value::Number(0.into())).is_ok(),
+            "0 turns it off"
         );
     }
 
