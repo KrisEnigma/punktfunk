@@ -58,7 +58,8 @@ pub enum DisconnectReason {
 
 #[derive(Serialize, Deserialize, ToSchema, Clone, Debug)]
 pub struct ClientRef {
-    /// Client-supplied; empty for anonymous or compat-plane clients.
+    /// Display name: the trust-store name (a console rename wins), else the name the client
+    /// sent. Empty when neither, and always empty on the compat plane.
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fingerprint: Option<String>,
@@ -71,6 +72,9 @@ pub struct SessionRef {
     pub id: u64,
     /// Cert-fingerprint prefix, or peer IP for an anonymous client — not [`ClientRef::name`].
     pub client: String,
+    /// The device's full stable id, for a hook filter. Absent for an anonymous client.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fingerprint: Option<String>,
     /// `WxH@Hz`, e.g. `"3840x2160@120"`.
     pub mode: String,
     pub hdr: bool,
@@ -238,6 +242,10 @@ pub struct StreamRef {
     pub mode: String,
     pub hdr: bool,
     pub client: String,
+    /// The device's stable id — what a hook filter should key on, since a display name is
+    /// neither unique nor fixed. Absent for an anonymous client.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fingerprint: Option<String>,
     /// Store-qualified id on the native plane, app title on GameStream.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub app: Option<String>,
@@ -254,6 +262,9 @@ pub struct GameRefPayload {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub store: Option<String>,
     pub client: String,
+    /// Stable id of the device that launched it; the filter handle a name cannot be.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fingerprint: Option<String>,
     pub plane: Plane,
 }
 
@@ -480,6 +491,15 @@ impl EventKind {
             EventKind::ActionInvoked { device, .. } => {
                 device.as_ref().map(|d| d.fingerprint.as_str())
             }
+            EventKind::SessionStarted { session } | EventKind::SessionEnded { session, .. } => {
+                session.fingerprint.as_deref()
+            }
+            EventKind::StreamStarted { stream } | EventKind::StreamStopped { stream } => {
+                stream.fingerprint.as_deref()
+            }
+            EventKind::GameRunning { game }
+            | EventKind::GameWindow { game, .. }
+            | EventKind::GameExited { game, .. } => game.fingerprint.as_deref(),
             _ => None,
         }
     }
@@ -736,6 +756,9 @@ mod tests {
         );
     }
 
+    /// A paired device's id in the snapshots below.
+    const FP_SNAPSHOT: &str = "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08";
+
     /// Additive-only wire contract: a failing snapshot is a schema-version bump, not a test update.
     #[test]
     fn wire_shape_snapshots() {
@@ -748,6 +771,7 @@ mod tests {
                     mode: mode_str(3840, 2160, 120),
                     hdr: true,
                     client: "Living Room TV".into(),
+                    fingerprint: Some(FP_SNAPSHOT.into()),
                     app: Some("steam:570".into()),
                     plane: Plane::Native,
                 },
@@ -755,7 +779,7 @@ mod tests {
         };
         assert_eq!(
             serde_json::to_string(&ev).unwrap(),
-            r#"{"seq":4182,"ts_ms":1700000000000,"schema":1,"kind":"stream.started","stream":{"mode":"3840x2160@120","hdr":true,"client":"Living Room TV","app":"steam:570","plane":"native"}}"#
+            r#"{"seq":4182,"ts_ms":1700000000000,"schema":1,"kind":"stream.started","stream":{"mode":"3840x2160@120","hdr":true,"client":"Living Room TV","fingerprint":"9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08","app":"steam:570","plane":"native"}}"#
         );
 
         let ev = HostEvent {
@@ -810,13 +834,14 @@ mod tests {
                     title: "Dota 2".into(),
                     store: Some("steam".into()),
                     client: "Living Room TV".into(),
+                    fingerprint: Some(FP_SNAPSHOT.into()),
                     plane: Plane::Native,
                 },
             },
         };
         assert_eq!(
             serde_json::to_string(&ev).unwrap(),
-            r#"{"seq":5,"ts_ms":1700000000000,"schema":1,"kind":"game.running","game":{"app":"steam:570","title":"Dota 2","store":"steam","client":"Living Room TV","plane":"native"}}"#
+            r#"{"seq":5,"ts_ms":1700000000000,"schema":1,"kind":"game.running","game":{"app":"steam:570","title":"Dota 2","store":"steam","client":"Living Room TV","fingerprint":"9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08","plane":"native"}}"#
         );
 
         // Optional ids omitted, not nulled — host-ended game with no library entry.
@@ -830,6 +855,7 @@ mod tests {
                     title: "Big Picture".into(),
                     store: None,
                     client: String::new(),
+                    fingerprint: None,
                     plane: Plane::Gamestream,
                 },
                 reason: GameEndReason::Terminated,
@@ -850,6 +876,7 @@ mod tests {
                 session: SessionRef {
                     id: 3,
                     client: "a1b2c3d4e5f6".into(),
+                    fingerprint: Some(FP_SNAPSHOT.into()),
                     mode: mode_str(1920, 1080, 30),
                     hdr: false,
                 },
@@ -899,7 +926,7 @@ mod tests {
         };
         assert_eq!(
             serde_json::to_string(&ev).unwrap(),
-            r#"{"seq":7,"ts_ms":1700000000000,"schema":1,"kind":"session.ended","session":{"id":3,"client":"a1b2c3d4e5f6","mode":"1920x1080@30","hdr":false},"summary":{"id":3,"client":"a1b2c3d4e5f6","client_name":"Living Room TV","started_unix":1700000000,"duration_s":2460,"mode":"1920x1080@30","hdr":false,"join":false,"codec":"hevc","bit_depth":8,"chroma":"4:2:0","bitrate_kbps":12400,"bitrate":{"min_kbps":9000,"avg_kbps":12100,"max_kbps":15000,"adaptive_steps":4},"frames_sent":73800,"frames_dropped":0,"input":{"events":7457,"mic":0,"rich":150983,"dropped":0},"gyro":{"samples":150983,"stalls":0},"audio":{"sent":492000,"infilled":12,"late":3,"max_late_ms":11,"reanchors":1},"bringup_ms":603,"path_mtu":1369,"ended":"game_exited"}}"#
+            r#"{"seq":7,"ts_ms":1700000000000,"schema":1,"kind":"session.ended","session":{"id":3,"client":"a1b2c3d4e5f6","fingerprint":"9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08","mode":"1920x1080@30","hdr":false},"summary":{"id":3,"client":"a1b2c3d4e5f6","client_name":"Living Room TV","started_unix":1700000000,"duration_s":2460,"mode":"1920x1080@30","hdr":false,"join":false,"codec":"hevc","bit_depth":8,"chroma":"4:2:0","bitrate_kbps":12400,"bitrate":{"min_kbps":9000,"avg_kbps":12100,"max_kbps":15000,"adaptive_steps":4},"frames_sent":73800,"frames_dropped":0,"input":{"events":7457,"mic":0,"rich":150983,"dropped":0},"gyro":{"samples":150983,"stalls":0},"audio":{"sent":492000,"infilled":12,"late":3,"max_late_ms":11,"reanchors":1},"bringup_ms":603,"path_mtu":1369,"ended":"game_exited"}}"#
         );
 
         // A loop that bailed has no totals: every optional one is omitted, never zeroed.
@@ -912,6 +939,7 @@ mod tests {
                 session: SessionRef {
                     id: 4,
                     client: "192.0.2.7".into(),
+                    fingerprint: None,
                     mode: mode_str(0, 0, 0),
                     hdr: false,
                 },
@@ -1057,6 +1085,7 @@ mod tests {
                 title: "Dota 2".into(),
                 store: Some("steam".into()),
                 client: "Deck".into(),
+                fingerprint: Some("ab12".into()),
                 plane: Plane::Native,
             },
         };
@@ -1065,6 +1094,8 @@ mod tests {
         assert!(kind_matches("game.running", running.name()));
         assert!(!kind_matches("gamestream.*", running.name()));
         assert_eq!(running.client_name(), Some("Deck"));
+        // The handle a rename cannot move: a game event carries the launching device's id.
+        assert_eq!(running.fingerprint(), Some("ab12"));
         assert_eq!(running.plane(), Some(Plane::Native));
         assert_eq!(running.app(), Some("steam:570"));
 
@@ -1075,6 +1106,7 @@ mod tests {
                 title: "Big Picture".into(),
                 store: None,
                 client: String::new(),
+                fingerprint: None,
                 plane: Plane::Gamestream,
             },
             reason: GameEndReason::Exited,

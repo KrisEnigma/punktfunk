@@ -467,6 +467,8 @@ fn session_ref(s: &LiveSession) -> crate::events::SessionRef {
     crate::events::SessionRef {
         id: s.id,
         client: s.client.clone(),
+        // `controls` already carries the device key this session was admitted by.
+        fingerprint: s.controls.fingerprint.clone(),
         mode: crate::events::mode_str(width, height, fps),
         hdr: s.hdr,
     }
@@ -1243,6 +1245,7 @@ mod tests {
                     title: "Test Title".into(),
                 },
                 client: "192.0.2.7".into(),
+                fingerprint: None,
                 plane: crate::events::Plane::Gamestream,
                 // No signals: inert lease, so no watcher thread races the assertions.
                 spec: crate::library::DetectSpec::default(),

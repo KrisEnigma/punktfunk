@@ -6754,7 +6754,7 @@
           },
           "name": {
             "type": "string",
-            "description": "Client-supplied; empty for anonymous or compat-plane clients."
+            "description": "Display name: the trust-store name (a console rename wins), else the name the client\nsent. Empty when neither, and always empty on the compat plane."
           },
           "plane": {
             "$ref": "#/components/schemas/Plane"
@@ -8150,6 +8150,13 @@
           },
           "client": {
             "type": "string"
+          },
+          "fingerprint": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Stable id of the device that launched it; the filter handle a name cannot be."
           },
           "plane": {
             "$ref": "#/components/schemas/Plane"
@@ -10719,6 +10726,13 @@
             "type": "string",
             "description": "Cert-fingerprint prefix, or peer IP for an anonymous client — not [`ClientRef::name`]."
           },
+          "fingerprint": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The device's full stable id, for a hook filter. Absent for an anonymous client."
+          },
           "hdr": {
             "type": "boolean"
           },
@@ -11550,6 +11564,13 @@
           "client": {
             "type": "string"
           },
+          "fingerprint": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The device's stable id — what a hook filter should key on, since a display name is\nneither unique nor fixed. Absent for an anonymous client."
+          },
           "hdr": {
             "type": "boolean"
           },
@@ -11574,6 +11595,14 @@
         "properties": {
           "fingerprint": {
             "type": "string"
+          },
+          "label": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Name for this device, scrubbed like `PATCH /clients/{fp}` and stored once the pairing\ncompletes. Every Moonlight client names itself the same, so without one the device is\nlisted by fingerprint until somebody renames it.",
+            "example": "Living Room TV"
           },
           "peer_ip": {
             "type": "string"
