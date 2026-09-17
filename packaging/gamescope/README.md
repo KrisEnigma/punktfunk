@@ -31,6 +31,7 @@ The patches here add the missing half, and nothing else. See
 | `0018-steamcompmgr-build-capture-LUTs-from-the-live-SDR-on.patch` | Build the capture and screenshot LUT sets from the live SDR-on-HDR luminance and rebuild them when it changes. SDR maps into the BT.2020 PQ container colorimetrically (wideness 0) instead of being stretched to 2020 primaries, so Steam's UI and SDR games no longer look oversaturated in an HDR stream; `--hdr-sdr-content-nits` and Steam's SDR brightness setting now reach the stream. PQ content in an 8-bit capture rolls onto SDR white with BT.2390 instead of clipping at 500 nits | **Yes** — the static LUTs ignore every live colour setting |
 | `0019-color-extrapolate-the-inverse-shaper-past-its-range.patch` | `FindLutInv` continues the shaper's last segment instead of clamping, so 3D LUT grid points above a Gamma 2.2 → PQ shaper hold real colours. SDR white in a PQ output lands at 203 nits, not 181 | **Yes** — the same LUT pair drives HDR scanout of SDR content |
 | `0020-shaders-site-4-2-0-capture-chroma-on-the-left-column.patch` | `cs_rgb_to_nv12` and `cs_rgb_to_p010` filter chroma [1 2 1] across the left luma column instead of averaging the 2×2 block, so the chroma sits where H.264/HEVC/AV1 decoders place it without a signalled location (type 0). AV1 cannot signal centre siting at all | **Yes** — every decoder that assumes the default shifted capture colour edges half a pixel |
+| `0021-pipewire-recycle-a-pushed-buffer-the-PipeWire-thread.patch` | `push_pipewire_buffer` returns the buffer a push displaced from the one-slot hand-off, and `paint_pipewire` paints into it next. Upstream dropped it: still dequeued and still `copying`, it left the pool until the stream renegotiated, and a pool that keeps shrinking ends in a stream that reports streaming and delivers nothing. No paint is skipped and the newest frame still goes out at once | **Yes** — upstream loses a buffer on every push that beats the PipeWire thread |
 
 ### Why the headless patch matters
 
@@ -123,6 +124,7 @@ The number is a **monotonic patch-set revision**, so one probe answers every cap
 | `+pfhdr14` | …and the headless connector reports HDR10 under `--hdr-debug-force-support`, so Steam's HDR setting can be turned on |
 | `+pfhdr15` | …and the pointer reaches the whole window of a game whose swapchain is smaller (no new capability) |
 | `+pfhdr16` | …and capture maps SDR into BT.2020 colorimetrically at the live SDR-on-HDR luminance, with left-sited 4:2:0 chroma (no new capability) |
+| `+pfhdr17` | …and a capture push never drops a buffer the PipeWire thread has not taken (no new capability) |
 
 Require `+pfhdr10` for headless `--adaptive-sync` with a CLI cap: `+pfhdr9` clears that cap
 on the first paint unless Steam or a control command supplies an override. The Arch package is
