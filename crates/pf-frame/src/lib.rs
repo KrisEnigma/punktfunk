@@ -67,6 +67,26 @@ impl PixelFormat {
     pub fn is_hdr_rgb10(self) -> bool {
         matches!(self, PixelFormat::X2Rgb10 | PixelFormat::X2Bgr10)
     }
+
+    /// BT.2020 PQ capture: packed 10-bit RGB or the producer's `P010`. Encoder colour and
+    /// HDR metadata key on this, not on the packed-RGB layout.
+    pub fn is_hdr(self) -> bool {
+        self.is_hdr_rgb10() || self == PixelFormat::P010
+    }
+}
+
+#[cfg(test)]
+mod pixel_format_tests {
+    use super::PixelFormat;
+
+    #[test]
+    fn p010_is_hdr_but_not_packed_rgb() {
+        assert!(PixelFormat::P010.is_hdr());
+        assert!(!PixelFormat::P010.is_hdr_rgb10());
+        assert!(PixelFormat::X2Bgr10.is_hdr());
+        assert!(!PixelFormat::Nv12.is_hdr());
+        assert!(!PixelFormat::Bgrx.is_hdr());
+    }
 }
 
 /// DRM FourCC from a 4-byte name, little-endian (`b"XR24"`).

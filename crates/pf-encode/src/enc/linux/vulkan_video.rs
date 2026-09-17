@@ -733,7 +733,7 @@ impl VulkanVideoEncoder {
         let native_nv12 = matches!(format, PixelFormat::Nv12 | PixelFormat::P010);
         // Colour: HDR is BT.2020 PQ, keyed on the packed-10/P010 capture format. Dispatcher already
         // consulted `probe_encode_caps`; the profile query inside open re-checks.
-        let is_hdr = format.is_hdr_rgb10() || format == PixelFormat::P010;
+        let is_hdr = format.is_hdr();
         // Depth: HDR, or a 10-bit SDR session on an 8-bit capture (`bit_depth == 10`, BT.709).
         let ten_bit = is_hdr || bit_depth >= 10;
         // RGB-direct needs the captured format as the session picture format. BGRA default is

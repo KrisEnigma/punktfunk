@@ -1866,7 +1866,7 @@ pub fn pipewire_thread(
                 ud.modifier = ud.info.modifier();
                 // 10-bit PQ is only offered with MANDATORY BT.2020/PQ, so a 10-bit negotiation
                 // is HDR — still log the producer's fixated transfer/primaries.
-                let hdr = ud.format.is_some_and(|f| f.is_hdr_rgb10());
+                let hdr = ud.format.is_some_and(|f| f.is_hdr());
                 ud.signals.hdr_negotiated.store(hdr, Ordering::Relaxed);
                 tracing::info!(
                     width = sz.width,
