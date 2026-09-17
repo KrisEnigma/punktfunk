@@ -2154,6 +2154,7 @@ mod tests {
                     title: "Handoff".into(),
                 },
                 client: "test".into(),
+                fingerprint: None,
                 plane: crate::events::Plane::Native,
                 // Real signal nothing will match: the game never shows up.
                 spec: DetectSpec::steam(999_001),
@@ -2399,6 +2400,7 @@ mod tests {
                     title: "Live Child".into(),
                 },
                 client: "test".into(),
+                fingerprint: None,
                 plane: crate::events::Plane::Native,
                 spec: DetectSpec::dir(td.path()),
                 nested: false,
