@@ -16,9 +16,11 @@ use pf_frame::{CapturedFrame, FramePayload, PixelFormat};
 pub const POOL_MIN: i32 = 2;
 /// KWin ≥ 6.2 offers `Range(3, 2, 4)` as a driver stream, so its default 3 wins any
 /// intersection that contains it, and a pool of 3 spares one hold while the encoder keeps
-/// two frames in flight. A minimum of 4 is the only ask that moves it; above 4 fails
-/// negotiation outright.
+/// two frames in flight. A minimum of 4 is the only ask that moves it.
 pub const KWIN_POOL_MIN: i32 = 4;
+/// The deepest pool KWin serves. A minimum above it fails negotiation outright
+/// (`error alloc buffers: Invalid argument`).
+pub const KWIN_POOL_MAX: i32 = 4;
 
 /// Whether to ask a KWin output for unpaced delivery (`maxFramerate = 0/1`).
 ///
@@ -710,7 +712,8 @@ pub fn open_portal_monitor(
 /// virtual output is SDR, and a desktop that refuses the offer would latch gamescope's SDR.
 /// `cursor_id0_hides` selects KWin's rewritten cursor-meta contract.
 /// `producer_is_gamescope` selects its no-meta, LINEAR-only contract.
-/// KWin also needs [`KWIN_POOL_MIN`] and [`unpaced_capture`].
+/// KWin also needs [`KWIN_POOL_MIN`], [`KWIN_POOL_MAX`] as `pool_max`, and [`unpaced_capture`].
+/// `pool_max` is the deepest pool the producer serves; `None` when it serves any depth asked.
 #[cfg(target_os = "linux")]
 #[allow(clippy::too_many_arguments)]
 pub fn open_virtual_output(
@@ -727,6 +730,7 @@ pub fn open_virtual_output(
     cursor_id0_hides: bool,
     producer_is_gamescope: bool,
     pool_min: i32,
+    pool_max: Option<i32>,
     unpaced: bool,
 ) -> Result<Box<dyn Capturer>> {
     linux::PortalCapturer::from_virtual_output(
@@ -743,6 +747,7 @@ pub fn open_virtual_output(
         cursor_id0_hides,
         producer_is_gamescope,
         pool_min,
+        pool_max,
         unpaced,
     )
     .map(|c| Box::new(c) as Box<dyn Capturer>)

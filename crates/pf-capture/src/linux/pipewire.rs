@@ -97,13 +97,21 @@ impl UserData {
     /// Withhold this buffer from the producer until the returned hold drops.
     /// `None` (pool too shallow, or `PUNKTFUNK_ZEROCOPY_HOLD=0`) requeues at `.process` return —
     /// the producer may then rewrite the dmabuf while encode still reads it.
-    fn try_defer(&mut self, pw_buf: *mut pw::sys::pw_buffer) -> Option<pf_frame::FrameHold> {
+    /// Every hold out with an untaken frame in the slot: that frame gives its hold to this one.
+    fn try_defer(
+        &mut self,
+        pw_buf: *mut pw::sys::pw_buffer,
+        stream: *mut pw::sys::pw_stream,
+    ) -> Option<pf_frame::FrameHold> {
         if !zerocopy_hold_enabled() {
             return None;
         }
         let buf = pw_buf as usize;
         let pool_live = self.pool.live;
-        let generation = self.defer.book.lock().ok()?.try_hold(buf, pool_live);
+        let mut generation = self.defer.book.lock().ok()?.try_hold(buf, pool_live);
+        if generation.is_none() && self.release_unconsumed(stream) {
+            generation = self.defer.book.lock().ok()?.try_hold(buf, pool_live);
+        }
         let Some(generation) = generation else {
             if !self.defer.logged_shallow.swap(true, Ordering::Relaxed) {
                 tracing::warn!(
@@ -131,6 +139,42 @@ impl UserData {
             buf,
             generation,
         }))
+    }
+
+    /// Requeue the buffer under the slot's untaken held frame now. `publish` would replace that
+    /// frame anyway, but its hold returns only when the loop services the release, too late for
+    /// the arrival that needs it. `true` ⇒ one hold came back.
+    fn release_unconsumed(&self, stream: *mut pw::sys::pw_stream) -> bool {
+        // Out of the slot before the requeue, so the consumer can never take it after.
+        let (stale, buf, generation) = {
+            let Ok(mut slot) = self.slot.lock() else {
+                return false;
+            };
+            let Some(CapturedFrame {
+                payload:
+                    FramePayload::Dmabuf(DmabufFrame {
+                        hold: Some(hold), ..
+                    }),
+                ..
+            }) = &*slot
+            else {
+                return false;
+            };
+            let Some(held) = hold.downcast_ref::<BufferHold>() else {
+                return false;
+            };
+            if std::sync::Arc::strong_count(hold) != 1 {
+                return false;
+            }
+            let (buf, generation) = (held.buf, held.generation);
+            (slot.take(), buf, generation)
+        };
+        // SAFETY: `stream` is the stream whose `.process` is running on this loop thread. The
+        // frame left the slot above and its hold is unique, so nothing reads the buffer after.
+        let requeued = unsafe { self.defer.release(stream, buf, generation) };
+        // Its hold's late release finds the book already completed and no-ops.
+        drop(stale);
+        requeued
     }
 }
 
@@ -683,8 +727,20 @@ const HOLD_POOL_RESERVE: u32 = 2;
 
 /// Pool the raw lane asks for. The encoder keeps its frame held across ticks (a repeat re-uses
 /// it), the slot holds the next, and an arrival must still find a buffer: three holds beyond
-/// the producer's reserve. Two holds made every third arrival a drop at 60 fps.
+/// the producer's reserve. A producer capped below this runs two holds, and
+/// [`UserData::release_unconsumed`] frees the slot's for the arrival.
 const RAW_LANE_POOL_MIN: i32 = 6;
+
+/// Least pool depth this stream asks for: the producer's minimum, deepened to
+/// [`RAW_LANE_POOL_MIN`] on the raw lane but never past `pool_max`. A minimum above what the
+/// producer serves fails negotiation outright.
+fn pool_ask(pool_min: i32, pool_max: Option<i32>, nvenc_raw: bool) -> i32 {
+    if !nvenc_raw {
+        return pool_min;
+    }
+    let deep = pool_min.max(RAW_LANE_POOL_MIN);
+    pool_max.map_or(deep, |max| deep.min(max).max(pool_min))
+}
 
 /// `PUNKTFUNK_ZEROCOPY_HOLD=0` restores immediate requeue (racy). Use `env_on`; a bare
 /// `== "0"` is the trap `PUNKTFUNK_FORCE_SHM` already hit.
@@ -748,6 +804,31 @@ struct DeferredRequeue {
     tx: pw::channel::Sender<(usize, u64)>,
     logged_active: std::sync::atomic::AtomicBool,
     logged_shallow: std::sync::atomic::AtomicBool,
+}
+
+impl DeferredRequeue {
+    /// Return `buf` to the producer iff `generation` still owns it. `true` ⇒ requeued.
+    /// [`HoldBook::complete`] no-ops a renegotiated-away (or reused) address, so a stale hold
+    /// can never queue somebody else's buffer.
+    ///
+    /// # Safety
+    /// Loop thread only, and `stream` is the live stream whose buffers this book tracks.
+    unsafe fn release(&self, stream: *mut pw::sys::pw_stream, buf: usize, generation: u64) -> bool {
+        let requeue = self
+            .book
+            .lock()
+            .map(|mut b| b.complete(buf, generation))
+            .unwrap_or(false);
+        if requeue {
+            // SAFETY: `complete` returned true ⇒ this buffer was withheld by exactly this hold
+            // and no `remove_buffer` has freed it since (that purges the book), so the pointer
+            // is a live buffer of `stream` that we own (dequeued, never requeued). The caller
+            // guarantees `stream` is live and that we are on its loop thread.
+            let _ =
+                unsafe { pw::sys::pw_stream_queue_buffer(stream, buf as *mut pw::sys::pw_buffer) };
+        }
+        requeue
+    }
 }
 
 /// Releases its buffer to the producer when the last clone drops. Send-only from the dropping
@@ -894,11 +975,13 @@ fn packed_frame_geometry(
 ///
 /// Called from `.process` with the newest drained buffer. `datas` uses the same transparent
 /// cast as libspa's `Buffer::datas_mut`, so the safe `Data` accessors keep working. `pw_buf`
-/// is identity for [`UserData::try_defer`] only — never dereferenced here.
+/// is identity for [`UserData::try_defer`] only — never dereferenced here. `stream` is the
+/// stream running this `.process`; `try_defer` requeues a stale held buffer on it.
 fn consume_frame(
     ud: &mut UserData,
     spa_buf: *mut spa::sys::spa_buffer,
     pw_buf: *mut pw::sys::pw_buffer,
+    stream: *mut pw::sys::pw_stream,
     hdr_pts_ns: Option<i64>,
 ) {
     // Inactive: skip the de-pad (expensive at 5K).
@@ -1110,7 +1193,7 @@ fn consume_frame(
             if dup < 0 {
                 break 'passthrough PassthroughFallback::DupFailed;
             }
-            let hold = ud.try_defer(pw_buf);
+            let hold = ud.try_defer(pw_buf, stream);
             ud.publish(CapturedFrame {
                 provenance: Default::default(),
                 width: w as u32,
@@ -1210,7 +1293,7 @@ fn consume_frame(
                 // only creates a second descriptor.
                 let dup = unsafe { libc::fcntl(datas[0].fd() as i32, libc::F_DUPFD_CLOEXEC, 0) };
                 if dup >= 0 {
-                    if let Some(hold) = ud.try_defer(pw_buf) {
+                    if let Some(hold) = ud.try_defer(pw_buf, stream) {
                         ud.publish(CapturedFrame {
                             provenance: Default::default(),
                             width: w as u32,
@@ -1437,17 +1520,14 @@ pub fn pipewire_thread(
         cursor_id0_hides,
         producer_is_gamescope,
         pool_min,
+        pool_max,
         unpaced,
         lazy,
         ..
     } = opts;
     // Node ids and remote fds do not identify a compositor: Mutter and gamescope
     // can both use the default daemon. Keep the producer contract explicit.
-    let pool_min = if plan.nvenc_raw {
-        pool_min.max(RAW_LANE_POOL_MIN)
-    } else {
-        pool_min
-    };
+    let pool_min = pool_ask(pool_min, pool_max, plan.nvenc_raw);
     let offer_cursor_meta = !producer_is_gamescope;
     crate::pwinit::ensure_init();
 
@@ -2005,12 +2085,12 @@ pub fn pipewire_thread(
                 if let Some(p) = &ud.pacer {
                     p.on_paint();
                 }
-                consume_frame(ud, spa_buf, newest, hdr_pts);
+                consume_frame(ud, spa_buf, newest, stream.as_raw_ptr(), hdr_pts);
             }));
             // Requeue `newest` exactly once on every path unless `try_defer` withheld it —
             // then `BufferHold` owns the requeue; doing both hands the producer the buffer
-            // twice. The book is stable here: only this thread removes entries, and neither
-            // callback runs inside `.process`. A panic after publish still leaves the hold live.
+            // twice. `newest`'s entry is stable here: only this thread removes entries, never
+            // `newest`'s inside `.process`. A panic after publish still leaves the hold live.
             let withheld = ud
                 .defer
                 .book
@@ -2038,29 +2118,14 @@ pub fn pipewire_thread(
         .context("register stream listener")?;
 
     // A `BufferHold` dropping on any thread only sends; this loop-thread callback is where a
-    // withheld buffer rejoins. `HoldBook::complete` no-ops a renegotiated-away (or reused)
-    // address, so a stale hold can never queue somebody else's buffer.
+    // withheld buffer rejoins.
     let defer_cb = defer.clone();
     let stream_ptr = stream.as_raw_ptr() as usize;
     let _requeue_attach = requeue_rx.attach(mainloop.loop_(), move |(buf, generation)| {
-        let requeue = defer_cb
-            .book
-            .lock()
-            .map(|mut b| b.complete(buf, generation))
-            .unwrap_or(false);
-        if requeue {
-            // SAFETY: `complete` returned true ⇒ this buffer was withheld by exactly this hold
-            // and no `remove_buffer` has freed it since (that purges the book), so the pointer
-            // is a live buffer of this stream that we own (dequeued, never requeued). The
-            // stream outlives this attached receiver (declared after it, dropped before it),
-            // and the loop stops dispatching once `run()` returns.
-            let _ = unsafe {
-                pw::sys::pw_stream_queue_buffer(
-                    stream_ptr as *mut pw::sys::pw_stream,
-                    buf as *mut pw::sys::pw_buffer,
-                )
-            };
-        }
+        // SAFETY: the loop thread dispatches this. The stream outlives this attached receiver
+        // (declared after it, dropped before it), and the loop stops dispatching once `run()`
+        // returns.
+        unsafe { defer_cb.release(stream_ptr as *mut pw::sys::pw_stream, buf, generation) };
     });
 
     // `PUNKTFUNK_PW_FIXED_POD="WxH"`: one fixed format, to bisect against a producer's EnumFormat.
@@ -3324,6 +3389,46 @@ mod tests {
                 .try_hold(0x1000, HOLD_POOL_RESERVE + 1)
                 .is_some(),
             "one past the reserve spares exactly one"
+        );
+    }
+
+    /// KWin's pool of 4 spares two holds: the host's frame and the slot's. The arrival fits only
+    /// once the slot's untaken frame is released in `.process`, and the late release it sends
+    /// afterwards must not requeue the buffer a second time.
+    #[test]
+    fn a_released_slot_hold_admits_the_arrival_on_a_kwin_pool() {
+        let pool = crate::KWIN_POOL_MAX as u32;
+        let mut b = HoldBook::default();
+        assert!(b.try_hold(0x1000, pool).is_some(), "the host's frame");
+        let slot = b.try_hold(0x2000, pool).expect("the slot's frame");
+        assert!(b.try_hold(0x3000, pool).is_none(), "both holds are out");
+        assert!(
+            b.complete(0x2000, slot),
+            "the untaken frame gives its hold back"
+        );
+        assert!(b.try_hold(0x3000, pool).is_some(), "the arrival now holds");
+        assert!(!b.complete(0x2000, slot), "the late release no-ops");
+    }
+
+    /// The raw lane deepens the ask to 6 unless the producer caps lower; KWin fails negotiation
+    /// above its cap, so there the ask stays 4.
+    #[test]
+    fn the_raw_lane_pool_ask_stops_at_the_producers_cap() {
+        use super::{pool_ask, RAW_LANE_POOL_MIN};
+        assert_eq!(pool_ask(crate::POOL_MIN, None, false), crate::POOL_MIN);
+        assert_eq!(pool_ask(crate::POOL_MIN, None, true), RAW_LANE_POOL_MIN);
+        assert_eq!(
+            pool_ask(crate::KWIN_POOL_MIN, Some(crate::KWIN_POOL_MAX), true),
+            crate::KWIN_POOL_MAX
+        );
+        assert_eq!(
+            pool_ask(crate::KWIN_POOL_MIN, Some(crate::KWIN_POOL_MAX), false),
+            crate::KWIN_POOL_MIN
+        );
+        assert_eq!(
+            pool_ask(4, Some(3), true),
+            4,
+            "never below the producer's own minimum"
         );
     }
 

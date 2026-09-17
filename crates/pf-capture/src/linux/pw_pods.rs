@@ -733,7 +733,7 @@ mod tests {
         // The minimum must not exceed what producers already serve, or the ask becomes a demand.
         const { assert!(crate::POOL_MIN <= 2) };
         // KWin ≥ 6.2 caps its pool at 4; a higher minimum fails negotiation outright.
-        const { assert!(crate::KWIN_POOL_MIN <= 4) };
+        const { assert!(crate::KWIN_POOL_MAX == 4 && crate::KWIN_POOL_MIN <= crate::KWIN_POOL_MAX) };
     }
 
     #[test]

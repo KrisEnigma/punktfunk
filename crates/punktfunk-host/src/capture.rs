@@ -115,9 +115,9 @@ pub fn capture_virtual_output(
     _capture: crate::session_plan::CaptureBackend,
     // The output's compositor is KWin, derived from the backend that created
     // `vout` (a pooled display only ever matches its own backend). KWin rewrites
-    // `SPA_META_Cursor` on every buffer, so id-0 is an authoritative hide, serves
-    // a 3-buffer pool unless asked for `KWIN_POOL_MIN`, and paces delivery on a
-    // millisecond-rounded timer unless offered no `maxFramerate` ceiling.
+    // `SPA_META_Cursor` on every buffer (id-0 is an authoritative hide), serves a pool
+    // of `KWIN_POOL_MIN..=KWIN_POOL_MAX`, and paces delivery on a millisecond-rounded
+    // timer unless offered no `maxFramerate` ceiling.
     kwin: bool,
     // Gamescope omits cursor metadata and exports LINEAR-only dmabufs.
     gamescope: bool,
@@ -182,6 +182,7 @@ pub fn capture_virtual_output(
         } else {
             pf_capture::POOL_MIN
         },
+        kwin.then_some(pf_capture::KWIN_POOL_MAX),
         kwin && pf_capture::unpaced_capture(),
     )
 }
