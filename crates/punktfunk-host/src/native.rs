@@ -1797,6 +1797,14 @@ pub(crate) async fn run_admitted(
                 iso
             }),
     };
+    // Where this session's virtual pads are exposed, so its seat's Steam opens those and no
+    // other seat's. `None` on every host without the filter, which is today's box-wide pads.
+    #[cfg(target_os = "linux")]
+    let seat_dev = isolation
+        .as_ref()
+        .and_then(crate::vdisplay::seat_device_dir);
+    #[cfg(not(target_os = "linux"))]
+    let seat_dev: Option<std::path::PathBuf> = None;
     // Pinned injector + swappable route. Drop at session end closes the EIS connection.
     #[cfg(target_os = "linux")]
     let session_injector = isolation
@@ -1856,6 +1864,7 @@ pub(crate) async fn run_admitted(
                         grants,
                         frame_map,
                         pad_feed,
+                        seat_dev,
                         stop,
                         counters,
                     )
