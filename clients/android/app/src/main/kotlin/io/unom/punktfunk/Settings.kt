@@ -5,6 +5,8 @@ import android.hardware.display.DisplayManager
 import android.os.Build
 import android.util.Log
 import android.view.Display
+import android.view.WindowInsets
+import android.view.WindowManager
 
 /**
  * User-tunable stream settings, persisted in `SharedPreferences`. A `0` resolution/refresh means
@@ -443,64 +445,62 @@ const val SAFE_AREA_MODE = -2
  *  * The NATIVE mode has the panel's own aspect, so it fills every pixel, housing included.
  *
  * Asking the host for a mode narrower by the unsafe insets is the fix, and the stream screen places
- * the picture between them rather than centred: a hole on one side must not be paid for on both.
- * Pointer mapping follows for free — the input lanes derive the picture rect from the live placement.
+ * the picture between the window's live cutout insets rather than centred: a hole on one side must
+ * not be paid for on both. Pointer mapping follows for free — the input lanes derive the picture
+ * rect from the live placement.
  */
 object SafeArea {
     /** The host rejects odd dimensions and anything under 320 px wide (`validate_dimensions`). */
     const val MIN_WIDTH = 320
 
     /**
-     * [nativeWidth] less [left] and [right], even-floored and clamped to the host's floor. A hole
-     * on one side costs the picture that side only: charging both spends 127 px of a OnePlus 9 Pro
-     * on an edge nothing covers. Height is untouched — under aspect-fit only the horizontal axis
-     * binds on a landscape phone, so insetting it would shrink the picture uncovering nothing.
+     * The width a landscape stream loses to the housing, from cutout insets read in either rotation.
+     * Portrait's top and bottom become landscape's two sides, so the sum does not depend on when the
+     * probe ran. The larger pair wins, which also covers a probe that raced a rotation.
      */
-    fun insetWidth(nativeWidth: Int, left: Int, right: Int): Int =
-        (nativeWidth - left.coerceAtLeast(0) - right.coerceAtLeast(0))
-            .coerceAtLeast(MIN_WIDTH) / 2 * 2
+    fun landscapeInset(left: Int, top: Int, right: Int, bottom: Int): Int = maxOf(
+        left.coerceAtLeast(0) + right.coerceAtLeast(0),
+        top.coerceAtLeast(0) + bottom.coerceAtLeast(0),
+    )
+
+    /**
+     * [nativeWidth] less [inset], even-floored and clamped to the host's floor. Height is untouched —
+     * under aspect-fit only the horizontal axis binds on a landscape phone, so insetting it would
+     * shrink the picture uncovering nothing.
+     */
+    fun insetWidth(nativeWidth: Int, inset: Int): Int =
+        (nativeWidth - inset.coerceAtLeast(0)).coerceAtLeast(MIN_WIDTH) / 2 * 2
 }
 
-/** What a landscape stream must clear on this display: the cutout's two sides, in window pixels. */
-data class SafeInsets(val left: Int, val right: Int)
-
 /**
- * What this display's housing costs a landscape stream, per side.
+ * The housing a landscape stream must clear on this display, in pixels ([SafeArea.landscapeInset]).
  *
- * [DisplayCutout] is rotation-aware: in a landscape rotation the housing sits on `left`/`right` and
- * the two are read as they are. A portrait probe reports the same housing on `top`/`bottom` with
- * both horizontal insets zero — that says how big it is, not which side it will land on, so the
- * reading goes on both sides. Rounded corners are not charged: clearing a corner of radius `r`
- * costs `r` on every row to uncover two small arcs.
+ * Read from the window manager's inset state, the one the stream window is laid out against, so the
+ * mode and the placement agree. [Display.getCutout] adjusts for the calling context's rotation and
+ * can read wider than the window does. Rounded corners are not charged: clearing a corner of radius
+ * `r` costs `r` on every row to uncover two small arcs.
  */
-fun displaySafeInsets(context: Context): SafeInsets {
-    val display = probeDisplay(context)
-    var left = 0
-    var right = 0
-    if (display != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-        display.cutout?.let { cut ->
-            if (maxOf(cut.safeInsetLeft, cut.safeInsetRight) > 0) {
-                left = cut.safeInsetLeft
-                right = cut.safeInsetRight
-            } else {
-                val vertical = maxOf(cut.safeInsetTop, cut.safeInsetBottom)
-                left = vertical
-                right = vertical
-            }
-        }
+fun displayCutoutInset(context: Context): Int {
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+        val i = runCatching {
+            context.getSystemService(WindowManager::class.java).currentWindowMetrics.windowInsets
+                .getInsets(WindowInsets.Type.displayCutout())
+        }.getOrNull() ?: return 0
+        return SafeArea.landscapeInset(i.left, i.top, i.right, i.bottom)
     }
-    return SafeInsets(left, right)
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return 0
+    val c = probeDisplay(context)?.cutout ?: return 0
+    return SafeArea.landscapeInset(c.safeInsetLeft, c.safeInsetTop, c.safeInsetRight, c.safeInsetBottom)
 }
 
 /**
  * The native mode narrowed to clear this display's housing — the [SAFE_AREA_MODE] resolution, as a
  * landscape `(width, height, hz)`. Same height and refresh as [nativeDisplayMode]; only the width
- * moves, and the stream screen places the narrower picture at the left inset rather than centred.
+ * moves, and the stream screen places the narrower picture at the window's left cutout inset.
  */
 fun safeDisplayMode(context: Context): Triple<Int, Int, Int> {
     val (w, h, hz) = nativeDisplayMode(context)
-    val i = displaySafeInsets(context)
-    return Triple(SafeArea.insetWidth(w, i.left, i.right), h, hz)
+    return Triple(SafeArea.insetWidth(w, displayCutoutInset(context)), h, hz)
 }
 
 /**
