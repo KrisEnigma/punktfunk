@@ -279,6 +279,12 @@ pub struct HostConfig {
     /// (`design/gamescope-multiuser.md`). **Default ON**; `=0` restores shared
     /// host-lifetime planes. Shared-desktop and managed/attach routes are untouched.
     pub gamescope_isolate: bool,
+    /// `PUNKTFUNK_STEAM_SEAT_HOME` — run a dedicated Steam launch under the
+    /// session's own `HOME` (`pf_paths::seat_home`), so it neither waits for the
+    /// desktop Steam to shut down nor shares its account
+    /// (`design/steam-seats-warm-launch-implementation-plan.md`). **Default OFF.**
+    /// Needs a native Steam to clone; a seat signs in on its own.
+    pub steam_seat_home: bool,
     /// `PUNKTFUNK_GAMESCOPE_HDR` — allow HDR on gamescope. The host probes the
     /// punktfunk build (`packaging/gamescope`) and stays SDR if missing; this only
     /// decides whether HDR is *attempted*. **Default ON**, matching `PUNKTFUNK_10BIT`.
@@ -389,6 +395,7 @@ impl HostConfig {
             }),
             gamescope_splash: on("PUNKTFUNK_GAMESCOPE_SPLASH").unwrap_or(true),
             gamescope_isolate: on("PUNKTFUNK_GAMESCOPE_ISOLATE").unwrap_or(true),
+            steam_seat_home: on("PUNKTFUNK_STEAM_SEAT_HOME").unwrap_or(false),
             gamescope_hdr: on("PUNKTFUNK_GAMESCOPE_HDR").unwrap_or(true),
             gamescope_sdr_nits: val("PUNKTFUNK_GAMESCOPE_SDR_NITS")
                 .and_then(|s| s.trim().parse::<u32>().ok())

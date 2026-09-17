@@ -87,6 +87,7 @@ more about some of them.
 | Startup splash (Linux) | `PUNKTFUNK_GAMESCOPE_SPLASH` | `on` · `off` | `on` | next session |
 | Per-session isolation (Linux) | `PUNKTFUNK_GAMESCOPE_ISOLATE` | `on` · `off` | `on` | next session |
 | Grab the cursor (Linux) | `PUNKTFUNK_GAMESCOPE_GRAB_CURSOR` | `on` · `off` | `off` | next session |
+| Steam per seat (Linux) | `PUNKTFUNK_STEAM_SEAT_HOME` | `on` · `off` | `off` | next session |
 | Bind patched gamescope (Linux) | `PUNKTFUNK_GAMESCOPE_BIND` | `auto` · `on` · `off` | `auto` | next session |
 | Follow mode switches (Linux) | `PUNKTFUNK_SESSION_WATCH` | `auto` · `on` · `off` | `auto` | next session |
 | Local discovery | `PUNKTFUNK_MDNS` | `on` · `off` | `on` | after a restart |
@@ -155,6 +156,7 @@ the full picture (and [Bazzite](/docs/bazzite) for that distro's specifics).
 | `PUNKTFUNK_GAMESCOPE_GRAB_CURSOR` | `1` | Add `--force-grab-cursor` to a bare gamescope session the host spawns **to run an app or game** (never the empty keep-alive session), forcing relative-mouse capture so FPS mouselook works over the injected pointer. **Off by default** — relative mode breaks absolute-pointer titles and menus, so turn it on per host. |
 | `PUNKTFUNK_GAMESCOPE_SPLASH` | `1` · `0` *(default on)* | Run the built-in splash client inside each bare gamescope session the host spawns. **Leave it on**: gamescope only produces capture buffers once something paints, and a Steam launch paints nothing for its whole bootstrap — without the splash a fresh session starves and times out. `0` is a debugging escape hatch. |
 | `PUNKTFUNK_GAMESCOPE_ISOLATE` | `1` · `0` *(default on)* | Give each bare gamescope session the host spawns its own input, audio and mic plane — a per-session input relay, the nested apps' audio routed to that session's stream sink, and a per-session virtual mic — so concurrent sessions on one box never hear or drive each other. `0` restores the shared host-lifetime planes. Shared-desktop backends (kwin/mutter/wlroots) and the managed/attach gamescope routes always use shared planes. |
+| `PUNKTFUNK_STEAM_SEAT_HOME` | `1` · `0` *(default off)* | Give each paired device's dedicated Steam launch its own `HOME` under `~/.local/share/punktfunk/seats/<device>/`, instead of the one Steam the box's desktop already runs. The desktop Steam keeps running (today the host asks it to shut down first, which costs 3–20 s per launch), and two devices can play at once. The seat's home is a reflink clone of your Steam install without its account or its library, so **each seat signs in to Steam once** — Big Picture's sign-in screen takes a QR code. Needs a native Steam (`~/.steam`) and a filesystem with reflink support (btrfs, XFS); without either the seat downloads Steam once by itself. Games are not downloaded twice: the seat inherits your library folders. |
 | `PUNKTFUNK_GAMESCOPE_STEAM` | `1` | Launch every bare gamescope session the host spawns in Steam integration mode (`--steam`). A Steam title turns that on by itself; this forces it for non-Steam launches too. Managed / `gamescope-session-plus` sessions own their own flags and ignore it. |
 
 
