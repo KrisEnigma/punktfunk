@@ -122,7 +122,7 @@ watching for the chord either way.
 
 ### Statistics with a controller
 
-The **Apple** apps reserve a second chord: **Select + X**, which cycles the
+Every client reserves a second chord: **Select + X**, which cycles the
 [stats overlay](/docs/stats) one level each time you complete it — for a pad with no keyboard and
 no free screen for the three-finger tap; on **Apple TV** it is the only way there with a pad. Both
 buttons still reach the game; only the overlay changes locally.
