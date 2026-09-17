@@ -737,6 +737,16 @@ impl StreamState {
                     plane: crate::events::Plane::Native,
                     spec: target.detect.clone(),
                     nested,
+                    // A nested lease recognizes only what runs under its own gamescope: two seats
+                    // can play the same title, and Steam's reaper looks the same in both.
+                    #[cfg(target_os = "linux")]
+                    scope_pid: nested
+                        .then(|| {
+                            cur_display_gen.and_then(crate::vdisplay::registry::compositor_pid_for)
+                        })
+                        .flatten(),
+                    #[cfg(not(target_os = "linux"))]
+                    scope_pid: None,
                     launcher: target.launcher,
                     child,
                     spawned: spawned_pid,

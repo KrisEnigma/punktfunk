@@ -145,6 +145,8 @@ pub struct LeaseShared {
     cancel: Arc<AtomicBool>,
     /// Recognition. Empty for [`LeaseKind::Nested`] / [`LeaseKind::Untracked`].
     spec: DetectSpec,
+    /// Process tree recognition may look in ([`LeaseRequest::scope_pid`]).
+    scope_pid: Option<u32>,
     /// Seconds-since-boot at launch: adopt floor. `None` = no uptime clock,
     /// so only detect signals are used.
     launch_stamp: Option<f64>,
@@ -188,6 +190,16 @@ impl LeaseShared {
 
     pub fn is_trackable(&self) -> bool {
         !matches!(self.kind, LeaseKind::Untracked)
+    }
+
+    /// Everything this lease's signals match, inside its scope if it has one.
+    #[cfg(any(target_os = "linux", windows))]
+    fn find_procs(&self, scanner: &crate::procscan::Scanner) -> Vec<crate::procscan::ProcRef> {
+        let live = scanner.find(&self.spec, self.launch_stamp);
+        match self.scope_pid {
+            Some(root) => crate::procscan::under(&live, root),
+            None => live,
+        }
     }
 
     /// Running, and this host will say `window` once the game's window is up.
@@ -258,6 +270,9 @@ pub struct LeaseRequest {
     pub spec: DetectSpec,
     /// `true` when a bare-spawn gamescope owns the game.
     pub nested: bool,
+    /// That gamescope's pid, so recognition stays inside this seat's process tree
+    /// ([`crate::procscan::under`]). `None` scans the whole uid, as every other lease does.
+    pub scope_pid: Option<u32>,
     /// Opens a launcher, not a game: always [`LeaseKind::Untracked`].
     ///
     /// A launcher has no exit to detect (Big Picture is a mode of Steam, not
@@ -365,6 +380,7 @@ pub fn open(req: LeaseRequest, on_exit: OnExit) -> GameLease {
         plane,
         spec,
         nested,
+        scope_pid,
         launcher,
         child,
         spawned,
@@ -412,6 +428,7 @@ pub fn open(req: LeaseRequest, on_exit: OnExit) -> GameLease {
         state: AtomicU8::new(GameState::Launching as u8),
         cancel: Arc::new(AtomicBool::new(false)),
         spec,
+        scope_pid,
         launch_stamp,
         child: Mutex::new(owned),
         spawned,
@@ -890,7 +907,7 @@ fn watch(
         let child_alive = matches!(kind, LeaseKind::Child)
             && (child.is_some() || spawned.is_some())
             && spawned_at.elapsed() >= SHIM_WINDOW;
-        let live = scanner.find(&shared.spec, shared.launch_stamp);
+        let live = shared.find_procs(&scanner);
         // Same window for a scan hit: a pre-launch tree (Steam shader
         // reaper) carries the game's signals. One poll would latch into
         // phase 2 (`EXIT_CONFIRM` then ends the session). A window, not a
@@ -977,7 +994,7 @@ fn watch(
         let live = {
             let still = scanner.alive(&known);
             if still.is_empty() {
-                scanner.find(&shared.spec, shared.launch_stamp)
+                shared.find_procs(&scanner)
             } else {
                 still
             }
@@ -1309,7 +1326,7 @@ fn unix_term_ladder(shared: &LeaseShared) {
     // once: a process that starts after this point belongs to a session that
     // claimed the title while the ladder ran, and must outlive it.
     let targets = {
-        let mut procs = scanner.find(&shared.spec, shared.launch_stamp);
+        let mut procs = shared.find_procs(&scanner);
         if let Some(p) = reported_proc(shared) {
             if !procs.iter().any(|q| q.pid == p.pid) {
                 procs.push(p);
@@ -1370,7 +1387,7 @@ fn unix_term_ladder(shared: &LeaseShared) {
 fn windows_term_ladder(shared: &LeaseShared) {
     let scanner = crate::procscan::Scanner::system();
     let live = || {
-        let mut procs = scanner.alive(&scanner.find(&shared.spec, shared.launch_stamp));
+        let mut procs = scanner.alive(&shared.find_procs(&scanner));
         // Re-verify and de-dupe. `spawned` and `reported_proc` join on the
         // same terms; Reported has only the latter.
         let mut fold = |p: crate::procscan::ProcRef| {
@@ -1772,6 +1789,7 @@ mod tests {
             plane: crate::events::Plane::Native,
             spec,
             nested,
+            scope_pid: None,
             launcher: false,
             child: None,
             spawned: None,
@@ -2150,6 +2168,7 @@ mod tests {
                 // Real signal nothing will match: the game never shows up.
                 spec: DetectSpec::steam(999_001),
                 nested: false,
+                scope_pid: None,
                 launcher: false,
                 child: Some((child, false)),
                 spawned: None,
@@ -2394,6 +2413,7 @@ mod tests {
                 plane: crate::events::Plane::Native,
                 spec: DetectSpec::dir(td.path()),
                 nested: false,
+                scope_pid: None,
                 launcher: false,
                 child: Some((child, true)),
                 spawned: None,

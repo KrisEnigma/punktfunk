@@ -1247,6 +1247,7 @@ mod tests {
                 // No signals: inert lease, so no watcher thread races the assertions.
                 spec: crate::library::DetectSpec::default(),
                 nested: false,
+                scope_pid: None,
                 launcher: false,
                 child: None,
                 spawned: None,

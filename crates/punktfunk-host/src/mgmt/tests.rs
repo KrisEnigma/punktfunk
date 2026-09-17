@@ -3800,6 +3800,7 @@ fn a_recorded_launch_credits_its_run_to_the_library_stats() {
             plane: crate::events::Plane::Native,
             spec: crate::library::DetectSpec::dir(tmp.path()),
             nested: false,
+            scope_pid: None,
             launcher: false,
             child: Some((child, true)),
             spawned: None,

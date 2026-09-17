@@ -408,6 +408,9 @@ fn run(
                     // watch, so a Moonlight launch keeps the `running` stage.
                     window: None,
                     nested,
+                    // No pool generation on this plane, and a GameStream session never isolates,
+                    // so there is no sibling seat to be confused with.
+                    scope_pid: None,
                     launcher: t.launcher,
                     child,
                     spawned: spawned_pid,

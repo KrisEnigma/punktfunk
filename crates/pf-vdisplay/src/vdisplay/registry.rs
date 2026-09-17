@@ -208,6 +208,14 @@ pub fn seat_for(pool_gen: u64) -> Option<String> {
     linux::seat_for(pool_gen)
 }
 
+/// The compositor process of the pooled display with this `pool_gen`
+/// ([`crate::VirtualOutput::pid`]). A nested launch's whole tree descends from it, so a scan can
+/// tell this seat's game from another seat's copy of the same title. `None` where we spawned none.
+#[cfg(target_os = "linux")]
+pub fn compositor_pid_for(pool_gen: u64) -> Option<u32> {
+    linux::compositor_pid_for(pool_gen)
+}
+
 /// Reap every kept display of `backend` whose compositor is gone
 /// (`design/gamemode-and-dedicated-sessions.md`). Called from the session-switch
 /// watcher. No-op off Linux.
@@ -1732,6 +1740,14 @@ mod linux {
         es.iter()
             .find(|e| e.generation == pool_gen)
             .and_then(|e| e.seat.clone())
+    }
+
+    pub(super) fn compositor_pid_for(pool_gen: u64) -> Option<u32> {
+        let r = REG.get()?;
+        let es = r.entries.lock().unwrap();
+        es.iter()
+            .find(|e| e.generation == pool_gen)
+            .and_then(|e| e.pid)
     }
 
     pub(super) fn retire_incompatible(backend: &'static str, isolation: &Option<String>) {
