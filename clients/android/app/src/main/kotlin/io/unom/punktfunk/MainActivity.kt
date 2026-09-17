@@ -68,8 +68,8 @@ private val SYSTEM_KEYS = intArrayOf(
  *
  * Compose attaches its `OnApplyWindowInsets` and `WindowInsetsAnimation` callbacks when the first
  * composable reads an inset, and removes them again when the last reader goes away
- * (`WindowInsetsHolder.increment/decrementAccessors`). [StreamScreen] reads no insets at all — it's
- * a bare full-screen surface — so a stream drops the reader count to zero for its whole duration.
+ * (`WindowInsetsHolder.increment/decrementAccessors`). [StreamScreen] reads no insets outside the
+ * safe-area mode — it's a bare full-screen surface — so a stream drops the reader count to zero.
  *
  * That alone is survivable; what isn't is a session that ends while the app is BACKGROUNDED, which
  * is the common case (leaving the app ends the session — see StreamScreen's ON_STOP observer). The
