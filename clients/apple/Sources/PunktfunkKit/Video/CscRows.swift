@@ -104,10 +104,10 @@ public enum CscRows {
                 pack * max / (224.0 * step)
             )
         }
-        // rgb = M * (yuv + off) = M*yuv + M*off — rows of M with the offset dot folded into
-        // w. `yuv` is the SAMPLED (packed) value, so the offsets divide by the packing
-        // factor to land on the same scale.
-        let off = [oy / pack, -0.5 / pack, -0.5 / pack]
+        // rgb = M * (yuv + off). `yuv` is the sampled (packed) value, so offsets divide by the
+        // packing factor. Neutral chroma is code 128 (512 at 10 bits) in both ranges, not 0.5.
+        let oc = -(128.0 * step) / max
+        let off = [oy / pack, oc / pack, oc / pack]
         let m: [[Double]] = [
             [sy, 0.0, 2.0 * (1.0 - kr) * sc],
             [
