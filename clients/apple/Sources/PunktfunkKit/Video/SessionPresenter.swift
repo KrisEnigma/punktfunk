@@ -288,8 +288,8 @@ final class SessionPresenter {
         let selectedPacing = Self.pacing(
             for: choice, explicit: explicit, codec: connection.videoCodec)
         let priority = PresentPriority.resolve(
-            setting: SessionSettings.current.presentPriority,
-            bufferSetting: SessionSettings.current.smoothBuffer)
+            setting: connection.settings.presentPriority,
+            bufferSetting: connection.settings.smoothBuffer)
         // Direct video presentation is the zero-buffer latency path. A user who asks for a
         // smoothness buffer keeps the existing deadline engine, where FrameStore owns that buffer.
         let pacing = Self.effectivePacing(
@@ -323,7 +323,7 @@ final class SessionPresenter {
             // Resolve THIS session's windowed mechanism once (setting + dev env lever) —
             // `setComposited` routes between it and fullscreen-async from every layout.
             windowedMode = Self.windowedPresentMode(
-                setting: SessionSettings.current.windowedSafePresent,
+                setting: connection.settings.windowedSafePresent,
                 env: ProcessInfo.processInfo.environment["PUNKTFUNK_WINDOWED_PRESENT"])
             // The surface present target sits ABOVE the metal layer: transparent (nil contents)
             // unless the surface mechanism actually presents, covering it while it does.
@@ -386,7 +386,7 @@ final class SessionPresenter {
         stage2?.setFrameRateHint(hz: Float(hz))
         guard let link = stage2Link else { return }
         let hzF = Float(hz)
-        let allowVRR = SessionSettings.current.allowVRR
+        let allowVRR = connection?.settings.allowVRR ?? true
         #if os(macOS)
         // Off: `.default` = the link free-runs at the display's native rate (pre-VRR behavior).
         // On: request the content rate with a 24 Hz floor — capped at the display, never at the
@@ -408,13 +408,13 @@ final class SessionPresenter {
     /// Every explicit-decode path updates its display link after reconfiguration, including tvOS's
     /// decoded video plane. Metal paths then place their sublayer and size its drawable in backing
     /// pixels so the shader owns scaling. The video layer uses `videoGravity` (see
-    /// `SessionPresenter.gravity`) and needs no geometry here.
+    /// `SessionPresenter.gravity(_:)`) and needs no geometry here.
     ///
     /// No-op before a connection starts and for stage-1 beyond the harmless timing update.
-    /// The system scaler's closest match to the session's `VideoFit`, for the AVSampleBufferDisplayLayer
-    /// paths (stage 1, tvOS's decoded plane). It does not snap like the placement does.
-    static var gravity: AVLayerVideoGravity {
-        switch VideoFit(name: SessionSettings.current.videoFit) {
+    /// The system scaler's closest match to `fit`, for the AVSampleBufferDisplayLayer paths
+    /// (stage 1, tvOS's decoded plane). It does not snap like the placement does.
+    static func gravity(_ fit: VideoFit) -> AVLayerVideoGravity {
+        switch fit {
         case .fit: return .resizeAspect
         case .crop: return .resizeAspectFill
         case .stretch: return .resize
@@ -445,7 +445,7 @@ final class SessionPresenter {
         let scale = contentsScale > 0 ? contentsScale : 1
         let viewPx = (width: Int((bounds.width * scale).rounded()), height: Int((bounds.height * scale).rounded()))
         let placement = aspect.map {
-            VideoFit(name: SessionSettings.current.videoFit)
+            VideoFit(name: connection.settings.videoFit)
                 .place(view: viewPx, frame: (Int($0.width), Int($0.height)))
         }
         let snapped: CGRect

@@ -21,6 +21,7 @@
 
 import Foundation
 import PunktfunkCore
+import PunktfunkShared
 
 // cbindgen's C17-compatible header spells the typedefs as plain integers
 // (`typedef int32_t PunktfunkStatus`, `typedef uint8_t PunktfunkInputKind`) while the enum
@@ -290,6 +291,10 @@ public final class PunktfunkConnection: @unchecked Sendable {
     /// Serializes the (single) cursor pull thread against close() — both cursor planes are
     /// drained by ONE thread, so one lock covers them.
     private let cursorLock = NSLock()
+
+    /// What this session resolved at connect: the kit-side readers (presenter, input, the
+    /// match-window follower) read these, never the globals, so two windows keep their own.
+    public let settings: EffectiveSettings
 
     /// Negotiated session mode (host-confirmed).
     public private(set) var width: UInt32 = 0
@@ -937,8 +942,10 @@ public final class PunktfunkConnection: @unchecked Sendable {
         videoFit: UInt8 = 0, // PUNKTFUNK_VIDEO_FIT_*: how this view fills; a host framing for another device reframes to it
         launchID: String? = nil,
         deviceName: String? = nil, // nil = this device's OS name (`DeviceName.current`)
-        timeoutMs: UInt32 = 10_000
+        timeoutMs: UInt32 = 10_000,
+        settings: EffectiveSettings = EffectiveSettings(defaults: .standard)
     ) throws {
+        self.settings = settings
         _ = Self.abiVersionGate // version-equality guard — fail loudly before the first C call
         if let pin = pinSHA256, pin.count != 32 { throw PunktfunkClientError.invalidPin }
         var observed = [UInt8](repeating: 0, count: 32)
