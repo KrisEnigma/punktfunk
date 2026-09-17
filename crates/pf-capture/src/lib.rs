@@ -680,8 +680,6 @@ pub mod portal_rt;
 // monitor path (`open_portal_monitor` `want_hdr`).
 #[cfg(target_os = "linux")]
 pub use linux::gnome_hdr_monitor_active;
-#[cfg(target_os = "linux")]
-pub use linux::x11_connect;
 #[cfg(target_os = "windows")]
 #[path = "windows/synthetic_nv12.rs"]
 pub mod synthetic_nv12;

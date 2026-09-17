@@ -302,19 +302,17 @@ pub struct WindowStage {
 
 /// Where the watcher looks for the game's window.
 pub enum WindowSource {
-    /// A compositor that lists its toplevels (Hyprland, sway). The first window is also placed.
+    /// The compositor's own window list: Hyprland and sway over IPC, KWin over
+    /// `org_kde_plasma_window_management`, GNOME through punktfunk's shell extension. `stage`
+    /// places the first window, where a head is known and the compositor allows it.
     #[cfg(target_os = "linux")]
-    Toplevels(WindowStage),
-    /// This seat's gamescope: its focused-app atom for a Steam title, else its Xwaylands' windows.
-    #[cfg(target_os = "linux")]
-    Gamescope { seat: Option<String> },
-    /// The desktop session's Xwayland (KWin, GNOME). It holds only X11 windows, so the wait is
-    /// dropped for a launch that is not Proton, Wine or Steam.
-    #[cfg(target_os = "linux")]
-    Xwayland {
-        display: String,
-        xauthority: Option<String>,
+    Toplevels {
+        compositor: crate::vdisplay::Compositor,
+        stage: Option<WindowStage>,
     },
+    /// This seat's gamescope presenting Steam `appid`, per its focused-app control atom.
+    #[cfg(target_os = "linux")]
+    Gamescope { seat: Option<String>, appid: u32 },
     /// The interactive desktop's top-level windows.
     #[cfg(windows)]
     Desktop,
@@ -515,8 +513,6 @@ struct WindowWatch {
     source: WindowSource,
     /// Last toplevels token seen. `None` re-reads.
     token: Option<u64>,
-    /// An Xwayland source has confirmed this launch draws through it.
-    checked: bool,
 }
 
 #[cfg(any(target_os = "linux", windows))]
@@ -525,12 +521,11 @@ impl WindowWatch {
         WindowWatch {
             source,
             token: None,
-            checked: false,
         }
     }
 
-    /// One tick. `true` once the stage is spent: the window was found (and placed, once), or
-    /// this source can never see it.
+    /// One tick. `true` once the stage is spent: the window was found (placed once), or this
+    /// source cannot list windows.
     fn poll(&mut self, shared: &Arc<LeaseShared>, live: &[crate::procscan::ProcRef]) -> bool {
         // The game's window can belong to any process under the ones the lease holds: a launch
         // command's shell, or a launcher's child.
@@ -542,8 +537,8 @@ impl WindowWatch {
             .collect();
         let found: Option<(String, String)> = match &self.source {
             #[cfg(target_os = "linux")]
-            WindowSource::Toplevels(stage) => {
-                let now = crate::vdisplay::toplevels_token(stage.head.compositor);
+            WindowSource::Toplevels { compositor, stage } => {
+                let now = crate::vdisplay::toplevels_token(*compositor);
                 // A token that has not moved means no window opened, closed or was
                 // retitled since the last read, so the answer cannot have changed.
                 if now.is_some() && now == self.token {
@@ -551,63 +546,32 @@ impl WindowWatch {
                 }
                 self.token = now;
                 let pids = crate::procscan::with_descendants(&roots);
-                let all = crate::vdisplay::list_all_toplevels(stage.head.compositor);
+                let Some(all) = crate::vdisplay::list_all_toplevels(*compositor) else {
+                    // KWin without the grant, GNOME before the extension loads: waiting would hold
+                    // the cover up to the client's cap on a game that is already playing.
+                    shared.awaiting_window.store(false, Ordering::Relaxed);
+                    tracing::debug!(
+                        title = %shared.game.title,
+                        compositor = compositor.id(),
+                        "this compositor lists no windows yet — the launch hold ends at running"
+                    );
+                    return true;
+                };
                 let Some(win) = all.iter().find(|w| is_game_window(w, &pids, &shared.spec)) else {
                     return false;
                 };
                 on_screen(shared, &win.title, &win.app_id);
-                apply_on_window(stage, win);
+                if let Some(stage) = stage {
+                    apply_on_window(stage, win);
+                }
                 return true;
             }
             #[cfg(target_os = "linux")]
-            WindowSource::Gamescope { seat } => match shared.spec.steam_appid {
+            WindowSource::Gamescope { seat, appid } => {
                 // Steam's own launch screen is its client's appid, so the game's shows only
                 // once it is up.
-                Some(appid) => crate::vdisplay::gamescope_presenting(appid, seat.as_deref())
-                    .then(|| (shared.game.title.clone(), format!("steam_app_{appid}"))),
-                None => {
-                    let pids = crate::procscan::with_descendants(&roots);
-                    crate::vdisplay::gamescope_xwayland_cursor_targets(seat.as_deref())
-                        .into_iter()
-                        .find_map(|(display, xauthority)| {
-                            crate::vdisplay::x11_game_window(
-                                &display,
-                                xauthority.as_deref(),
-                                &pids,
-                                None,
-                            )
-                        })
-                }
-            },
-            #[cfg(target_os = "linux")]
-            WindowSource::Xwayland {
-                display,
-                xauthority,
-            } => {
-                let pids = crate::procscan::with_descendants(&roots);
-                if !self.checked {
-                    if pids.is_empty() {
-                        return false;
-                    }
-                    self.checked = true;
-                    // A native Wayland game never shows here; waiting for it would hold the
-                    // cover up to the client's cap on a game that is already playing.
-                    if !crate::procscan::draws_through_xwayland(&pids) {
-                        shared.awaiting_window.store(false, Ordering::Relaxed);
-                        tracing::debug!(
-                            title = %shared.game.title,
-                            "no Proton, Wine or Steam process: the X11 window list may never \
-                             show this game, so its launch hold ends at running"
-                        );
-                        return true;
-                    }
-                }
-                crate::vdisplay::x11_game_window(
-                    display,
-                    xauthority.as_deref(),
-                    &pids,
-                    shared.spec.steam_appid,
-                )
+                crate::vdisplay::gamescope_presenting(*appid, seat.as_deref())
+                    .then(|| (shared.game.title.clone(), format!("steam_app_{appid}")))
             }
             #[cfg(windows)]
             WindowSource::Desktop => {
@@ -670,7 +634,8 @@ fn is_game_window(
     })
 }
 
-/// Place the game's first window per the entry's `on_window`.
+/// Place the game's first window per the entry's `on_window`, on a compositor
+/// the host can place windows on.
 ///
 /// Best-effort and once: every step is a log line on refusal, and none of them
 /// is worth failing a launch that is already on screen.
@@ -678,6 +643,9 @@ fn is_game_window(
 fn apply_on_window(stage: &WindowStage, win: &crate::vdisplay::Toplevel) {
     let head = &stage.head;
     let on = &stage.on_window;
+    if !crate::vdisplay::places_windows(head.compositor) {
+        return;
+    }
     if on.wants_stream_output() && win.output != head.output {
         match crate::vdisplay::move_toplevel_to_output(head.compositor, &win.id, &head.output) {
             Ok(()) => tracing::info!(

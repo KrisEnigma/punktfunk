@@ -116,87 +116,35 @@ pub fn list_toplevels(compositor: Compositor, output: &str) -> Vec<Toplevel> {
     }
 }
 
-/// A viewable X11 client window on `display` owned by one of `pids`, or tagged by Steam's
-/// `STEAM_GAME` with `appid`: its `(title, class)`. `None` when there is none, or the display
-/// cannot be reached.
-///
-/// Reads the window manager's client list; gamescope's Xwayland runs none, so there the root's
-/// children stand in. Only X11 windows exist here — a native Wayland client never appears.
-#[cfg(target_os = "linux")]
-pub fn x11_game_window(
-    display: &str,
-    xauthority: Option<&str>,
-    pids: &[u32],
-    appid: Option<u32>,
-) -> Option<(String, String)> {
-    use x11rb::connection::Connection;
-    use x11rb::protocol::xproto::{AtomEnum, ConnectionExt, MapState, Window};
-    let (conn, screen) = pf_capture::x11_connect(display, xauthority).ok()?;
-    let root = conn.setup().roots.get(screen)?.root;
-    let atom = |name: &[u8]| -> Option<u32> {
-        let a = conn.intern_atom(true, name).ok()?.reply().ok()?.atom;
-        (a != 0).then_some(a)
-    };
-    let values = |w: Window, prop: u32, ty: AtomEnum| -> Option<Vec<u32>> {
-        let reply = conn
-            .get_property(false, w, prop, ty, 0, 4096)
-            .ok()?
-            .reply()
-            .ok()?;
-        reply.value32().map(|v| v.collect())
-    };
-    let windows = atom(b"_NET_CLIENT_LIST")
-        .and_then(|a| values(root, a, AtomEnum::WINDOW))
-        .filter(|list| !list.is_empty())
-        .or_else(|| Some(conn.query_tree(root).ok()?.reply().ok()?.children))?;
-    let wm_pid = atom(b"_NET_WM_PID");
-    let steam_game = atom(b"STEAM_GAME");
-    windows.into_iter().find_map(|w| {
-        let attrs = conn.get_window_attributes(w).ok()?.reply().ok()?;
-        if attrs.map_state != MapState::VIEWABLE {
-            return None;
-        }
-        let first =
-            |a: Option<u32>| a.and_then(|a| values(w, a, AtomEnum::CARDINAL)?.first().copied());
-        let owned = first(wm_pid).is_some_and(|p| pids.contains(&p));
-        let tagged = appid.is_some() && first(steam_game) == appid;
-        if !owned && !tagged {
-            return None;
-        }
-        let text = |prop: u32, ty: u32| -> String {
-            conn.get_property(false, w, prop, ty, 0, 256)
-                .ok()
-                .and_then(|c| c.reply().ok())
-                .map(|r| String::from_utf8_lossy(&r.value).into_owned())
-                .unwrap_or_default()
-        };
-        let title = atom(b"_NET_WM_NAME")
-            .zip(atom(b"UTF8_STRING"))
-            .map(|(name, utf8)| text(name, utf8))
-            .unwrap_or_default();
-        // WM_CLASS is `instance\0class\0`; the class is what a window rule names.
-        let class = text(AtomEnum::WM_CLASS.into(), AtomEnum::STRING.into())
-            .split('\0')
-            .nth(1)
-            .unwrap_or_default()
-            .to_string();
-        Some((title, class))
-    })
-}
-
-/// Every window on every head, for the host's own placement decisions.
+/// Every window on every head, for the host's own window stage. `None` when
+/// this compositor cannot list its windows at all right now: KWin has not
+/// granted the protocol, GNOME has not loaded punktfunk's extension, or it is
+/// gamescope or Windows. An empty list means it can, and nothing is open.
 ///
 /// Never a client's answer: it names the operator's other monitors, which is
-/// what [`list_toplevels`] exists to keep out. The window stage needs it to
-/// notice a game that opened on the wrong screen.
+/// what [`list_toplevels`] exists to keep out. KWin reads it over
+/// `org_kde_plasma_window_management` and GNOME from punktfunk's shell
+/// extension; neither names a window's head.
 #[cfg(target_os = "linux")]
-pub fn list_all_toplevels(compositor: Compositor) -> Vec<Toplevel> {
+pub fn list_all_toplevels(compositor: Compositor) -> Option<Vec<Toplevel>> {
     match compositor {
-        Compositor::Hyprland => hyprland::toplevels(None),
-        Compositor::Wlroots => wlroots::toplevels(None),
-        // No `_` arm; same backends as [`list_toplevels`].
+        Compositor::Hyprland => Some(hyprland::toplevels(None)),
+        Compositor::Wlroots => Some(wlroots::toplevels(None)),
+        Compositor::Kwin => kwin_windows::toplevels(),
+        Compositor::Mutter => gnome_windows::toplevels(),
+        Compositor::Gamescope | Compositor::Windows => None,
+    }
+}
+
+/// Can the host move, focus and fullscreen this compositor's windows
+/// ([`move_toplevel_to_output`], [`window_action`])?
+#[cfg(target_os = "linux")]
+pub fn places_windows(compositor: Compositor) -> bool {
+    match compositor {
+        Compositor::Hyprland | Compositor::Wlroots => true,
+        // No `_` arm; same backends as [`window_action`].
         Compositor::Kwin | Compositor::Mutter | Compositor::Gamescope | Compositor::Windows => {
-            Vec::new()
+            false
         }
     }
 }

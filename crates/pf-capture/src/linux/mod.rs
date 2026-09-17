@@ -26,7 +26,6 @@ use std::sync::mpsc::{sync_channel, Receiver, RecvTimeoutError, TryRecvError};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
-pub use xfixes_cursor::x11_connect;
 
 /// One-deep overwriting mailbox: producer drops oldest. `sync_channel` is
 /// drop-newest (`try_send` discards the fresh frame once full). A queued

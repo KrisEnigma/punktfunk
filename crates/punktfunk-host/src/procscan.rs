@@ -133,21 +133,6 @@ pub fn with_descendants(roots: &[u32]) -> Vec<u32> {
     }
 }
 
-/// Does any of `pids` run under Proton, Wine or a Steam launch? Those draw through Xwayland, so an
-/// X11 window list sees their window. `false` off Linux.
-pub fn draws_through_xwayland(pids: &[u32]) -> bool {
-    #[cfg(target_os = "linux")]
-    {
-        let scanner = Scanner::system();
-        pids.iter().any(|&pid| scanner.x11_launch(pid))
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        let _ = pids;
-        false
-    }
-}
-
 /// `roots` first, then each descendant once, from `(pid, parent)` rows.
 fn descend(roots: &[u32], parents: &[(u32, u32)]) -> Vec<u32> {
     let mut out: Vec<u32> = Vec::new();
