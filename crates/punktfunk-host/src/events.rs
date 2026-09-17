@@ -58,7 +58,8 @@ pub enum DisconnectReason {
 
 #[derive(Serialize, Deserialize, ToSchema, Clone, Debug)]
 pub struct ClientRef {
-    /// Client-supplied; empty for anonymous or compat-plane clients.
+    /// Display name: the trust-store name (a console rename wins), else the name the client
+    /// sent. Empty when neither, and always empty on the compat plane.
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fingerprint: Option<String>,

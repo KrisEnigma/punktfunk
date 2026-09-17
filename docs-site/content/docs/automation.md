@@ -75,7 +75,7 @@ Each entry:
 | `on` | Which events fire it: an exact kind (`stream.started`) or a `domain.*` prefix (`pairing.*`). |
 | `run` | A shell command (`sh -c` on Linux). Gets the event JSON on **stdin** and flat **`PF_EVENT_*`** env vars. |
 | `webhook` | A URL the event JSON is POSTed to. TLS-verified, redirects are never followed, no Punktfunk credentials attached. |
-| `filter` | Optional exact-match constraints: `client` (device name), `fingerprint`, `plane` (`native`/`gamestream`), `app`. All present fields must match. |
+| `filter` | Optional exact-match constraints: `client` (device name as the console lists it), `fingerprint`, `plane` (`native`/`gamestream`), `app`. All present fields must match. |
 | `timeout_s` | Command timeout (default 30, max 600) — on expiry the whole process group is killed. |
 | `debounce_ms` | Minimum interval between firings of this hook (0 = every event). |
 | `hmac_secret_file` | File with a secret; the webhook gains `X-Punktfunk-Signature: sha256=<hex HMAC-SHA256 of the body>` so your receiver can authenticate the host. |
