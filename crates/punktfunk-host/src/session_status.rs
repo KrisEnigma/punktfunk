@@ -284,6 +284,19 @@ pub struct SessionCounters {
 impl SessionCounters {
     /// One motion arrival. `stalled` is [`crate::native::motion_cadence`]'s own verdict, so
     /// what counts as a break in the feed is defined in exactly one place.
+    /// Zero the per-session tallies. For a plane that keeps one counter block across
+    /// sessions (the compat plane's, which its control loop bumps without a session handle).
+    pub fn reset(&self) {
+        for c in [
+            &self.input_events,
+            &self.input_mic,
+            &self.input_rich,
+            &self.input_dropped,
+        ] {
+            c.store(0, Ordering::Relaxed);
+        }
+    }
+
     pub fn note_motion(&self, stalled: bool) {
         self.motion_samples.fetch_add(1, Ordering::Relaxed);
         if stalled {

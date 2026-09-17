@@ -72,6 +72,14 @@ pub struct GameLifetime {
     pub on_game_exit: super::OnSessionLost,
 }
 
+/// The registry handles this session's loop keeps current: what `GET /status` and the
+/// console's cards read while it streams. Snapshotting them at launch would freeze the
+/// bitrate at the client's ask and leave the capture card empty.
+struct LiveTelemetry {
+    bitrate_kbps: Arc<std::sync::atomic::AtomicU32>,
+    capture_health: Arc<std::sync::Mutex<Option<pf_capture::CaptureHealth>>>,
+}
+
 /// Spawn the video stream thread (idempotent via `running`). Stops when `running` clears.
 /// `force_idr` is set by the control stream on a client recovery request; `video_cap` holds
 /// the persistent capturer the thread borrows for the stream's duration.
@@ -92,6 +100,9 @@ pub fn start(
     on_lost: super::OnSessionLost,
     // Last act of this thread — `/resume` waits on this counter (`AppState::media_exited`).
     media_exited: Arc<std::sync::atomic::AtomicU64>,
+    // Input tallies the control loop bumps; this thread clears them and hands them to the
+    // registry, which is what `session.ended` reports.
+    counters: Arc<crate::session_status::SessionCounters>,
     life: GameLifetime,
 ) {
     let _ = std::thread::Builder::new()
@@ -131,13 +142,20 @@ pub fn start(
             // gives the console a session id, and with it a per-session stop and keyframe
             // instead of only the host-wide one. `stop` is read by the loop below.
             let stop = Arc::new(AtomicBool::new(false));
+            let live = LiveTelemetry {
+                bitrate_kbps: Arc::new(std::sync::atomic::AtomicU32::new(cfg.bitrate_kbps)),
+                capture_health: Arc::new(std::sync::Mutex::new(None)),
+            };
             let end_reason = Arc::new(std::sync::atomic::AtomicU8::new(0));
+            // The control loop bumps these without a session handle, so they are cleared
+            // here rather than made fresh: the summary must not carry the last session's input.
+            counters.reset();
             let live_session =
                 crate::session_status::register(crate::session_status::Registration {
                     mode: Arc::new(std::sync::atomic::AtomicU64::new(crate::native::pack_mode(
                         cfg.width, cfg.height, cfg.fps,
                     ))),
-                    bitrate_kbps: Arc::new(std::sync::atomic::AtomicU32::new(cfg.bitrate_kbps)),
+                    bitrate_kbps: live.bitrate_kbps.clone(),
                     codec: cfg.codec,
                     stop: stop.clone(),
                     // Already this plane's "the end was deliberate" flag, so an operator stop
@@ -160,7 +178,7 @@ pub fn start(
                     // The compat plane publishes its launched game separately
                     // (`session_status::publish_gamestream_game`).
                     game: None,
-                    capture_health: Arc::new(std::sync::Mutex::new(None)),
+                    capture_health: live.capture_health.clone(),
                     join: false,
                     controls: crate::session_status::SessionControls {
                         fingerprint: life.fingerprint.clone(),
@@ -169,7 +187,7 @@ pub fn start(
                     bit_depth: if cfg.hdr { 10 } else { 8 },
                     chroma: crate::encode::ChromaFormat::Yuv420,
                     end_reason: end_reason.clone(),
-                    counters: Arc::new(crate::session_status::SessionCounters::default()),
+                    counters: counters.clone(),
                     // The launch owner's address: what the console pairs with a native
                     // session sharing the same client.
                     peer: life.owner_ip,
@@ -190,6 +208,7 @@ pub fn start(
                 &video_cap,
                 &stats,
                 &on_lost,
+                &live,
                 &life,
             );
             // Clean return is a stop; error is `error`. Compat has no typed close code.
@@ -238,6 +257,7 @@ fn run(
     video_cap: &std::sync::Mutex<Option<PooledCapturer>>,
     stats: &Arc<crate::stats_recorder::StatsRecorder>,
     on_lost: &super::OnSessionLost,
+    live: &LiveTelemetry,
     life: &GameLifetime,
 ) -> Result<()> {
     pf_frame::session_tuning::on_hot_thread();
@@ -524,6 +544,7 @@ fn run(
             stats,
             &client_label,
             on_lost,
+            live,
         );
     }
 
@@ -608,6 +629,7 @@ fn run(
         stats,
         &client_label,
         on_lost,
+        live,
     );
     capturer.set_active(false);
     // Portal terminal states are sticky and this path has no rebuild. Re-pooling a dead
@@ -1152,6 +1174,7 @@ fn stream_body(
     stats: &Arc<crate::stats_recorder::StatsRecorder>,
     client_label: &str,
     on_lost: &super::OnSessionLost,
+    live: &LiveTelemetry,
 ) -> Result<()> {
     let mut frame = capturer.next_frame().context("capture first frame")?;
     // A mirror is sized by `open_encoder_fitted`. A virtual display was created at the
@@ -1294,8 +1317,17 @@ fn stream_body(
     // A pipeline-head drop consumes no frameIndex; the client cannot see the gap. Arm an IDR
     // through the same coalesce gate so a burst of drops cannot become an IDR storm.
     let mut recover_after_drop = false;
+    // Same 500 ms cadence the native loop publishes on.
+    let mut health_published_at = Instant::now();
 
     while running.load(Ordering::SeqCst) {
+        if health_published_at.elapsed() >= Duration::from_millis(500) {
+            health_published_at = Instant::now();
+            *live
+                .capture_health
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = capturer.health();
+        }
         // An operator stop ends the session the way a lost client does — `on_lost` clears the
         // launch and the audio plane too, so nothing is left claiming the host is busy.
         if stop.load(Ordering::SeqCst) {
@@ -1711,6 +1743,8 @@ fn stream_body(
                 };
                 let queue_drops = dropped_batches.saturating_sub(last_dropped_batches);
                 let pool_drops = driver_dropped.saturating_sub(last_driver_dropped);
+                live.bitrate_kbps
+                    .store(adapt.budget_kbps, Ordering::Relaxed);
                 let sample = crate::stats_recorder::StatsSample {
                     t_ms: 0,
                     session_id,
