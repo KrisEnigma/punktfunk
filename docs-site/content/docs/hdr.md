@@ -61,6 +61,10 @@ that adds the 10-bit PQ formats to its PipeWire node. It installs beside your sy
 than replacing it; [HDR on gamescope](/docs/gamescope#hdr-on-gamescope) has the package for each
 distro.
 
+Steam's own HDR setting needs that build at `+pfhdr14` or newer (`punktfunk-gamescope --version`).
+On an older one the stream is HDR, but Steam shows HDR as unavailable, and games that follow
+Steam's setting can't turn it on.
+
 Before spawning anything the host settles two facts: the gamescope binary it will run carries the
 patch (its `--version` banner contains `+pfhdr`), and this host is the one **starting** the session
 rather than attaching to a node someone else started.
