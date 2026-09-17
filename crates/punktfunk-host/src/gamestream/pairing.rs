@@ -383,7 +383,11 @@ impl Pairing {
             };
             crate::events::emit(crate::events::EventKind::PairingCompleted {
                 device: crate::events::DeviceRef {
-                    name: name.unwrap_or_else(|| uniqueid.to_string()),
+                    // The fallback is client-chosen and reaches hooks and the event stream, so
+                    // it is scrubbed like every other device name.
+                    name: name.unwrap_or_else(|| {
+                        crate::native_pairing::sanitize_device_name(uniqueid, &fingerprint)
+                    }),
                     fingerprint,
                     plane: crate::events::Plane::Gamestream,
                 },

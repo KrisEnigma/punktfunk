@@ -120,13 +120,60 @@ pub fn start(
                 plane: crate::events::Plane::Gamestream,
             });
             let event_client = crate::events::ClientRef {
-                name: client_label,
+                name: client_label.clone(),
                 fingerprint: life.fingerprint.clone(),
                 plane: crate::events::Plane::Gamestream,
             };
             crate::events::emit(crate::events::EventKind::ClientConnected {
                 client: event_client.clone(),
             });
+            // This plane's session in the registry the management API acts on: it is what
+            // gives the console a session id, and with it a per-session stop and keyframe
+            // instead of only the host-wide one. `stop` is read by the loop below.
+            let stop = Arc::new(AtomicBool::new(false));
+            let end_reason = Arc::new(std::sync::atomic::AtomicU8::new(0));
+            let live_session =
+                crate::session_status::register(crate::session_status::Registration {
+                    mode: Arc::new(std::sync::atomic::AtomicU64::new(crate::native::pack_mode(
+                        cfg.width, cfg.height, cfg.fps,
+                    ))),
+                    bitrate_kbps: Arc::new(std::sync::atomic::AtomicU32::new(cfg.bitrate_kbps)),
+                    codec: cfg.codec,
+                    stop: stop.clone(),
+                    // Already this plane's "the end was deliberate" flag, so an operator stop
+                    // reads here exactly as `/cancel` does.
+                    quit: life.quit.clone(),
+                    force_idr: force_idr.clone(),
+                    // The 12-hex prefix native uses, so one device reads the same on both planes
+                    // — and unpairing it mid-stream finds this session too.
+                    client: life
+                        .fingerprint
+                        .as_deref()
+                        .map(|fp| fp[..12.min(fp.len())].to_string())
+                        .or_else(|| life.owner_ip.map(|ip| ip.to_string()))
+                        .unwrap_or_default(),
+                    client_name: (!client_label.is_empty()).then(|| client_label.clone()),
+                    plane: crate::events::Plane::Gamestream,
+                    hdr: cfg.hdr,
+                    ttff_ms: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+                    last_resize_ms: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+                    // The compat plane publishes its launched game separately
+                    // (`session_status::publish_gamestream_game`).
+                    game: None,
+                    capture_health: Arc::new(std::sync::Mutex::new(None)),
+                    join: false,
+                    controls: crate::session_status::SessionControls {
+                        fingerprint: life.fingerprint.clone(),
+                        ..crate::session_status::SessionControls::open()
+                    },
+                    bit_depth: if cfg.hdr { 10 } else { 8 },
+                    chroma: crate::encode::ChromaFormat::Yuv420,
+                    end_reason: end_reason.clone(),
+                    counters: Arc::new(crate::session_status::SessionCounters::default()),
+                    // The launch owner's address: what the console pairs with a native
+                    // session sharing the same client.
+                    peer: life.owner_ip,
+                });
             // Released when the closure exits so idle clocks are not pinned between sessions.
             #[cfg(target_os = "linux")]
             let _clock_pin = crate::gpuclocks::session_pin();
@@ -134,6 +181,7 @@ pub fn start(
                 cfg,
                 app.as_ref(),
                 &running,
+                &stop,
                 &force_idr,
                 &rfi_range,
                 &loss,
@@ -149,9 +197,18 @@ pub fn start(
                 Ok(()) => crate::events::DisconnectReason::Quit,
                 Err(_) => crate::events::DisconnectReason::Error,
             };
+            // Why `session.ended` says it ended. First writer wins, so an operator stop (which
+            // latches `stopped_by_operator` before it raises the flag) keeps its reason.
+            match &result {
+                Ok(()) => crate::events::SessionEndReason::HostEnded,
+                Err(_) => crate::events::SessionEndReason::HostError,
+            }
+            .latch(&end_reason);
             if let Err(e) = result {
                 tracing::error!(error = %format!("{e:#}"), "video stream failed");
             }
+            // `session.ended` before the stream and client events, as the native loop orders them.
+            drop(live_session);
             running.store(false, Ordering::SeqCst);
             *video_hdr.lock().unwrap() = None;
             // Before `client.disconnected` — native loop event order.
@@ -171,6 +228,8 @@ fn run(
     cfg: StreamConfig,
     app: Option<&super::apps::AppEntry>,
     running: &Arc<AtomicBool>,
+    // Set by `DELETE /session/{id}`: this one session, not the whole host.
+    stop: &AtomicBool,
     force_idr: &AtomicBool,
     rfi_range: &std::sync::Mutex<Option<(i64, i64)>>,
     loss: &super::GsLossStats,
@@ -456,6 +515,7 @@ fn run(
             &sock,
             cfg,
             running,
+            stop,
             force_idr,
             rfi_range,
             loss,
@@ -539,6 +599,7 @@ fn run(
         &sock,
         cfg,
         running,
+        stop,
         force_idr,
         rfi_range,
         loss,
@@ -1079,6 +1140,8 @@ fn stream_body(
     sock: &UdpSocket,
     cfg: StreamConfig,
     running: &Arc<AtomicBool>,
+    // Set by `DELETE /session/{id}`: this one session, not the whole host.
+    stop: &AtomicBool,
     force_idr: &AtomicBool,
     rfi_range: &std::sync::Mutex<Option<(i64, i64)>>,
     // Client 0x0201 loss counters — 1 Hz adaptation reads deltas.
@@ -1233,6 +1296,13 @@ fn stream_body(
     let mut recover_after_drop = false;
 
     while running.load(Ordering::SeqCst) {
+        // An operator stop ends the session the way a lost client does — `on_lost` clears the
+        // launch and the audio plane too, so nothing is left claiming the host is busy.
+        if stop.load(Ordering::SeqCst) {
+            tracing::info!("gamestream: stopping this session — the operator asked");
+            on_lost();
+            break;
+        }
         let tick = Instant::now();
         let measure = perf || stats.is_armed();
         let mut fresh = false;

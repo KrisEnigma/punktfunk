@@ -51,6 +51,8 @@ struct LiveSession {
     client: String,
     /// Display name (trust-store, else sanitized Hello). `None` if nameless.
     client_name: Option<String>,
+    /// Which plane serves it. Both register here, so a stop or a keyframe reaches either.
+    plane: crate::events::Plane,
     hdr: bool,
     /// Bring-up total (hello → first packet), ms. 0 until the first packet left.
     ttff_ms: Arc<AtomicU32>,
@@ -384,7 +386,11 @@ static AUDIO_POLICY: Mutex<Option<AudioPolicy>> = Mutex::new(None);
 pub fn apply_audio_policy(sessions: AudioSessions, launcher: &str) -> AudioPolicyGuard {
     let mut muted = Vec::new();
     for s in registry().lock().unwrap().iter() {
-        if policy_mutes(sessions, launcher, &s.client, s.join) {
+        // Compat sessions have no per-session mute, and marking one muted without muting it
+        // would put a Muted badge on a session the operator can still hear.
+        if s.plane == crate::events::Plane::Native
+            && policy_mutes(sessions, launcher, &s.client, s.join)
+        {
             s.controls.set_muted(true);
             muted.push(s.id);
         }
@@ -434,6 +440,8 @@ pub struct SessionSnapshot {
     pub codec: Codec,
     /// Display name (trust-store, else sanitized Hello). `None` if nameless.
     pub client_name: Option<String>,
+    /// Which plane serves it.
+    pub plane: crate::events::Plane,
     /// The capturer's live health, if it classifies.
     pub capture_health: Option<pf_capture::CaptureHealth>,
     /// Bring-up total (hello → first packet), ms. 0 while still bringing up.
@@ -469,6 +477,7 @@ fn session_ref(s: &LiveSession) -> crate::events::SessionRef {
         client: s.client.clone(),
         // `controls` already carries the device key this session was admitted by.
         fingerprint: s.controls.fingerprint.clone(),
+        plane: s.plane,
         mode: crate::events::mode_str(width, height, fps),
         hdr: s.hdr,
     }
@@ -566,6 +575,8 @@ pub struct Registration {
     pub client: String,
     /// Display name (trust-store, else sanitized Hello). `None` if nameless.
     pub client_name: Option<String>,
+    /// Which plane serves it.
+    pub plane: crate::events::Plane,
     pub hdr: bool,
     /// Bring-up total slot (hello → first packet), ms. 0 until first packet.
     pub ttff_ms: Arc<AtomicU32>,
@@ -603,6 +614,7 @@ pub fn register(reg: Registration) -> LiveSessionGuard {
         force_idr,
         client,
         client_name,
+        plane,
         hdr,
         ttff_ms,
         last_resize_ms,
@@ -619,7 +631,9 @@ pub fn register(reg: Registration) -> LiveSessionGuard {
     let id = next_id();
     // A standing title policy reaches a session that arrives under it.
     if let Some(p) = AUDIO_POLICY.lock().unwrap().as_mut() {
-        if policy_mutes(p.sessions, &p.launcher, &client, join) {
+        if plane == crate::events::Plane::Native
+            && policy_mutes(p.sessions, &p.launcher, &client, join)
+        {
             controls.set_muted(true);
             p.muted.push(id);
         }
@@ -634,6 +648,7 @@ pub fn register(reg: Registration) -> LiveSessionGuard {
         force_idr,
         client,
         client_name,
+        plane,
         hdr,
         ttff_ms,
         last_resize_ms,
@@ -790,6 +805,7 @@ pub fn snapshot() -> Vec<SessionSnapshot> {
                 bitrate_kbps: s.bitrate_kbps.load(Ordering::Relaxed),
                 codec: s.codec,
                 client_name: s.client_name.clone(),
+                plane: s.plane,
                 capture_health: s
                     .capture_health
                     .lock()
@@ -1023,6 +1039,18 @@ pub fn force_idr(id: u64) -> bool {
         })
 }
 
+/// Whether this session is served by the plane whose per-session mute, access and player
+/// lanes exist. `None` = no such session. The compat plane registers (so it has an id, a
+/// stop and a keyframe) but carries none of those three.
+pub fn has_native_lanes(id: u64) -> Option<bool> {
+    registry()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .find(|s| s.id == id)
+        .map(|s| s.plane == crate::events::Plane::Native)
+}
+
 /// This session's management handles, cloned out so the caller acts without the
 /// registry lock. `None` = no such session (the routes' 404).
 pub fn controls(id: u64) -> Option<SessionControls> {
@@ -1045,6 +1073,53 @@ pub fn force_idr_all() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A compat-plane session is a registry entry like any other, which is what gives the
+    /// console an id to stop — before, a Moonlight session could only be ended host-wide.
+    #[test]
+    fn a_compat_session_is_stoppable_by_its_own_id() {
+        // No serializing lock: the registry is shared, but this is its only compat session.
+        let stop = Arc::new(AtomicBool::new(false));
+        let quit = Arc::new(AtomicBool::new(false));
+        let _guard = register(Registration {
+            mode: Arc::new(AtomicU64::new(0)),
+            bitrate_kbps: Arc::new(AtomicU32::new(20_000)),
+            codec: Codec::H265,
+            stop: stop.clone(),
+            quit: quit.clone(),
+            force_idr: Arc::new(AtomicBool::new(false)),
+            client: "9f86d0818840".into(),
+            client_name: Some("Living Room TV".into()),
+            plane: crate::events::Plane::Gamestream,
+            hdr: true,
+            ttff_ms: Arc::new(AtomicU32::new(0)),
+            last_resize_ms: Arc::new(AtomicU32::new(0)),
+            game: None,
+            capture_health: Arc::new(Mutex::new(None)),
+            join: false,
+            controls: SessionControls::open(),
+            bit_depth: 10,
+            chroma: ChromaFormat::Yuv420,
+            end_reason: Arc::new(AtomicU8::new(0)),
+            counters: Arc::new(SessionCounters::default()),
+            peer: None,
+        });
+        let row = snapshot()
+            .into_iter()
+            .find(|s| s.plane == crate::events::Plane::Gamestream)
+            .expect("the compat session is listed like a native one");
+        assert_eq!(row.client_name.as_deref(), Some("Living Room TV"));
+        assert!(stop_quit(row.id), "its id addresses it");
+        assert!(
+            stop.load(Ordering::SeqCst),
+            "the stream loop is told to end"
+        );
+        assert!(
+            quit.load(Ordering::SeqCst),
+            "and that the end was deliberate"
+        );
+        assert!(!stop_quit(u64::MAX), "an id nothing holds stops nothing");
+    }
 
     fn fake_session(client: &str) -> (LiveSessionGuard, Arc<AtomicBool>, Arc<AtomicBool>) {
         fake_session_with_reason(
@@ -1070,6 +1145,7 @@ mod tests {
             force_idr: Arc::new(AtomicBool::new(false)),
             client: client.into(),
             client_name: None,
+            plane: crate::events::Plane::Native,
             hdr: false,
             ttff_ms: Arc::new(AtomicU32::new(0)),
             last_resize_ms: Arc::new(AtomicU32::new(0)),
@@ -1105,6 +1181,7 @@ mod tests {
             force_idr: Arc::new(AtomicBool::new(false)),
             client: client.into(),
             client_name: None,
+            plane: crate::events::Plane::Native,
             hdr: false,
             ttff_ms: Arc::new(AtomicU32::new(0)),
             last_resize_ms: Arc::new(AtomicU32::new(0)),

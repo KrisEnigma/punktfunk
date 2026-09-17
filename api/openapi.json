@@ -6754,7 +6754,7 @@
           },
           "name": {
             "type": "string",
-            "description": "Display name: the trust-store name (a console rename wins), else the name the client\nsent. Empty when neither, and always empty on the compat plane."
+            "description": "Display name: the trust-store name (a console rename wins), else the name the client\nsent. On the compat plane it is the name the operator gave the device, since Moonlight\nsends none. Empty when there is no name at all."
           },
           "plane": {
             "$ref": "#/components/schemas/Plane"
@@ -10719,7 +10719,8 @@
           "id",
           "client",
           "mode",
-          "hdr"
+          "hdr",
+          "plane"
         ],
         "properties": {
           "client": {
@@ -10744,6 +10745,10 @@
           "mode": {
             "type": "string",
             "description": "`WxH@Hz`, e.g. `\"3840x2160@120\"`."
+          },
+          "plane": {
+            "$ref": "#/components/schemas/Plane",
+            "description": "Which plane serves it, as `stream.*` and `game.*` also report."
           }
         }
       },
