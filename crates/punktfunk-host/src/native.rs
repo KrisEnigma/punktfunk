@@ -33,6 +33,9 @@ pub(crate) use pf_frame::thread_qos::boost_thread_priority;
 mod compositor;
 // The session's control connection, whichever transport carries it (quinn or WebTransport).
 pub(crate) mod link;
+/// A seat's Steam, up before its client asks (`design/steam-seats-warm-launch-implementation-plan.md`).
+#[cfg(target_os = "linux")]
+pub(crate) mod prewarm;
 use compositor::resolve_compositor;
 
 /// GameStream presents the same virtual pad and must pick `windows_xbox_hid` from this definition.
@@ -434,6 +437,10 @@ pub(crate) async fn serve(
         max_concurrent = opts.max_concurrent,
         "accepting sessions (concurrent)"
     );
+    // Once the host serves: a seat's Steam takes half a minute to boot, and the point is that it
+    // has already booted when its device connects.
+    #[cfg(target_os = "linux")]
+    prewarm::spawn_run("host start");
 
     loop {
         let incoming = tokio::select! {
@@ -522,6 +529,10 @@ pub(crate) async fn serve(
                     tracing::warn!(%peer, error = %detail, "session ended with error")
                 }
             }
+            // After `serve_session` returns: the stream thread is joined and this session's
+            // display lease is gone, so a pre-warm can adopt or replace what it left.
+            #[cfg(target_os = "linux")]
+            prewarm::spawn_run("session end");
         });
     }
     // Drain in-flight sessions (max_sessions reached or endpoint closed).
@@ -1776,21 +1787,14 @@ pub(crate) async fn run_admitted(
             .map(|_| {
                 // `--open` has no fingerprint; a per-accept sequence isolates at the cost of keep-alive.
                 static ANON_SEQ: AtomicU64 = AtomicU64::new(0);
-                let paired = session_fp_hex
-                    .as_deref()
-                    .map(|fp| fp[..fp.len().min(8)].to_string());
+                let paired = session_fp_hex.as_deref().map(seat_id);
                 let id = paired
                     .clone()
                     .unwrap_or_else(|| format!("anon{}", ANON_SEQ.fetch_add(1, Ordering::Relaxed)));
-                // Monitor-mode has no per-session sink — audio stays shared; input/mic still isolate.
-                let sink = crate::audio::per_session_sink_possible()
-                    .then(|| format!("punktfunk-speaker-iso-{id}"));
-                let mic_source = Some(format!("punktfunk-mic-{id}"));
-                let steam_home =
-                    seat_home_for(paired.as_deref(), pf_host_config::config().steam_seat_home);
-                tracing::info!(%id, sink = sink.as_deref().unwrap_or("-"),
+                let iso = session_isolation(&id, paired.is_some());
+                tracing::info!(%id, sink = iso.sink.as_deref().unwrap_or("-"),
                 "isolated gamescope session — per-session input/audio/mic planes");
-                crate::vdisplay::SessionIsolation::new(id, sink, mic_source, steam_home)
+                iso
             }),
     };
     // Pinned injector + swappable route. Drop at session end closes the EIS connection.
@@ -2573,6 +2577,36 @@ fn delivered_mode(
 #[cfg(target_os = "linux")]
 fn seat_home_for(paired: Option<&str>, on: bool) -> Option<std::path::PathBuf> {
     paired.filter(|_| on).map(pf_paths::seat_home)
+}
+
+/// The seat a device streams on: the head of its fingerprint. Short enough for a socket name,
+/// wide enough that two paired devices do not collide. One function, because the pre-warm has to
+/// name the same seat this session does or the registry hands its parked display to nobody.
+#[cfg(target_os = "linux")]
+fn seat_id(fp_hex: &str) -> String {
+    fp_hex[..fp_hex.len().min(8)].to_string()
+}
+
+/// The isolated planes `id` streams on. `paired` says the id is a seat rather than an
+/// `anon<seq>`, which is what earns a Steam home.
+///
+/// The registry's reuse key is `id` plus that home, so [`prewarm`] builds this value for a seat
+/// before its client connects and the connect lands on the display already standing.
+#[cfg(target_os = "linux")]
+fn session_isolation(id: &str, paired: bool) -> crate::vdisplay::SessionIsolation {
+    // Monitor-mode has no per-session sink — audio stays shared; input/mic still isolate.
+    let sink =
+        crate::audio::per_session_sink_possible().then(|| format!("punktfunk-speaker-iso-{id}"));
+    let steam_home = seat_home_for(
+        paired.then_some(id),
+        pf_host_config::config().steam_seat_home,
+    );
+    crate::vdisplay::SessionIsolation::new(
+        id.to_string(),
+        sink,
+        Some(format!("punktfunk-mic-{id}")),
+        steam_home,
+    )
 }
 
 #[cfg(test)]

@@ -635,6 +635,23 @@ impl StreamState {
             }
             None => None,
         };
+        // A Steam launch that ran under this seat's own home: remember what it streamed at, so
+        // the host can have that Steam up before this device's next connect. `vd`'s own values,
+        // not the request, because they are the registry's reuse keys.
+        #[cfg(target_os = "linux")]
+        if spawned_now
+            && launch
+                .as_deref()
+                .is_some_and(crate::vdisplay::launch_is_steam)
+        {
+            if let Some(fp) = isolation
+                .as_ref()
+                .filter(|i| i.steam_home.is_some())
+                .and_then(|_| conn.peer_fingerprint())
+            {
+                crate::native::prewarm::record(&hex::encode(fp), mode, vd.hdr(), vd.hw_cursor());
+            }
+        }
         if let Some(t) = launch_target.as_ref() {
             let _ = launch_outcome.send(launch_verdict(
                 &t.game.title,
