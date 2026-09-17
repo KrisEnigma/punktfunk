@@ -429,6 +429,36 @@ mod pool {
             })
     }
 
+    /// The create slot a display's seat owns: one create at a time per backend and isolation.
+    /// `None` for a shared-plane backend, which has no seat to collide on and never waits.
+    pub(super) fn slot_key(backend: &str, isolation: &Option<String>) -> Option<String> {
+        Some(format!("{backend}#{}", isolation.as_deref()?))
+    }
+
+    /// What a create does about its [`slot_key`] ([`super::linux::create_slot`]).
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(super) enum Slot {
+        /// Free, or not a seat at all: create now.
+        Free,
+        /// This thread holds it already. A pre-warm takes the slot across its own seat check and
+        /// the acquire beneath it is that same create, not a second one.
+        Mine,
+        /// Another thread is standing this seat up: wait, then reuse what it publishes.
+        Wait,
+    }
+
+    pub(super) fn slot_state(
+        busy: &[(String, std::thread::ThreadId)],
+        key: &str,
+        me: std::thread::ThreadId,
+    ) -> Slot {
+        match busy.iter().find(|(k, _)| k == key) {
+            Some((_, holder)) if *holder == me => Slot::Mine,
+            Some(_) => Slot::Wait,
+            None => Slot::Free,
+        }
+    }
+
     /// Live display a `mode_conflict: join` session shares: Active, same backend, mode,
     /// isolation, colourimetry and epoch, and its join name known. The first match is the
     /// oldest, which is the session admission named. The cursor mode rides each session's
@@ -936,6 +966,31 @@ mod pool {
             assert_eq!(kept_to_evict(&full, 2, None), None);
         }
 
+        /// A create waits out another thread's on the same seat — the pre-warm and that device's
+        /// own connect, which would otherwise leave two Steams under one home. Its own thread is
+        /// never waited on (the pre-warm re-enters through `acquire`), a different seat is never
+        /// delayed, and a shared-plane backend is not keyed at all.
+        #[test]
+        fn a_create_waits_only_for_another_thread_on_the_same_seat() {
+            let cafe = slot_key("gamescope", &Some("cafe0123@/seats/cafe0123".into()))
+                .expect("a seat is keyed");
+            let beef =
+                slot_key("gamescope", &Some("beef4567@/seats/beef4567".into())).expect("keyed");
+            assert_ne!(cafe, beef);
+            assert_eq!(slot_key("kwin", &None), None, "shared planes never wait");
+
+            let me = std::thread::current().id();
+            // `me` is still running, so its id cannot have been handed to that thread.
+            let other = std::thread::spawn(|| std::thread::current().id())
+                .join()
+                .expect("the probe thread");
+            let busy = vec![(cafe.clone(), other)];
+            assert_eq!(slot_state(&busy, &cafe, me), Slot::Wait);
+            assert_eq!(slot_state(&busy, &beef, me), Slot::Free);
+            assert_eq!(slot_state(&[], &cafe, me), Slot::Free);
+            assert_eq!(slot_state(&[(cafe.clone(), me)], &cafe, me), Slot::Mine);
+        }
+
         /// A parked seat is spare capacity: it holds no session out at admission, and a create
         /// at the cap takes it before any lingering display.
         #[test]
@@ -1184,7 +1239,7 @@ mod linux {
     use super::pool::{
         assemble_displays, assign_group_ids, budget_count, epoch_matches, group_key,
         hand_off_restore, in_group, join_target, kept_to_evict, kept_to_retire, position_for_new,
-        release_linger, take_expired, Entry, Restore, Row,
+        release_linger, slot_key, slot_state, take_expired, Entry, Restore, Row, Slot,
     };
     use super::DisplayInfo;
     use crate::lifecycle::{self, Release};
@@ -1213,6 +1268,74 @@ mod linux {
         })
     }
 
+    /// Bound on waiting out another create for the same seat. A create publishes its entry within
+    /// its own budget — gamescope's node wait is 15 s — and a waiter past this creates anyway: a
+    /// second compositor is recoverable, a connect that never returns is not.
+    const SEAT_CREATE_WAIT: Duration = Duration::from_secs(30);
+
+    /// Creates in flight, [`slot_key`] and the thread running each.
+    static CREATING: Mutex<Vec<(String, std::thread::ThreadId)>> = Mutex::new(Vec::new());
+    static CREATE_DONE: std::sync::Condvar = std::sync::Condvar::new();
+
+    /// Hold this seat's create slot for the length of a create.
+    ///
+    /// A create publishes no pool entry for about a second, so two on one seat — a pre-warm and
+    /// that device's own connect — leave two compositors under one Steam home, each killing the
+    /// other's. The waiter takes the slot only once the entry it wanted exists, so the reuse
+    /// probe under the same slot finds it. Shared-plane backends are never keyed.
+    ///
+    /// LOCK ORDER: this slot, then the pool lock. Never the reverse.
+    fn create_slot(backend: &'static str, isolation: &Option<String>) -> SeatCreate {
+        let Some(key) = slot_key(backend, isolation) else {
+            return SeatCreate(None);
+        };
+        let me = std::thread::current().id();
+        let mut busy = CREATING.lock().unwrap_or_else(|e| e.into_inner());
+        match slot_state(&busy, &key, me) {
+            Slot::Mine => return SeatCreate(None),
+            Slot::Free => {}
+            Slot::Wait => {
+                let since = Instant::now();
+                let (guard, wait) = CREATE_DONE
+                    .wait_timeout_while(busy, SEAT_CREATE_WAIT, |b| {
+                        slot_state(b, &key, me) == Slot::Wait
+                    })
+                    .unwrap_or_else(|e| e.into_inner());
+                busy = guard;
+                if wait.timed_out() {
+                    tracing::warn!(
+                        seat = %key,
+                        secs = SEAT_CREATE_WAIT.as_secs(),
+                        "virtual display: a create on this seat never finished — creating beside it"
+                    );
+                } else {
+                    tracing::info!(
+                        seat = %key,
+                        waited_ms = since.elapsed().as_millis() as u64,
+                        "virtual display: waited out the create already standing this seat up"
+                    );
+                }
+            }
+        }
+        busy.push((key.clone(), me));
+        SeatCreate(Some(key))
+    }
+
+    /// Releases the seat's create slot ([`create_slot`]). `None` held nothing.
+    struct SeatCreate(Option<String>);
+
+    impl Drop for SeatCreate {
+        fn drop(&mut self) {
+            let Some(key) = self.0.take() else { return };
+            let mut busy = CREATING.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(i) = busy.iter().position(|(k, _)| *k == key) {
+                busy.swap_remove(i);
+            }
+            drop(busy);
+            CREATE_DONE.notify_all();
+        }
+    }
+
     /// Pre-warm `vd` at `mode` and keep it until a session claims it. `Some(true)` created the
     /// compositor; `Some(false)` adopted a display already kept.
     ///
@@ -1222,6 +1345,9 @@ mod linux {
     pub(super) fn park(vd: &mut Box<dyn VirtualDisplay>, mode: Mode) -> Result<Option<bool>> {
         let (backend, isolation) = (vd.name(), vd.isolation_key());
         let key = (mode, vd.hdr(), vd.hw_cursor());
+        // Taken before the check and held past the lease drop below, so a connect arriving while
+        // this seat is being stood up waits and then reuses it instead of spawning its own.
+        let _seat = create_slot(backend, &isolation);
         // Under the pool lock, so a session that already registered its display wins the race.
         let held = REG.get().is_some_and(|r| {
             r.entries.lock().unwrap().iter().any(|e| {
@@ -1403,6 +1529,10 @@ mod linux {
                 return Ok(out);
             }
         }
+
+        // Held across the reuse probe and the create below: a second create on this seat is a
+        // second compositor under one Steam home, and a waiter must see what the first publishes.
+        let _seat = create_slot(backend, &isolation);
 
         // Gated on `poolable_now()`: gamescope managed/attach shares the
         // `"gamescope"` name with a bare spawn and must not reuse it.
