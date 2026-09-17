@@ -275,6 +275,12 @@ impl Ring {
         self.committed = true;
         self.closing = false;
         self.progress = 1.0;
+        // The centre is where Confirm already goes with nothing picked, so light it: an
+        // opening ring that highlights nothing tells the player their first Enter has no
+        // target, when in fact it opens the sheet. `edit_at` moves it to a disc after this.
+        // Lit on arrival rather than eased in — it is the starting state, not a move.
+        self.highlight = Some(6);
+        self.hot[6] = 1.0;
         self.touch();
     }
 
@@ -824,9 +830,18 @@ impl Ring {
     }
 
     /// Pad vocabulary on keys. Always consumed while open, including unknown keys.
+    ///
+    /// Tab is the keyboard's own step, and the only one that visits every stop: the six
+    /// discs then the centre. The arrows speak the pad's language, where the centre is a
+    /// released stick rather than a direction.
     pub fn key(&mut self, key: Key) -> bool {
         if !self.open() {
             return false;
+        }
+        if key == Key::Tab && !self.sheet && self.editing.is_none() {
+            self.touch();
+            self.highlight = Some((self.highlight.unwrap_or(6) + 1) % 7);
+            return true;
         }
         let ev = match key {
             Key::Escape => MenuEvent::Back,
@@ -835,6 +850,8 @@ impl Ring {
             Key::Down => MenuEvent::Move(MenuDir::Down),
             Key::Left => MenuEvent::Move(MenuDir::Left),
             Key::Right => MenuEvent::Move(MenuDir::Right),
+            // In the sheet it is the list's next row; the ring arm above took it otherwise.
+            Key::Tab => MenuEvent::Move(MenuDir::Down),
             Key::Y => MenuEvent::Secondary,
             _ => return true,
         };
@@ -884,12 +901,15 @@ impl Ring {
                 self.highlight = Some(if h >= 6 { 5 } else { (h + 5) % 6 });
                 Some(MenuPulse::Move)
             }
+            // Up is 12 o'clock, down is 6 — and once there, on into the centre, which is
+            // inside the ring. Without that a keyboard reaches the sheet only through Y,
+            // a letter nothing on screen names.
             MenuEvent::Move(MenuDir::Up) => {
-                self.highlight = Some(0);
+                self.highlight = Some(if h == 0 { 6 } else { 0 });
                 Some(MenuPulse::Move)
             }
             MenuEvent::Move(MenuDir::Down) => {
-                self.highlight = Some(3);
+                self.highlight = Some(if h == 3 { 6 } else { 3 });
                 Some(MenuPulse::Move)
             }
             MenuEvent::Secondary => {
@@ -1474,6 +1494,41 @@ mod tests {
         assert!(!r.open());
     }
 
+    /// A keyboard has no stick to release, so every stop has to be reachable from the keys.
+    /// The centre used to be reachable only through Y, which nothing on screen names, and the
+    /// dial opened highlighting nothing while Enter already meant the centre.
+    #[test]
+    fn a_keyboard_reaches_every_stop_on_the_dial() {
+        let mut r = Ring::new();
+        r.set_facts(&facts());
+        r.input(RingInput::Toggle { x: 1.0, y: 1.0 });
+        assert_eq!(r.highlight(), Some(6), "the dial opens on the centre");
+
+        // Tab tours the six discs and comes back through the centre.
+        for k in 0..6 {
+            r.key(Key::Tab);
+            assert_eq!(r.highlight(), Some(k));
+        }
+        r.key(Key::Tab);
+        assert_eq!(r.highlight(), Some(6), "after the last disc, the centre");
+
+        // Up is 12 o'clock, and from 12 o'clock it is the centre. Down the same at 6.
+        r.key(Key::Up);
+        assert_eq!(r.highlight(), Some(0));
+        r.key(Key::Up);
+        assert_eq!(r.highlight(), Some(6));
+        r.key(Key::Down);
+        assert_eq!(r.highlight(), Some(3));
+        r.key(Key::Down);
+        assert_eq!(r.highlight(), Some(6));
+
+        // The arrows still step the ring itself, and never onto the centre.
+        r.key(Key::Right);
+        assert_eq!(r.highlight(), Some(0));
+        r.key(Key::Left);
+        assert_eq!(r.highlight(), Some(5));
+    }
+
     #[test]
     fn end_stream_needs_two_presses_and_a_toggle_keeps_the_ring_open() {
         let mut r = Ring::new();
@@ -1638,7 +1693,7 @@ mod tests {
         let mut r = Ring::new();
         r.set_facts(&facts());
         r.input(RingInput::Toggle { x: 1.0, y: 1.0 });
-        assert_eq!(r.highlight, None, "centre until moved");
+        assert_eq!(r.highlight, Some(6), "the centre, lit, until moved");
         r.menu(MenuEvent::Move(MenuDir::Right));
         assert_eq!(
             r.highlight,

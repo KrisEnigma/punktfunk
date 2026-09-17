@@ -1305,12 +1305,21 @@ fn run_inner(mut opts: SessionOpts, mut mode: ModeCtl) -> Result<Option<Outcome>
             if !ring_open {
                 ring_opener = None;
             }
-            // The ring takes the pointer plane too: it eats every event while open, so a
-            // button already down would never see its release forwarded and would stay
-            // pressed on the host.
-            if ring_open {
-                if let Some(cap) = stream.as_mut().and_then(|s| s.capture.as_mut()) {
+            // The ring eats every pointer event, so a button already down would stay pressed
+            // on the host without a flush. It also needs a pointer to aim with: under a lock
+            // the cursor is hidden and every event carries the position the lock froze, so
+            // capture hands the local one back while it is up and takes the window on close.
+            if let Some(cap) = stream.as_mut().and_then(|s| s.capture.as_mut()) {
+                if ring_open {
                     cap.flush_held();
+                }
+                if cap.captured() {
+                    let (on, desktop, grants) = if ring_open {
+                        (false, false, 0)
+                    } else {
+                        (true, cap.desktop(), cap.grants())
+                    };
+                    apply_capture(&mut window, &mouse, on, desktop, inhibit_shortcuts, grants);
                 }
             }
         }
