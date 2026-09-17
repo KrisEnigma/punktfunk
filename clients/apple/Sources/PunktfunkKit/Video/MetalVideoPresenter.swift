@@ -59,11 +59,8 @@ enum WindowedPresentMode: String, Sendable {
 /// render "way too bright" (no `edrMetadata` → no reference-white anchoring); a LARGER value renders
 /// dimmer.
 ///
-/// ⚠️ This is one half of a pair: the host has to map SDR content into the PQ container at the SAME
-/// luminance, and pins it to 203 in `pf-vdisplay`'s `SDR_REFERENCE_WHITE_NITS`. When they disagree
-/// every pixel is off by the ratio — a gamescope host left on gamescope's own 400-nit default put
-/// the stream nearly a stop bright, which read as a glaring, over-saturated Steam UI and washed-out
-/// HDR game content at the same time. Change one end without the other and that gap re-opens.
+/// ⚠️ One half of a pair: hosts map SDR into the PQ container at the same 203 nits (gamescope's
+/// `SDR_REFERENCE_WHITE_NITS`). A host-side SDR brightness setting deliberately moves SDR off it.
 private let hdrReferenceWhiteNits: Float = 203.0
 
 /// The SDR layer's colour tag. `colorspace = nil` means NO colour matching: the BT.709-encoded
