@@ -176,7 +176,10 @@ impl SeatDev {
         out
     }
 
-    /// The other seats on this box: a directory beside ours holding a `hidraw/` is one.
+    /// The other seats on this box, by the name we gave them
+    /// ([`pf_paths::is_gamescope_seat_dev_dir`]). [`place`](Self::place) deletes inside these,
+    /// so a directory another program left in the runtime dir is never one of them, however it
+    /// is furnished.
     fn siblings(&self) -> Vec<PathBuf> {
         let Some(parent) = self.root.parent() else {
             return Vec::new();
@@ -186,7 +189,7 @@ impl SeatDev {
             .flatten()
             .flatten()
             .map(|e| e.path())
-            .filter(|d| *d != self.root && d.join("hidraw").is_dir())
+            .filter(|d| *d != self.root && pf_paths::is_gamescope_seat_dev_dir(d))
             .collect()
     }
 
@@ -285,9 +288,14 @@ mod tests {
             b
         }
 
+        /// A seat root named as the host names one, so the sibling rule sees it.
+        fn root(&self, id: &str) -> PathBuf {
+            self.seats.join(format!("punktfunk-gamescope-{id}-dev"))
+        }
+
         fn seat(&self, id: &str) -> SeatDev {
             SeatDev {
-                root: self.seats.join(format!("pf-{id}-dev")),
+                root: self.root(id),
                 dev: self.dev.clone(),
             }
         }
@@ -305,7 +313,7 @@ mod tests {
         }
 
         fn links(&self, id: &str) -> Vec<String> {
-            let root = self.seats.join(format!("pf-{id}-dev"));
+            let root = self.root(id);
             let mut out: Vec<String> = ["hidraw", "input"]
                 .iter()
                 .flat_map(|sub| {
@@ -397,6 +405,27 @@ mod tests {
             .unwrap();
         assert_eq!(b.links("aaaa1111"), ["event0", "hidraw0"]);
         assert_eq!(b.links("bbbb2222"), ["event1", "hidraw1"]);
+    }
+
+    /// A number is taken back only from a seat. Another program's runtime directory is not one
+    /// however it is furnished, and a create must not delete inside it.
+    #[test]
+    fn a_foreign_directory_that_holds_hidraw_is_left_alone() {
+        let b = Fixture::new("foreign");
+        let foreign = b.seats.join("some-app-runtime");
+        std::fs::create_dir_all(foreign.join("hidraw")).unwrap();
+        std::fs::write(foreign.join("hidraw/hidraw0"), b"keep me").unwrap();
+        let (_pad, _links) = b
+            .seat("cafe0123")
+            .create(|| {
+                b.plug(&["hidraw0", "event0"]);
+                Ok(())
+            })
+            .unwrap();
+        assert!(
+            foreign.join("hidraw/hidraw0").exists(),
+            "a directory we did not name is not another seat"
+        );
     }
 
     /// A seat that could not learn its nodes keeps the whole window — and the next pad's number

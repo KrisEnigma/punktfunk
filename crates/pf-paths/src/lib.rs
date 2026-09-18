@@ -28,6 +28,12 @@ pub fn gamescope_ei_socket_file_for(id: &str) -> PathBuf {
     gamescope_ei_relay(&format!("punktfunk-gamescope-{id}-ei"))
 }
 
+/// What a seat device directory is called. [`gamescope_seat_dev_dir`] writes the
+/// name, [`is_gamescope_seat_dev_dir`] reads it, and one spelling serves both:
+/// `pf-inject` takes a node number off a sibling seat by deleting inside it.
+const SEAT_DEV_PREFIX: &str = "punktfunk-gamescope-";
+const SEAT_DEV_SUFFIX: &str = "-dev";
+
 /// `$XDG_RUNTIME_DIR/punktfunk-gamescope-{id}-dev` — the device nodes a sandboxed
 /// seat may open. `hostdev/` is where its sandbox mounts the real `/dev`, so the
 /// links under `input/` and `hidraw/` resolve there and nowhere on this side.
@@ -35,7 +41,18 @@ pub fn gamescope_ei_socket_file_for(id: &str) -> PathBuf {
 /// caller creates it 0700 ([`create_private_dir`]).
 #[cfg(target_os = "linux")]
 pub fn gamescope_seat_dev_dir(id: &str) -> PathBuf {
-    gamescope_ei_relay(&format!("punktfunk-gamescope-{id}-dev"))
+    gamescope_ei_relay(&format!("{SEAT_DEV_PREFIX}{id}{SEAT_DEV_SUFFIX}"))
+}
+
+/// Is this one of our seat device directories? The name is the whole test: another
+/// seat is a directory we made, never one that happens to hold the same folders.
+/// Ungated — `pf-inject` carries the link arithmetic on every target.
+pub fn is_gamescope_seat_dev_dir(path: &std::path::Path) -> bool {
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .and_then(|n| n.strip_prefix(SEAT_DEV_PREFIX))
+        .and_then(|n| n.strip_suffix(SEAT_DEV_SUFFIX))
+        .is_some_and(|id| !id.is_empty())
 }
 
 #[cfg(target_os = "linux")]
@@ -433,6 +450,21 @@ mod tests {
         let dev = gamescope_seat_dev_dir("cafe0123");
         assert_eq!(dev.parent(), global.parent());
         assert_ne!(dev, gamescope_seat_dev_dir("dead0001"));
+        // What we write is what we recognise, or a prune reaches somebody else's directory.
+        assert!(is_gamescope_seat_dev_dir(&dev));
+        assert!(!is_gamescope_seat_dev_dir(&per), "the relay is not a seat");
+        for other in [
+            "hidraw",
+            "punktfunk-gamescope--dev",
+            "some-app-dev",
+            "pipewire-0",
+            "",
+        ] {
+            assert!(
+                !is_gamescope_seat_dev_dir(std::path::Path::new(other)),
+                "{other}"
+            );
+        }
     }
 
     #[cfg(target_os = "linux")]
