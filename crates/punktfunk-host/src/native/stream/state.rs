@@ -652,11 +652,25 @@ impl StreamState {
                 crate::native::prewarm::record(&hex::encode(fp), mode, vd.hdr(), vd.hw_cursor());
             }
         }
+        // This seat's Steam has no account, so the stream shows its sign-in screen and not the
+        // game. Read before the verdict: the player is told what to do, and no client holds this
+        // title's cover over the screen they have to act on.
+        #[cfg(target_os = "linux")]
+        let seat_sign_in = spawned_now
+            && launch
+                .as_deref()
+                .is_some_and(crate::vdisplay::launch_is_steam)
+            && isolation
+                .as_ref()
+                .is_some_and(crate::vdisplay::seat_needs_sign_in);
+        #[cfg(not(target_os = "linux"))]
+        let seat_sign_in = false;
         if let Some(t) = launch_target.as_ref() {
             let _ = launch_outcome.send(launch_verdict(
                 &t.game.title,
                 launch_claim.as_ref(),
                 spawned_now,
+                seat_sign_in,
             ));
         }
         if let Some(c) = launch_claim.as_ref() {
@@ -793,6 +807,16 @@ impl StreamState {
             )
         });
         let game_shared = game_lease.as_ref().map(|l| l.shared());
+        // The watcher keeps its own grace: the game the player starts after signing in is
+        // followed as any other.
+        if seat_sign_in {
+            if let Some(g) = game_shared.as_ref() {
+                g.launch_hold_ends();
+            }
+            tracing::info!(
+                "this seat's Steam has no account yet — the stream shows its sign-in screen"
+            );
+        }
         let game_life = game_lease.map(|lease| {
             crate::gamelease::SessionGuard::new(
                 lease,
@@ -1122,17 +1146,29 @@ pub(super) fn adopt_built_bitrate(
 
 /// What this session's launch came to, in the client's vocabulary.
 ///
-/// One verdict from the two facts the launch site has: whether it spawned, and
-/// what the registry adopted against. `Spawned` says nothing — the player asked
-/// for a game and is about to get one; only the other three need words.
+/// One verdict from the facts the launch site has: whether it spawned, what the
+/// registry adopted against, and whether the seat it spawned into still owes
+/// Steam a sign-in. `Spawned` says nothing — the player asked for a game and is
+/// about to get one; the rest need words.
 fn launch_verdict(
     title: &str,
     claim: Option<&crate::launchreg::Claim>,
     spawned: bool,
+    sign_in: bool,
 ) -> punktfunk_core::quic::LaunchOutcome {
     use crate::launchreg::Liveness;
     use punktfunk_core::quic::{LaunchOutcome, LaunchOutcomeKind as Kind};
     if spawned {
+        // The host does not re-send this launch after the sign-in, so the sentence says who does.
+        if sign_in {
+            return LaunchOutcome::new(
+                Kind::SignInNeeded,
+                &format!(
+                    "Steam on this seat isn't signed in yet. Sign in on the stream, then start \
+                     {title} from Big Picture."
+                ),
+            );
+        }
         return LaunchOutcome::new(Kind::Spawned, "");
     }
     match claim.and_then(|c| c.adopted()) {
@@ -1229,12 +1265,12 @@ mod tests {
     fn the_launch_verdict_follows_what_the_registry_adopted() {
         use punktfunk_core::quic::LaunchOutcomeKind as Kind;
 
-        let spawned = launch_verdict("Quail", None, true);
+        let spawned = launch_verdict("Quail", None, true, false);
         assert_eq!(spawned.kind, Kind::Spawned);
         assert!(spawned.message.is_empty());
         assert!(!spawned.kind.needs_telling());
 
-        let refused = launch_verdict("Quail", None, false);
+        let refused = launch_verdict("Quail", None, false, false);
         assert_eq!(refused.kind, Kind::Refused);
         assert!(refused.message.starts_with("Couldn't start Quail"));
         assert!(refused.kind.needs_telling());
@@ -1245,11 +1281,34 @@ mod tests {
         // Nothing adopted, inside the in-flight window: the host cannot see it.
         let blind = crate::launchreg::claim(fp, app, false, Some(2.0));
         assert!(!blind.must_spawn());
-        let out = launch_verdict("Quail", Some(&blind), false);
+        let out = launch_verdict("Quail", Some(&blind), false, false);
         assert_eq!(out.kind, Kind::AdoptedUnknown);
         assert!(out.message.contains("Start it again"));
         assert!(out.kind.needs_telling());
         blind.abandon();
         drop(first);
+    }
+
+    /// A seat whose Steam has no account is the one telling verdict that is not a failure: the
+    /// launch did reach Steam, and the screen the player has to act on is already streaming.
+    /// Every other launch is untouched by it.
+    #[test]
+    fn a_seat_that_owes_a_sign_in_says_so_instead_of_staying_silent() {
+        use punktfunk_core::quic::LaunchOutcomeKind as Kind;
+
+        let out = launch_verdict("Quail", None, true, true);
+        assert_eq!(out.kind, Kind::SignInNeeded);
+        assert!(out.kind.needs_telling());
+        assert!(out.message.contains("isn't signed in"));
+        assert!(out.message.contains("Quail"));
+        // No seat home, no Steam launch, nothing spawned: byte-for-byte what it said before.
+        assert_eq!(
+            launch_verdict("Quail", None, true, false).kind,
+            Kind::Spawned
+        );
+        assert_eq!(
+            launch_verdict("Quail", None, false, true).kind,
+            Kind::Refused
+        );
     }
 }
