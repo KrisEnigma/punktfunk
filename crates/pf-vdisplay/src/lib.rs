@@ -614,6 +614,18 @@ pub fn seat_device_dir(iso: &SessionIsolation) -> Option<std::path::PathBuf> {
     gamescope::sandbox::plan(Some(iso), iso.steam_home.is_some()).dev()
 }
 
+/// Does this session's seat still owe Steam a sign-in?
+///
+/// A seat home carries no account, so the first Steam launch on it shows the sign-in screen
+/// rather than the game. `false` for every session without a seat home of its own — the box's
+/// Steam is signed in already (`vdisplay/linux/gamescope/seat.rs`).
+#[cfg(target_os = "linux")]
+pub fn seat_needs_sign_in(iso: &SessionIsolation) -> bool {
+    iso.steam_home
+        .as_deref()
+        .is_some_and(gamescope::seat::needs_sign_in)
+}
+
 /// Can a gamescope session on this host stream 10-bit BT.2020 PQ?
 ///
 /// Settled **before spawn** — punktfunk/1 Welcome fixes bit depth and cannot

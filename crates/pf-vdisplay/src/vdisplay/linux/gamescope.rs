@@ -23,7 +23,7 @@ mod heads;
 #[path = "gamescope/sandbox.rs"]
 pub(crate) mod sandbox;
 #[path = "gamescope/seat.rs"]
-mod seat;
+pub(crate) mod seat;
 #[path = "gamescope/splash.rs"]
 mod splash;
 use discovery::{

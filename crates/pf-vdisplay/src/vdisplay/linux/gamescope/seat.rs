@@ -5,7 +5,8 @@
 //! can play at once. [`ensure_home`] provisions it once by reflinking the box's install without
 //! its account or its library; [`env`] is what the nested command is given.
 //!
-//! The clone carries no credentials, so every seat signs in to Steam once.
+//! The clone carries no credentials, so every seat signs in to Steam once, and
+//! [`needs_sign_in`] says whether that is still owed.
 //! Evidence: `design/steam-seats-warm-launch-implementation-plan.md`.
 
 use anyhow::{bail, Context, Result};
@@ -25,6 +26,9 @@ const STEAM_MARKER: &str = ".local/share/Steam/steam.sh";
 /// Top-level `*.vdf` (`local.vdf`, `loginusers.vdf`) goes with them.
 const CLONE_SKIP: &[&str] = &["config", "userdata", "appcache", "steamapps", "logs"];
 
+/// Steam's account list, written under the seat home once an account has signed in there.
+const LOGIN_USERS_REL: &str = ".local/share/Steam/config/loginusers.vdf";
+
 /// A reflink clone is metadata only. Anything slower is a filesystem without reflink support,
 /// where `cp` refuses outright and Steam bootstraps itself instead.
 const CLONE_BUDGET: Duration = Duration::from_secs(60);
@@ -34,6 +38,28 @@ const CLONE_BUDGET: Duration = Duration::from_secs(60);
 /// Steam in an empty directory instead of talking to the one the session is showing.
 pub(super) fn has_steam(home: &Path) -> bool {
     home.join(STEAM_REL).is_dir()
+}
+
+/// Must the player sign in before this seat can play?
+///
+/// A seat's clone carries no account, so its first launch lands on Steam's sign-in screen. A home
+/// with no Steam of its own is not one: that launch shares the box's Steam, which has an account.
+pub(crate) fn needs_sign_in(home: &Path) -> bool {
+    has_steam(home) && !remembers_an_account(&login_users(home))
+}
+
+/// This home's `loginusers.vdf`. Empty when nobody has ever signed in here.
+fn login_users(home: &Path) -> String {
+    std::fs::read_to_string(home.join(LOGIN_USERS_REL)).unwrap_or_default()
+}
+
+/// Does the file name an account Steam signs itself in as? Text VDF: an account block carrying
+/// `RememberPassword` `1`. Without one Steam asks the player, whatever else the file holds.
+fn remembers_an_account(vdf: &str) -> bool {
+    vdf.lines().any(|line| {
+        let mut fields = line.split('"').skip(1);
+        fields.next() == Some("RememberPassword") && fields.nth(1) == Some("1")
+    })
 }
 
 /// The seat's `HOME`, provisioned from the box's Steam the first time it is used.
@@ -205,6 +231,68 @@ fn library_folders_vdf(paths: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Steam writes `RememberPassword` per account; one that remembers is one the seat signs in
+    /// as. Everything else — no file, no accounts, an account that forgot — is a sign-in owed.
+    #[test]
+    fn a_seat_is_signed_in_once_one_account_remembers_itself() {
+        let account = |id: &str, remembers: &str| {
+            format!(
+                "\t\"{id}\"\n\t{{\n\t\t\"AccountName\"\t\t\"a{id}\"\n\t\t\
+                 \"RememberPassword\"\t\t\"{remembers}\"\n\t\t\"MostRecent\"\t\t\"1\"\n\t}}\n"
+            )
+        };
+        let users = |blocks: &str| format!("\"users\"\n{{\n{blocks}}}\n");
+        assert!(
+            !remembers_an_account(""),
+            "an empty file is nobody signed in"
+        );
+        assert!(
+            !remembers_an_account(&users("")),
+            "no account is nobody signed in"
+        );
+        assert!(
+            !remembers_an_account(&users(&account("76561198000000001", "0"))),
+            "an account that does not remember its password still faces the sign-in screen"
+        );
+        assert!(remembers_an_account(&users(&account(
+            "76561198000000001",
+            "1"
+        ))));
+        let two = users(&format!(
+            "{}{}",
+            account("76561198000000001", "0"),
+            account("76561198000000002", "1")
+        ));
+        assert!(two.matches("RememberPassword").count() == 2 && remembers_an_account(&two));
+        assert!(
+            !remembers_an_account("\t\t\"RememberPasswords\"\t\t\"1\"\n"),
+            "only that key counts"
+        );
+    }
+
+    /// The whole rule on disk: a seat with a Steam and no account owes a sign-in; the same home
+    /// with Steam's file does not; and a home with no Steam is the box's own, which is signed in.
+    #[test]
+    fn only_a_seat_with_a_steam_of_its_own_can_owe_a_sign_in() {
+        let home = std::env::temp_dir().join(format!("pf-seat-signin-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        assert!(
+            !needs_sign_in(&home),
+            "a home with no Steam shares the box's"
+        );
+        std::fs::create_dir_all(home.join(STEAM_REL)).expect("fake seat Steam");
+        assert!(needs_sign_in(&home), "a seat's Steam with no account list");
+        let config = home.join(LOGIN_USERS_REL);
+        std::fs::create_dir_all(config.parent().unwrap()).expect("config dir");
+        std::fs::write(
+            &config,
+            "\"users\"\n{\n\t\"7\"\n\t{\n\t\t\"RememberPassword\"\t\t\"1\"\n\t}\n}\n",
+        )
+        .expect("write loginusers");
+        assert!(!needs_sign_in(&home));
+        let _ = std::fs::remove_dir_all(&home);
+    }
 
     /// The account and the library stay on the box; everything else is what makes Steam run.
     #[test]
