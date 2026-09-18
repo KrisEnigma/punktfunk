@@ -29,8 +29,9 @@ mod splash;
 use discovery::{
     check_gamescope_version, find_gamescope_eis_socket, find_gamescope_node, gamescope_bin,
     gamescope_can_composite_external_overlay, gamescope_can_offer_refresh_rates,
-    gamescope_honours_xkb_env, gamescope_node_present, gamescope_paints_on_commit,
-    poll_managed_node, wait_for_node, wayland_name_from_log,
+    gamescope_can_resize_output, gamescope_honours_xkb_env, gamescope_node_present,
+    gamescope_paints_on_commit, poll_managed_node, resize_kept_output, wait_for_node,
+    wayland_name_from_log,
 };
 pub(crate) use discovery::{
     display_presenting, game_session_exited, gamescope_can_composite_cursor, gamescope_hdr_capable,
@@ -468,6 +469,15 @@ impl VirtualDisplay for GamescopeDisplay {
         // Nested gamescope dies with its game. `false` makes the registry recreate instead of a ~10 s
         // first-frame retry on a dead node.
         gamescope_node_present(node_id)
+    }
+
+    fn can_resize_kept(&self) -> bool {
+        // Same route test as `poolable_now`: only a spawn of ours owns the seat whose atom we set.
+        self.poolable_now() && gamescope_can_resize_output()
+    }
+
+    fn resize_kept(&mut self, seat: Option<&str>, mode: Mode) -> bool {
+        self.can_resize_kept() && resize_kept_output(seat, mode)
     }
 
     fn set_join_live(&mut self, on: bool) {

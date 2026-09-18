@@ -347,6 +347,17 @@ pub trait VirtualDisplay: Send {
     fn kept_display_alive(&mut self, _node_id: u32) -> bool {
         true
     }
+    /// May a kept display of this backend be moved to another mode in place? Gates the reuse
+    /// probe, which must not offer a candidate [`resize_kept`](Self::resize_kept) would refuse.
+    /// Default `false` — every other backend retires a kept display it cannot serve at the mode.
+    fn can_resize_kept(&self) -> bool {
+        false
+    }
+    /// Move the kept display on `seat` to `mode`, blocking until the compositor reports it.
+    /// `false` (the default, and any refusal or timeout) leaves the caller its retire-and-spawn.
+    fn resize_kept(&mut self, _seat: Option<&str>, _mode: Mode) -> bool {
+        false
+    }
 }
 
 /// Keep the first topology restore this backend instance captured; later `None` (or a subset) must
