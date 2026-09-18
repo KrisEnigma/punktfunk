@@ -523,7 +523,7 @@ pub(crate) fn gamescope_paints_on_commit() -> bool {
 /// `GAMESCOPE_SET_OUTPUT_MODE`. Below this a spawn serves the one mode it was started at, and
 /// a client asking for another retires it.
 pub(crate) fn gamescope_can_resize_output() -> bool {
-    gamescope_patch_level() >= 17 && !flags_lost()
+    gamescope_patch_level() >= 19 && !flags_lost()
 }
 
 /// The resize lands on the compositor's next pass, so this is tens of milliseconds. The
@@ -756,10 +756,10 @@ mod tests {
         assert_eq!(parse_patch_level(""), 0);
         // Multi-digit revisions must not truncate to their first digit.
         assert_eq!(parse_patch_level("3.16.25+pfhdr10 (gcc)"), 10);
-        // The runtime-resize floor: 16 keeps a kept spawn at one mode, 17 lets it move.
+        // The runtime-resize floor: 18 keeps a kept spawn at one mode, 19 lets it move.
         assert_eq!(
-            parse_patch_level("3.16.25-32-ga10c9f9e+pfhdr17 (gcc 14.2.0)"),
-            17
+            parse_patch_level("3.16.25-32-ga10c9f9e+pfhdr19 (gcc 14.2.0)"),
+            19
         );
         // A marker with no number is not a capability claim.
         assert_eq!(parse_patch_level("3.16.25+pfhdr (gcc)"), 0);

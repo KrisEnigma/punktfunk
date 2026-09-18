@@ -761,6 +761,7 @@ fn on_receive(
     if let Some(gp) = super::gamepad::decode(&pt) {
         crate::sleep_inhibit::note_input();
         if permitted(grants, GrantClass::Gamepad, drops) {
+            state.counters.input_rich.fetch_add(1, Ordering::Relaxed);
             pads.handle(&gp);
         }
         return;
@@ -771,6 +772,7 @@ fn on_receive(
     if let Some(p) = super::input::decode_pointer(&pt) {
         crate::sleep_inhibit::note_input();
         if permitted(grants, GrantClass::Pointer, drops) {
+            state.counters.input_rich.fetch_add(1, Ordering::Relaxed);
             pointer.apply(&p, |ev| {
                 let _ = inj_tx.send(ev);
             });
@@ -808,6 +810,7 @@ fn on_receive(
     // died at startup; input is lossy, so drop silently.
     for ev in events {
         if permitted(grants, classify(ev.kind), drops) {
+            state.counters.input_events.fetch_add(1, Ordering::Relaxed);
             let _ = inj_tx.send(ev);
         }
     }

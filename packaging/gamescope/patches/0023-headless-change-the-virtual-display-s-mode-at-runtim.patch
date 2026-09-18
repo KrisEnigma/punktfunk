@@ -1,4 +1,4 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From d095ba24469be8302b5bb6bb7b773b7ef54de6db Mon Sep 17 00:00:00 2001
 From: =?UTF-8?q?Enrico=20B=C3=BChler?= <enrico.buehler@unom.io>
 Date: Fri, 18 Sep 2026 12:00:00 +0200
 Subject: [PATCH] headless: change the virtual display's mode at runtime
@@ -43,7 +43,7 @@ request, so a caller can tell the two apart. Stamp pfhdr17.
  5 files changed, 92 insertions(+), 2 deletions(-)
 
 diff --git a/src/Backends/HeadlessBackend.cpp b/src/Backends/HeadlessBackend.cpp
-index 48af2e99..1466c974 100644
+index 48af2e9..1466c97 100644
 --- a/src/Backends/HeadlessBackend.cpp
 +++ b/src/Backends/HeadlessBackend.cpp
 @@ -4,6 +4,7 @@
@@ -96,7 +96,7 @@ index 48af2e99..1466c974 100644
  
  	/////////////////////////
 diff --git a/src/backend.h b/src/backend.h
-index ef8a6329..06e13c36 100644
+index ef8a632..06e13c3 100644
 --- a/src/backend.h
 +++ b/src/backend.h
 @@ -331,6 +331,12 @@ namespace gamescope
@@ -113,21 +113,21 @@ index ef8a6329..06e13c36 100644
          template <typename T>
          std::shared_ptr<BackendBlob> CreateBackendBlob( const T& thing )
 diff --git a/src/meson.build b/src/meson.build
-index 1374066c..051fbf89 100644
+index ce37037..37a78aa 100644
 --- a/src/meson.build
 +++ b/src/meson.build
-@@ -197,7 +197,8 @@ vcs_tag = run_command(vcs_tag_cmd, check: false).stdout().strip()
- #   +pfhdr14 — …and the headless connector reports HDR10 under --hdr-debug-force-support
- #   +pfhdr15 — …and the pointer reaches the whole window of a game whose swapchain is smaller
+@@ -199,7 +199,8 @@ vcs_tag = run_command(vcs_tag_cmd, check: false).stdout().strip()
  #   +pfhdr16 — …and capture maps SDR into BT.2020 colorimetrically at the live SDR-on-HDR nits
--version_tag = vcs_tag + '+pfhdr16' + ' (' + compiler_name + ' ' + compiler_version + ')'
-+#   +pfhdr17 — …and GAMESCOPE_SET_OUTPUT_MODE changes a headless output's mode at runtime
-+version_tag = vcs_tag + '+pfhdr17' + ' (' + compiler_name + ' ' + compiler_version + ')'
+ #   +pfhdr17 — …and a capture push never drops a buffer the PipeWire thread has not taken
+ #   +pfhdr18 — …and the capture stream is reliable and cycles while it waits for its consumer
+-version_tag = vcs_tag + '+pfhdr18' + ' (' + compiler_name + ' ' + compiler_version + ')'
++#   +pfhdr19 — …and GAMESCOPE_SET_OUTPUT_MODE changes a headless output's mode at runtime
++version_tag = vcs_tag + '+pfhdr19' + ' (' + compiler_name + ' ' + compiler_version + ')'
  
  gamescope_version_conf = configuration_data()
  gamescope_version_conf.set('VCS_TAG', version_tag)
 diff --git a/src/steamcompmgr.cpp b/src/steamcompmgr.cpp
-index 27d7aafe..8f4eff08 100644
+index e5bbccd..f20edad 100644
 --- a/src/steamcompmgr.cpp
 +++ b/src/steamcompmgr.cpp
 @@ -6563,6 +6563,51 @@ handle_property_notify(xwayland_ctx_t *ctx, XPropertyEvent *ev)
@@ -208,7 +208,7 @@ index 27d7aafe..8f4eff08 100644
  
  					if (server->ctx.get() == root_ctx)
 diff --git a/src/xwayland_ctx.hpp b/src/xwayland_ctx.hpp
-index d6ce90fb..3fe8f7cd 100644
+index d6ce90f..3fe8f7c 100644
 --- a/src/xwayland_ctx.hpp
 +++ b/src/xwayland_ctx.hpp
 @@ -186,6 +186,9 @@ struct xwayland_ctx_t final : public gamescope::IWaitable
@@ -221,3 +221,6 @@ index d6ce90fb..3fe8f7cd 100644
  		Atom gamescopeCursorVisibleFeedback;
  
  		Atom gamescopeSteamMaxHeight;
+-- 
+2.55.0
+

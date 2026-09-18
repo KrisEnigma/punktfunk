@@ -138,6 +138,8 @@ impl GameState {
 pub struct LeaseShared {
     pub game: GameRef,
     pub client: String,
+    /// Stable id of the device that launched it, for the game events' hook filter.
+    pub fingerprint: Option<String>,
     pub plane: crate::events::Plane,
     kind: LeaseKind,
     state: AtomicU8,
@@ -294,6 +296,8 @@ pub fn scan_scope(nested_spawn: bool, steam_launch: bool, gamescope: Option<u32>
 pub struct LeaseRequest {
     pub game: GameRef,
     pub client: String,
+    /// Stable id of the device that launched it. `None` for an anonymous client.
+    pub fingerprint: Option<String>,
     pub plane: crate::events::Plane,
     pub spec: DetectSpec,
     /// `true` when a bare-spawn gamescope owns the game.
@@ -406,6 +410,7 @@ pub fn open(req: LeaseRequest, on_exit: OnExit) -> GameLease {
     let LeaseRequest {
         game,
         client,
+        fingerprint,
         plane,
         spec,
         nested,
@@ -452,6 +457,7 @@ pub fn open(req: LeaseRequest, on_exit: OnExit) -> GameLease {
     let shared = Arc::new(LeaseShared {
         game,
         client,
+        fingerprint,
         plane,
         kind: kind.clone(),
         state: AtomicU8::new(GameState::Launching as u8),
@@ -1174,6 +1180,7 @@ pub fn game_event_ref(shared: &LeaseShared) -> crate::events::GameRefPayload {
         title: shared.game.title.clone(),
         store: shared.game.store.clone(),
         client: shared.client.clone(),
+        fingerprint: shared.fingerprint.clone(),
         plane: shared.plane,
     }
 }
@@ -1822,6 +1829,7 @@ mod tests {
                 title: format!("Test Title {id}"),
             },
             client: "Deck".into(),
+            fingerprint: None,
             plane: crate::events::Plane::Native,
             spec,
             nested,
@@ -2238,6 +2246,7 @@ mod tests {
                     title: "Handoff".into(),
                 },
                 client: "test".into(),
+                fingerprint: None,
                 plane: crate::events::Plane::Native,
                 // Real signal nothing will match: the game never shows up.
                 spec: DetectSpec::steam(999_001),
@@ -2484,6 +2493,7 @@ mod tests {
                     title: "Live Child".into(),
                 },
                 client: "test".into(),
+                fingerprint: None,
                 plane: crate::events::Plane::Native,
                 spec: DetectSpec::dir(td.path()),
                 nested: false,

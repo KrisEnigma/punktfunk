@@ -314,6 +314,10 @@ pub struct AppState {
     /// [`control`] tells the client each change (`0x010e`).
     #[cfg(feature = "gamestream")]
     pub video_hdr: VideoHdr,
+    /// This session's input tallies, bumped by [`control`] and read by the summary. One
+    /// session at a time on this plane, so the video thread clears them at stream start —
+    /// without that, `session.ended` would report zeros nobody counted.
+    pub counters: Arc<crate::session_status::SessionCounters>,
     /// Persistent screen capturer, reused across streams. The slot's `bool` is whether it was
     /// opened with the HDR offer; a stream whose negotiated `hdr` differs drops it and opens
     /// a fresh session at the right depth.
@@ -431,6 +435,7 @@ impl AppState {
             rfi_range: std::sync::Arc::new(std::sync::Mutex::new(None)),
             loss_stats: std::sync::Arc::new(GsLossStats::default()),
             video_hdr: VideoHdr::default(),
+            counters: Arc::new(crate::session_status::SessionCounters::default()),
             media_exited: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             video_cap: std::sync::Arc::new(std::sync::Mutex::new(None)),
             audio_cap: std::sync::Arc::new(std::sync::Mutex::new(None)),
@@ -453,6 +458,7 @@ impl AppState {
             force_idr: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             rfi_range: std::sync::Arc::new(std::sync::Mutex::new(None)),
             loss_stats: std::sync::Arc::new(GsLossStats::default()),
+            counters: Arc::new(crate::session_status::SessionCounters::default()),
             media_exited: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             audio_cap: std::sync::Arc::new(std::sync::Mutex::new(None)),
             stats,
