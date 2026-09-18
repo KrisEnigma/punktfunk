@@ -735,6 +735,8 @@ pub mod gamepad {
         }
         pub fn handle(&mut self, _ev: &punktfunk_core::input::GamepadEvent) {}
         pub fn pump_rumble(&mut self, _send: impl FnMut(u16, u16, u16, u16, u16)) {}
+        /// No pad is ever made here, so there is nothing to show a seat.
+        pub fn expose_in(&mut self, _dir: Option<std::path::PathBuf>) {}
     }
 }
 /// "Punktfunk Pen" uinput virtual tablet — per-session stylus the native pen plane injects
