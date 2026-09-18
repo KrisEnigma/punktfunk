@@ -120,8 +120,9 @@ pub fn acquire(
 /// A parked display outlives the operator's `keep_alive`, does not count against `max_displays`
 /// at admission, and is the first thing a create at the cap evicts.
 ///
-/// `false` when this seat holds a display a pre-warm must not take — a live session's, or a kept
-/// one at another mode, colourimetry or cursor mode — and nothing was warmed.
+/// `false` when this seat holds a display a pre-warm must not take — a live session's, another
+/// colourimetry or cursor mode, or another mode on a backend that cannot be resized — and
+/// nothing was warmed.
 #[cfg(target_os = "linux")]
 pub fn park(vd: &mut Box<dyn super::VirtualDisplay>, mode: super::Mode) -> Result<bool> {
     let backend = vd.name();
@@ -542,6 +543,78 @@ mod pool {
     /// to the desktop compositor. Liveness is `kept_display_alive` + `mark_failed`.
     pub(super) fn epoch_matches(backend: &str, entry_epoch: u64, cur_epoch: u64) -> bool {
         backend == "gamescope" || entry_epoch == cur_epoch
+    }
+
+    /// Keys a kept display must match for an acquire to take it, beside its lifecycle and
+    /// whatever the backend itself says. `resizable` drops the mode from the set: a display the
+    /// host can move to another mode under a live compositor is not *at* a mode, it is *set to*
+    /// one. Colourimetry and cursor mode stay keys — both are baked before the display exists.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn reuse_keys_match(
+        e: &Entry,
+        backend: &str,
+        mode: Mode,
+        isolation: &Option<String>,
+        hw_cursor: bool,
+        hdr: bool,
+        cur_epoch: u64,
+        resizable: bool,
+    ) -> bool {
+        e.backend == backend
+            && (e.mode == mode || resizable)
+            && e.isolation == *isolation
+            && e.hw_cursor == hw_cursor
+            && e.hdr == hdr
+            && epoch_matches(e.backend, e.epoch, cur_epoch)
+    }
+
+    /// What an acquire does with the kept display it picked.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(super) enum Kept {
+        Reuse,
+        /// Sound, just not at this mode: leave it kept and let the create below retire it.
+        Spawn,
+        /// Its compositor is gone. Drop it and hand its topology restore on.
+        Dead,
+    }
+
+    /// `resized` is the compositor's own answer to a mode it was asked to take; a refusal or a
+    /// timeout is `false`, and then this is the retire-and-spawn a mode mismatch always got.
+    pub(super) fn kept_verdict(alive: bool, resized: bool) -> Kept {
+        match (alive, resized) {
+            (false, _) => Kept::Dead,
+            (true, false) => Kept::Spawn,
+            (true, true) => Kept::Reuse,
+        }
+    }
+
+    /// One display a seat already holds, as a pre-warm reads it: live session, (HDR, hardware
+    /// cursor), mode.
+    pub(super) type Held = (bool, (bool, bool), Mode);
+
+    /// The mode a pre-warm parks this seat at, or `None` to leave the seat alone.
+    ///
+    /// A live session's compositor is never taken: a second spawn fights its socket lock and its
+    /// Steam. Another colourimetry or cursor mode would be retired, trading a warm Steam for a
+    /// colder one. A kept one at another mode is the seat's warm Steam already once the mode can
+    /// be changed under it, so it is adopted where it stands instead.
+    pub(super) fn park_mode_for(
+        held: &[Held],
+        shape: (bool, bool),
+        mode: Mode,
+        resizable: bool,
+    ) -> Option<Mode> {
+        if held
+            .iter()
+            .any(|(live, kept_shape, _)| *live || *kept_shape != shape)
+        {
+            return None;
+        }
+        match held.iter().find(|(_, _, kept)| *kept != mode) {
+            Some(_) if !resizable => None,
+            Some((_, _, kept)) => Some(*kept),
+            None => Some(mode),
+        }
     }
 
     /// Take entries past their linger deadline so the caller drops them after
@@ -1020,6 +1093,110 @@ mod pool {
             assert_eq!(kept_to_evict(&pool, 2, None), Some(2));
         }
 
+        /// The whole of what runtime resize changes about reuse: the mode stops being a key.
+        /// Everything baked before the display exists still retires a kept display.
+        #[test]
+        fn only_the_mode_stops_being_a_reuse_key_when_a_display_can_be_resized() {
+            let want = Mode {
+                width: 1920,
+                height: 1080,
+                refresh_hz: 60,
+            };
+            let other = Mode {
+                width: 1280,
+                height: 720,
+                refresh_hz: 60,
+            };
+            let mut e = test_entry("gamescope", 1, None);
+            e.mode = other;
+            e.isolation = Some("seat-a".into());
+            let keys = |e: &Entry, mode, resizable| {
+                reuse_keys_match(
+                    e,
+                    "gamescope",
+                    mode,
+                    &Some("seat-a".into()),
+                    false,
+                    false,
+                    0,
+                    resizable,
+                )
+            };
+            assert!(
+                !keys(&e, want, false),
+                "today: another mode is another display"
+            );
+            assert!(keys(&e, want, true), "resize: the mode is set, not fixed");
+            assert!(
+                keys(&e, other, false),
+                "the same mode never needed a resize"
+            );
+
+            for spoil in [
+                |e: &mut Entry| e.hdr = true,
+                |e: &mut Entry| e.hw_cursor = true,
+                |e: &mut Entry| e.isolation = Some("seat-b".into()),
+            ] {
+                let mut wrong = test_entry("gamescope", 1, None);
+                wrong.mode = other;
+                wrong.isolation = Some("seat-a".into());
+                spoil(&mut wrong);
+                assert!(
+                    !keys(&wrong, want, true) && !keys(&wrong, other, true),
+                    "resize moves a display, it does not re-plan one"
+                );
+            }
+        }
+
+        /// The compositor's own answer decides. A refusal or a timeout is the retire-and-spawn a
+        /// mode mismatch always got; only a dead one is dropped where it stands.
+        #[test]
+        fn a_kept_display_that_will_not_take_the_mode_is_spawned_past_not_buried() {
+            assert_eq!(kept_verdict(true, true), Kept::Reuse);
+            assert_eq!(kept_verdict(true, false), Kept::Spawn);
+            assert_eq!(kept_verdict(false, true), Kept::Dead);
+            assert_eq!(kept_verdict(false, false), Kept::Dead);
+        }
+
+        /// A pre-warm parks at the record's mode, adopts a kept seat where it stands once the
+        /// mode can be changed under it, and never touches a live session or another shape.
+        #[test]
+        fn a_pre_warm_adopts_a_kept_seat_only_where_the_mode_can_still_change() {
+            let record = Mode {
+                width: 1280,
+                height: 720,
+                refresh_hz: 60,
+            };
+            let kept = Mode {
+                width: 1920,
+                height: 1080,
+                refresh_hz: 120,
+            };
+            let sdr = (false, false);
+            assert_eq!(park_mode_for(&[], sdr, record, false), Some(record));
+            assert_eq!(park_mode_for(&[], sdr, record, true), Some(record));
+            assert_eq!(
+                park_mode_for(&[(false, sdr, kept)], sdr, record, true),
+                Some(kept),
+                "its Steam is up: adopt it, and let the connect move the mode"
+            );
+            assert_eq!(
+                park_mode_for(&[(false, sdr, kept)], sdr, record, false),
+                None,
+                "without resize this mode would retire it — a warm Steam for a colder one"
+            );
+            assert_eq!(
+                park_mode_for(&[(true, sdr, record)], sdr, record, true),
+                None,
+                "a second spawn fights the live session's socket lock and Steam"
+            );
+            assert_eq!(
+                park_mode_for(&[(false, (true, false), record)], sdr, record, true),
+                None,
+                "colourimetry is baked at spawn; resize does not reach it"
+            );
+        }
+
         /// Isolated multi-user spawns are deliberately concurrent: the singleton is per
         /// isolation identity, not per host.
         #[test]
@@ -1237,9 +1414,10 @@ mod linux {
     use anyhow::Result;
 
     use super::pool::{
-        assemble_displays, assign_group_ids, budget_count, epoch_matches, group_key,
-        hand_off_restore, in_group, join_target, kept_to_evict, kept_to_retire, position_for_new,
-        release_linger, slot_key, slot_state, take_expired, Entry, Restore, Row, Slot,
+        assemble_displays, assign_group_ids, budget_count, group_key, hand_off_restore, in_group,
+        join_target, kept_to_evict, kept_to_retire, kept_verdict, park_mode_for, position_for_new,
+        release_linger, reuse_keys_match, slot_key, slot_state, take_expired, Entry, Held, Kept,
+        Restore, Row, Slot,
     };
     use super::DisplayInfo;
     use crate::lifecycle::{self, Release};
@@ -1339,27 +1517,37 @@ mod linux {
     /// Pre-warm `vd` at `mode` and keep it until a session claims it. `Some(true)` created the
     /// compositor; `Some(false)` adopted a display already kept.
     ///
-    /// `None` when this seat holds a display a pre-warm must not take: a live session's, whose
-    /// compositor a second spawn would fight for the socket lock and Steam, or a kept one this
-    /// `mode` would retire — trading a warm Steam for a colder one. Its own linger ends that.
+    /// `None` when this seat holds a display a pre-warm must not take, and the mode it parks at
+    /// otherwise: [`park_mode_for`] decides both.
     pub(super) fn park(vd: &mut Box<dyn VirtualDisplay>, mode: Mode) -> Result<Option<bool>> {
         let (backend, isolation) = (vd.name(), vd.isolation_key());
-        let key = (mode, vd.hdr(), vd.hw_cursor());
+        let shape = (vd.hdr(), vd.hw_cursor());
+        let resizable = vd.can_resize_kept();
         // Taken before the check and held past the lease drop below, so a connect arriving while
         // this seat is being stood up waits and then reuses it instead of spawning its own.
         let _seat = create_slot(backend, &isolation);
         // Under the pool lock, so a session that already registered its display wins the race.
-        let held = REG.get().is_some_and(|r| {
-            r.entries.lock().unwrap().iter().any(|e| {
-                e.backend == backend
-                    && e.isolation == isolation
-                    && (matches!(e.life, lifecycle::State::Active { .. })
-                        || (e.mode, e.hdr, e.hw_cursor) != key)
+        let held: Vec<Held> = REG
+            .get()
+            .map(|r| {
+                r.entries
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|e| e.backend == backend && e.isolation == isolation)
+                    .map(|e| {
+                        (
+                            matches!(e.life, lifecycle::State::Active { .. }),
+                            (e.hdr, e.hw_cursor),
+                            e.mode,
+                        )
+                    })
+                    .collect()
             })
-        });
-        if held {
+            .unwrap_or_default();
+        let Some(mode) = park_mode_for(&held, shape, mode, resizable) else {
             return Ok(None);
-        }
+        };
         let out = acquire(vd, mode, Arc::new(AtomicBool::new(false)), None, true)?;
         let created = out.reused_gen.is_none();
         // Dropping the output releases the lease, which parks the entry; the compositor
@@ -1537,6 +1725,9 @@ mod linux {
         // Gated on `poolable_now()`: gamescope managed/attach shares the
         // `"gamescope"` name with a bare spawn and must not reuse it.
         if vd.poolable_now() {
+            // A backend that can move a kept display to another mode is offered one whose only
+            // mismatch is the mode; every other key still has to match exactly.
+            let resizable = vd.can_resize_kept();
             // Probe liveness (may shell `pw-dump`) outside the lock:
             // snapshot (generation, node_id, pid), probe, re-find by generation.
             // A concurrent reuse/remove just misses and creates fresh.
@@ -1547,33 +1738,51 @@ mod linux {
                         matches!(
                             e.life,
                             lifecycle::State::Lingering { .. } | lifecycle::State::Pinned
-                        ) && e.backend == backend
-                            && e.mode == mode
-                            && e.isolation == isolation
-                            && e.hw_cursor == vd.hw_cursor()
-                            && e.hdr == vd.hdr()
-                            && epoch_matches(e.backend, e.epoch, cur_epoch)
-                            && (backend != "hyprland"
-                                || matches!(
-                                    crate::hyprland::linger_reuse_decision(
-                                        backend,
-                                        mode,
-                                        vd.last_identity_slot(),
-                                        e.backend,
-                                        e.mode,
-                                        e.identity_slot,
-                                        e.output_name.as_deref(),
-                                    ),
-                                    crate::hyprland::LingerReuse::Recast { .. }
-                                ))
+                        ) && reuse_keys_match(
+                            e,
+                            backend,
+                            mode,
+                            &isolation,
+                            vd.hw_cursor(),
+                            vd.hdr(),
+                            cur_epoch,
+                            resizable,
+                        ) && (backend != "hyprland"
+                            || matches!(
+                                crate::hyprland::linger_reuse_decision(
+                                    backend,
+                                    mode,
+                                    vd.last_identity_slot(),
+                                    e.backend,
+                                    e.mode,
+                                    e.identity_slot,
+                                    e.output_name.as_deref(),
+                                ),
+                                crate::hyprland::LingerReuse::Recast { .. }
+                            ))
                     })
-                    .map(|e| (e.generation, e.node_id, e.pid))
+                    .map(|e| (e.generation, e.node_id, e.pid, e.mode, e.seat.clone()))
             };
-            if let Some((cand_gen, node_id, pid)) = candidate {
+            if let Some((cand_gen, node_id, pid, cand_mode, cand_seat)) = candidate {
                 // OUTSIDE the lock (may block). A dead compositor is dead whatever PipeWire
                 // still lists under its node id.
                 let alive =
                     pid.is_none_or(crate::proc::pid_alive) && vd.kept_display_alive(node_id);
+                // Also outside the lock: this blocks on the compositor. A kept display whose only
+                // mismatch is the mode moves to it instead of being retired, so the Steam a
+                // pre-warm booted inside it survives the change. A refusal falls through to the
+                // create below, which is the retire-and-spawn this always did.
+                let resized =
+                    cand_mode == mode || (alive && vd.resize_kept(cand_seat.as_deref(), mode));
+                if alive && !resized {
+                    tracing::info!(
+                        backend,
+                        node_id,
+                        seat = cand_seat.as_deref().unwrap_or("-"),
+                        "virtual display: the kept compositor did not take the new mode — \
+                         retiring it and spawning"
+                    );
+                }
                 let reuse = {
                     let mut es = r.entries.lock().unwrap();
                     match es.iter().position(|e| {
@@ -1583,7 +1792,7 @@ mod linux {
                                 lifecycle::State::Lingering { .. } | lifecycle::State::Pinned
                             )
                     }) {
-                        Some(idx) if alive => {
+                        Some(idx) if kept_verdict(alive, resized) == Kept::Reuse => {
                             es[idx].life.acquire();
                             let generation = r.generation.fetch_add(1, Ordering::Relaxed);
                             es[idx].generation = generation;
@@ -1591,6 +1800,22 @@ mod linux {
                             // ending by the linger rules. A re-park keeps it parked.
                             let claimed = es[idx].parked && !park;
                             es[idx].parked = park;
+                            // The compositor has confirmed the new mode, so the entry is at it:
+                            // its reuse key, and what the capture is told to expect.
+                            if cand_mode != mode {
+                                es[idx].mode = mode;
+                                es[idx].preferred_mode =
+                                    Some((mode.width, mode.height, mode.refresh_hz));
+                                tracing::info!(
+                                    backend,
+                                    node_id,
+                                    seat = es[idx].seat.as_deref().unwrap_or("-"),
+                                    from = %format!("{}x{}@{}", cand_mode.width, cand_mode.height, cand_mode.refresh_hz),
+                                    to = %format!("{}x{}@{}", mode.width, mode.height, mode.refresh_hz),
+                                    "virtual display: kept compositor resized for this session — \
+                                     nothing inside it restarts"
+                                );
+                            }
                             let preferred_mode = es[idx].preferred_mode;
                             let names = (es[idx].output_name.clone(), es[idx].input_output.clone());
                             let seat = es[idx].seat.clone();
@@ -1618,6 +1843,9 @@ mod linux {
                                 quit.clone(),
                                 true,
                             ))
+                        }
+                        Some(_) if kept_verdict(alive, resized) == Kept::Spawn => {
+                            ReuseOutcome::Miss
                         }
                         Some(idx) => {
                             let mut dead = es.remove(idx);

@@ -31,8 +31,9 @@ static RUNNING: AtomicBool = AtomicBool::new(false);
 
 /// What pre-warming a seat needs, beside that seat's home.
 ///
-/// Mode, colourimetry and cursor mode are the registry's reuse keys: a display parked without
-/// the ones that client asks for is never handed back, and the work is wasted.
+/// Colourimetry and cursor mode are the registry's reuse keys: a display parked without the ones
+/// that client asks for is never handed back, and the work is wasted. The mode is the best guess
+/// at what it will ask for — on a gamescope that can be resized it is only that.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct SeatRecord {
     /// The device's full cert fingerprint, lowercase hex. The file name is only its seat id.
