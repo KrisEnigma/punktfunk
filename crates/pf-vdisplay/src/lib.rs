@@ -792,6 +792,24 @@ mod tests {
 
     /// `mgmt/display.rs` puts this error verbatim on `/display/monitors`;
     /// the wording is a user-facing surface.
+    /// The seat is the only session the sign-in question is ever asked of: without a home of
+    /// its own a launch shares the box's Steam, which has an account.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn only_a_session_with_a_seat_home_can_owe_a_sign_in() {
+        let iso = |steam_home| SessionIsolation {
+            id: "fp".into(),
+            ei_relay: std::path::PathBuf::from("/run/pf-ei"),
+            sink: None,
+            mic_source: None,
+            steam_home,
+        };
+        assert!(!seat_needs_sign_in(&iso(None)));
+        // A home with no Steam under it is the box's, whatever the session carries.
+        let bare = std::env::temp_dir().join("pf-seat-no-steam");
+        assert!(!seat_needs_sign_in(&iso(Some(bare))));
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn xdg_sniff_maps_known_desktops() {
